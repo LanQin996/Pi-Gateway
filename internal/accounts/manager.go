@@ -37,6 +37,8 @@ type Manager struct {
 	mu sync.Mutex
 	// inflight tracks concurrent requests per account id.
 	inflight map[int64]int
+	// retryQueues gives same-account replays priority over ordinary selection.
+	retryQueues map[int64][]*retryTicket
 	// refreshMu protects the per-account refresh mutex map. Refreshes are kept
 	// outside m.mu so account selection and credential rotation cannot deadlock.
 	refreshMu    sync.Mutex
@@ -106,6 +108,7 @@ func New(st *store.Store, oauthClient *oauth.Client, factory *egress.Factory, op
 		factory:          factory,
 		logger:           opts.Logger,
 		inflight:         map[int64]int{},
+		retryQueues:      map[int64][]*retryTicket{},
 		sticky:           session.NewMemory(session.Options{TTL: opts.AffinityTTL, MaxEntries: session.DefaultMaxEntries, MaxBytes: 1 << 20}),
 		affinity:         opts.Affinity,
 		affinityIdentity: opts.AffinityIdentity,
@@ -139,7 +142,9 @@ func (m *Manager) SetRefreshMargin(d time.Duration) {
 // SetMaxPerAccount updates the per-account concurrency ceiling.
 func (m *Manager) SetMaxPerAccount(n int) {
 	if n > 0 {
+		m.mu.Lock()
 		m.maxPerAccount = n
+		m.mu.Unlock()
 	}
 }
 
@@ -201,10 +206,7 @@ func (m *Manager) AcquireExcluding(ctx context.Context, key *store.APIKey, reque
 			if !m.tryReserve(chosen) {
 				continue
 			}
-			var once sync.Once
-			release := func() {
-				once.Do(func() { m.mu.Lock(); m.inflight[chosen.ID]--; m.mu.Unlock() })
-			}
+			release := m.pinnedRelease(chosen.ID)
 			if err := ctx.Err(); err != nil {
 				release()
 				return nil, nil, err
@@ -331,8 +333,7 @@ func (m *Manager) AcquireSpecific(ctx context.Context, accountID int64, requeste
 			}
 		}
 		if m.tryReserve(a) {
-			var once sync.Once
-			release := func() { once.Do(func() { m.mu.Lock(); m.inflight[a.ID]--; m.mu.Unlock() }) }
+			release := m.pinnedRelease(a.ID)
 			if err := ctx.Err(); err != nil {
 				release()
 				return nil, nil, err
@@ -351,6 +352,17 @@ func (m *Manager) AcquireSpecific(ctx context.Context, accountID int64, requeste
 
 // eligible lists the enabled accounts a key may use.
 func (m *Manager) eligible(ctx context.Context, key *store.APIKey, requestedModels ...string) ([]*store.Account, error) {
+	model := ""
+	if len(requestedModels) > 0 {
+		model = strings.TrimSpace(requestedModels[0])
+	}
+	return m.eligibleFor(ctx, key, model, 0, false)
+}
+
+// eligibleFor shares authorization, health and model policy across admission
+// paths. Replays retain temporarily cooling accounts, but never permanent denials.
+// accountID restricts policy evaluation to the original account, not a fallback.
+func (m *Manager) eligibleFor(ctx context.Context, key *store.APIKey, model string, accountID int64, includeWaiting bool) ([]*store.Account, error) {
 	all, err := m.store.EligibleAccountsForKey(ctx, key)
 	if err != nil {
 		return nil, err
@@ -359,21 +371,18 @@ func (m *Manager) eligible(ctx context.Context, key *store.APIKey, requestedMode
 	m.mu.Lock()
 	interval := m.requestInterval.Milliseconds()
 	m.mu.Unlock()
-	model := ""
-	if len(requestedModels) > 0 {
-		model = strings.TrimSpace(requestedModels[0])
-	}
+	model = strings.TrimSpace(model)
 	healthy := make([]*store.Account, 0, len(all))
 	ids := make([]int64, 0, len(all))
 	for _, a := range all {
-		if a == nil || a.CooldownUntil > now {
+		if a == nil || !a.Enabled || (accountID > 0 && a.ID != accountID) {
+			continue
+		}
+		if !includeWaiting && accountReadyAt(a, interval) > now {
 			continue
 		}
 		switch a.Status {
 		case store.AccountStatusExpired, store.AccountStatusInvalid, store.AccountStatusBanned, "quota_exhausted":
-			continue
-		}
-		if interval > 0 && a.LastStartedAt > 0 && now-a.LastStartedAt < interval {
 			continue
 		}
 		healthy = append(healthy, a)
@@ -428,6 +437,7 @@ func (m *Manager) order(accounts []*store.Account, strategy string) []*store.Acc
 	m.mu.Lock()
 	cursor := m.rr
 	weights := m.smartWeights
+	maxPerAccount := m.maxPerAccount
 	now := m.now
 	m.mu.Unlock()
 	if now == nil {
@@ -438,7 +448,7 @@ func (m *Manager) order(accounts []*store.Account, strategy string) []*store.Acc
 		c := Candidate{Account: a, InFlight: m.Inflight(a.ID), LastStartedAt: a.LastStartedAt, QuotaResetAt: quotaResetAt(a), QuotaRemainingRank: quotaRemainingRank(a), FailureRate: float64(a.EWMAFailureRateBP) / 10000, FirstOutputMS: a.EWMAFirstOutputMS, CooldownUntil: a.CooldownUntil}
 		candidates = append(candidates, c)
 	}
-	ordered := selectAt(candidates, Strategy(strategy), weights, nil, &cursor, now(), m.maxPerAccount)
+	ordered := selectAt(candidates, Strategy(strategy), weights, nil, &cursor, now(), maxPerAccount)
 	m.mu.Lock()
 	if strategy == string(StrategyRoundRobin) || strategy == string(StrategySmart) {
 		m.rr = cursor
@@ -486,12 +496,20 @@ func quotaRemainingRank(a *store.Account) float64 {
 
 // tryReserve increments the in-flight counter when under the ceiling.
 func (m *Manager) tryReserve(a *store.Account) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.retryQueues[a.ID]) > 0 {
+		return false
+	}
+	return m.reserveLocked(a)
+}
+
+// reserveLocked reads both the runtime limit and counters under m.mu.
+func (m *Manager) reserveLocked(a *store.Account) bool {
 	limit := a.Concurrency
 	if limit <= 0 {
 		limit = m.maxPerAccount
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.inflight[a.ID] >= limit {
 		return false
 	}
@@ -746,6 +764,9 @@ func (m *Manager) CreateFromToken(ctx context.Context, name string, tok *oauth.T
 		return existing, nil
 	}
 
+	m.mu.Lock()
+	maxPerAccount := m.maxPerAccount
+	m.mu.Unlock()
 	a := &store.Account{
 		Name:          name,
 		Email:         tok.Email,
@@ -758,7 +779,7 @@ func (m *Manager) CreateFromToken(ctx context.Context, name string, tok *oauth.T
 		OAuthClientID: tok.ClientID,
 		Enabled:       true,
 		Weight:        1,
-		Concurrency:   m.maxPerAccount,
+		Concurrency:   maxPerAccount,
 		ProxyURL:      proxyURL,
 		Status:        store.AccountStatusReady,
 	}

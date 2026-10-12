@@ -76,6 +76,7 @@ func (m *Manager) pinnedRelease(accountID int64) func() {
 		once.Do(func() {
 			m.mu.Lock()
 			m.inflight[accountID]--
+			m.wakeRetryLocked(accountID)
 			m.mu.Unlock()
 		})
 	}

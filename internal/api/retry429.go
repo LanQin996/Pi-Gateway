@@ -56,17 +56,31 @@ func retryAfterDuration(h http.Header, now time.Time) time.Duration {
 	return delay
 }
 
-// Retry only before any ordinary upstream event is delivered. Continuations
-// belong to the original account and socket and cannot be moved safely.
+const sameAccount429WaitTimeout = 30 * time.Second
+
 func (s *Server) streamWith429Retry(ctx context.Context, p *prepared, req *upstream.Request, onEvent func(*upstream.Event) error) (*upstream.StreamResult, error) {
+	return s.streamWith429RetryWindow(ctx, p, req, onEvent, sameAccount429WaitTimeout)
+}
+
+// One deadline is shared by every cooldown/concurrency wait for this request.
+// Acquiring a slot does not reset the budget or limit successful generation.
+func (s *Server) streamWith429RetryWindow(ctx context.Context, p *prepared, req *upstream.Request, onEvent func(*upstream.Event) error, waitTimeout time.Duration) (*upstream.StreamResult, error) {
 	attempts := max(1, s.settings.Get().MaxAttempts)
 	excluded := map[int64]bool{}
+	var waitCtx context.Context
+	var cancelWait context.CancelFunc
+	defer func() {
+		if cancelWait != nil {
+			cancelWait()
+		}
+	}()
 	for attempt := 1; ; attempt++ {
-		maySwitch := attempt < attempts && p.Continuation == nil && p.PreviousResponseID == "" && s.switchOn429(ctx, p)
+		mayRetry := attempt < attempts && p.Continuation == nil && p.PreviousResponseID == ""
+		maySwitch := mayRetry && s.switchOn429(ctx, p)
 		delivered := false
 		var pending *upstream.Event
 		result, err := s.upstream.Stream(ctx, req, func(event *upstream.Event) error {
-			if maySwitch && !delivered {
+			if mayRetry && !delivered {
 				if failure := upstream.FailureFromEvent(event); failure != nil && errorFromUpstream(failure).Status == 429 {
 					pending = event
 					return nil
@@ -82,6 +96,9 @@ func (s *Server) streamWith429Retry(ctx context.Context, p *prepared, req *upstr
 			status = errorFromUpstream(err).Status
 			message = err.Error()
 		}
+		if status == 429 && mayRetry && !maySwitch && !delivered && waitCtx == nil {
+			waitCtx, cancelWait = context.WithTimeout(ctx, waitTimeout)
+		}
 		recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		healthStatus := status
 		var failure *upstream.FailureError
@@ -93,7 +110,10 @@ func (s *Server) streamWith429Retry(ctx context.Context, p *prepared, req *upstr
 		if recordErr != nil {
 			s.logger.Warn("recording account attempt failed", "account", p.Account.ID, "error", recordErr)
 		}
-		if err == nil || status != 429 || !maySwitch || delivered || ctx.Err() != nil {
+		if ctx.Err() != nil {
+			return result, ctx.Err()
+		}
+		if err == nil || status != 429 || !mayRetry || delivered || (recordErr != nil && !maySwitch) {
 			if pending != nil {
 				if deliveryErr := onEvent(pending); deliveryErr != nil {
 					return result, deliveryErr
@@ -101,20 +121,34 @@ func (s *Server) streamWith429Retry(ctx context.Context, p *prepared, req *upstr
 			}
 			return result, err
 		}
-		excluded[p.Account.ID] = true
 		if p.AccountRelease != nil {
 			p.AccountRelease()
+			p.AccountRelease = nil
 		}
-		next, release, acquireErr := s.accounts.AcquireExcluding(ctx, p.Key, p.Built.Model, "", excluded)
+		var next *store.Account
+		var release func()
+		var acquireErr error
+		if maySwitch {
+			excluded[p.Account.ID] = true
+			next, release, acquireErr = s.accounts.AcquireExcluding(ctx, p.Key, p.Built.Model, "", excluded)
+		} else {
+			// Release first, then join the original account's FIFO queue. The
+			// manager rechecks current cooldown, concurrency and authorization.
+			next, release, acquireErr = s.accounts.AcquireRetry(waitCtx, p.Key, p.Account.ID, p.Built.Model)
+		}
 		if acquireErr != nil {
+			if ctx.Err() != nil {
+				return result, ctx.Err()
+			}
 			if pending != nil {
 				if deliveryErr := onEvent(pending); deliveryErr != nil {
 					return result, deliveryErr
 				}
 			}
+			// A spent wait budget preserves the upstream 429 and retry headers.
 			return result, err
 		}
-		// Preserve a separate usage entry for the failed attempt before moving on.
+		// Preserve a separate usage entry for the failed attempt before replaying.
 		if p.Usage != nil {
 			p.Usage.finalize(context.WithoutCancel(ctx), store.OutcomeError, message)
 		}
@@ -129,6 +163,7 @@ func (s *Server) streamWith429Retry(ctx context.Context, p *prepared, req *upstr
 		if p.Compact {
 			p.Transport = "sse"
 		}
+		previousHeaders := p.ResponseHeaders
 		p.ResponseHeaders = nil
 		p.RuleContext["account_id"], p.RuleContext["upstream_protocol"] = next.ID, p.Transport
 		if p.Recorder != nil {
@@ -140,9 +175,28 @@ func (s *Server) streamWith429Retry(ctx context.Context, p *prepared, req *upstr
 			p.Usage.requestKind = "compaction"
 		}
 		s.startUsage(ctx, p.Usage)
-		req, err = s.newUpstreamRequest(ctx, p)
-		if err != nil {
-			return nil, err
+		buildCtx := ctx
+		if !maySwitch {
+			buildCtx = waitCtx
+		}
+		var buildErr error
+		req, buildErr = s.newUpstreamRequest(buildCtx, p)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if !maySwitch && waitCtx.Err() != nil {
+			// Token/rule preparation also must not send a replay after the
+			// shared deadline, or discard the last upstream retry metadata.
+			p.ResponseHeaders = previousHeaders
+			if pending != nil {
+				if deliveryErr := onEvent(pending); deliveryErr != nil {
+					return result, deliveryErr
+				}
+			}
+			return result, err
+		}
+		if buildErr != nil {
+			return nil, buildErr
 		}
 	}
 }
