@@ -13,7 +13,7 @@ import (
 )
 
 func TestV2UpgradesPersistedV1AndDoesNotReseed(t *testing.T) {
-	st := runtimeStore(t, filepath.Join(t.TempDir(), "v1.db"))
+	st := runtimeStore(t, filepath.Join(runtimeTempDir(t), "v1.db"))
 	raw := json.RawMessage(`{"schema_version":1,"name":"my old rule","enabled":false,"priority":37,"phase":"request","when":{"op":"always"},"actions":[{"id":"legacy","type":"drop_environment_context","params":{}}],"on_error":"abort"}`)
 	before, err := st.InitializeRules(t.Context(), func(context.Context, []*store.MiddlewareRow) ([]*store.RuleRow, error) {
 		return []*store.RuleRow{{ID: "old-rule", Rule: raw, Source: "user"}}, nil
@@ -63,7 +63,7 @@ func TestV2UpgradesPersistedV1AndDoesNotReseed(t *testing.T) {
 }
 
 func TestProtocolDefaultsUpgradeEarlierV2Installation(t *testing.T) {
-	st := runtimeStore(t, filepath.Join(t.TempDir(), "earlier-v2.db"))
+	st := runtimeStore(t, filepath.Join(runtimeTempDir(t), "earlier-v2.db"))
 	profile := rules.DefaultProfile()
 	edited := profile[0]
 	edited.Name, edited.Enabled, edited.Priority = "my protocol", false, 45
@@ -123,7 +123,7 @@ func TestProtocolDefaultsUpgradeEarlierV2Installation(t *testing.T) {
 }
 
 func TestV2RestoresEarlierInstallationMarkerBeforeRuleDeletion(t *testing.T) {
-	st := runtimeStore(t, filepath.Join(t.TempDir(), "earlier-marker.db"))
+	st := runtimeStore(t, filepath.Join(runtimeTempDir(t), "earlier-marker.db"))
 	if err := New(st).Ensure(t.Context()); err != nil {
 		t.Fatal(err)
 	}

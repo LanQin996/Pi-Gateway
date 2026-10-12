@@ -85,7 +85,7 @@ func oldRulesStore(t *testing.T, path string) *store.Store {
 func TestOldInstallationAddsImageDefaultOnce(t *testing.T) {
 	for _, entry := range []string{"ensure", "load"} {
 		t.Run(entry, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "old.db")
+			path := filepath.Join(runtimeTempDir(t), "old.db")
 			first := oldRulesStore(t, path)
 			second := runtimeStore(t, path)
 			before, err := first.LoadRuleSet(t.Context())
@@ -149,7 +149,7 @@ func TestOldInstallationAddsImageDefaultOnce(t *testing.T) {
 }
 
 func TestDefaultUpgradePreservesEditedDisabledRule(t *testing.T) {
-	st := oldRulesStore(t, filepath.Join(t.TempDir(), "edited.db"))
+	st := oldRulesStore(t, filepath.Join(runtimeTempDir(t), "edited.db"))
 	definition := defaultImageExclusion()
 	definition.Enabled, definition.Name, definition.Priority = false, "my custom filter", 42
 	definition.Actions[0].Params = map[string]any{"types": []any{"file_search"}}
@@ -173,7 +173,7 @@ func TestDefaultUpgradePreservesEditedDisabledRule(t *testing.T) {
 }
 
 func TestDefaultUpgradeValidationRollbackAllowsRetry(t *testing.T) {
-	st := oldRulesStore(t, filepath.Join(t.TempDir(), "rollback.db"))
+	st := oldRulesStore(t, filepath.Join(runtimeTempDir(t), "rollback.db"))
 	before, _ := st.RuleSetVersion(t.Context())
 	marker := "internal_default_image_exclusion_v1"
 	raw, err := EditableJSON(defaultImageExclusion())

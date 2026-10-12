@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -13,6 +14,24 @@ import (
 	"pi-gateway/internal/rules"
 	"pi-gateway/internal/store"
 )
+
+// Register directory cleanup before opening any stores so all handles close
+// first, including tests that open the same database more than once.
+func runtimeTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Cleanup(func() {
+		var err error
+		for attempt := 0; attempt < 50; attempt++ {
+			if err = os.RemoveAll(dir); err == nil {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Errorf("remove runtime store directory: %v", err)
+	})
+	return dir
+}
 
 func runtimeStore(t *testing.T, path string) *store.Store {
 	t.Helper()
@@ -50,7 +69,7 @@ func modelFromEngine(t *testing.T, engine *rules.Engine) string {
 }
 
 func TestRuntimePublicationInvalidationAndPinnedSnapshots(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "runtime.db")
+	path := filepath.Join(runtimeTempDir(t), "runtime.db")
 	first, second := runtimeStore(t, path), runtimeStore(t, path)
 	services := []*Service{New(first), New(second)}
 	ctx := t.Context()
@@ -118,7 +137,7 @@ func TestRuntimePublicationInvalidationAndPinnedSnapshots(t *testing.T) {
 }
 
 func TestRuntimeLoadFailsClosedAfterStoreFailure(t *testing.T) {
-	st := runtimeStore(t, filepath.Join(t.TempDir(), "closed.db"))
+	st := runtimeStore(t, filepath.Join(runtimeTempDir(t), "closed.db"))
 	service := New(st)
 	if _, _, err := service.Load(t.Context()); err != nil {
 		t.Fatal(err)
@@ -132,7 +151,7 @@ func TestRuntimeLoadFailsClosedAfterStoreFailure(t *testing.T) {
 }
 
 func TestRuntimeMigrationRepairConcurrentEnsureAndDeletedRules(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "migration.db")
+	path := filepath.Join(runtimeTempDir(t), "migration.db")
 	first, second := runtimeStore(t, path), runtimeStore(t, path)
 	ctx := t.Context()
 	broken := &store.MiddlewareRow{Name: "block_prompt", Enabled: true, Config: `{"pattern":"["}`}

@@ -3,6 +3,7 @@ package accounts
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -14,10 +15,23 @@ import (
 // database preserves its schema across replacement, unlike a :memory: store.
 func newRetryTestStore(t *testing.T) *store.Store {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "retry.db"))
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "retry.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Run after Close (cleanups are LIFO). SQLite WAL handles can take a
+	// moment to disappear on Windows after cancellation replaces a connection.
+	t.Cleanup(func() {
+		var err error
+		for attempt := 0; attempt < 50; attempt++ {
+			if err = os.RemoveAll(dir); err == nil {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Errorf("remove retry store directory: %v", err)
+	})
 	t.Cleanup(func() {
 		if err := st.Close(); err != nil {
 			t.Errorf("close retry store: %v", err)
