@@ -106,11 +106,6 @@ func TestLookupTierAndLongContext(t *testing.T) {
 		model, tier string
 		short, long [4]float64
 	}{
-		{"gpt-6.1-sol", "standard", [4]float64{2, 0.1, 2.5, 10}, [4]float64{4, 0.2, 5, 15}},
-		{"gpt-6.1-sol", "flex", [4]float64{1, 0.05, 1.25, 5}, [4]float64{2, 0.1, 2.5, 7.5}},
-		{"gpt-6.1-sol", "fast", [4]float64{4, 0.2, 5, 20}, [4]float64{8, 0.4, 10, 30}},
-		{"gpt-6.1-sol", "priority", [4]float64{4, 0.2, 5, 20}, [4]float64{8, 0.4, 10, 30}},
-		{"gpt-6.1-sol", "default", [4]float64{2, 0.1, 2.5, 10}, [4]float64{4, 0.2, 5, 15}},
 		{"gpt-5.4", "flex", [4]float64{1.25, 0.13, 0, 7.5}, [4]float64{2.5, 0.25, 0, 11.25}},
 	}
 	for _, tc := range cases {
@@ -125,6 +120,37 @@ func TestLookupTierAndLongContext(t *testing.T) {
 			}
 			if got := [4]float64{long.Input, long.CachedInput, long.CacheWrite, long.Output}; got != tc.long {
 				t.Fatalf("long = %v, want %v", got, tc.long)
+			}
+		})
+	}
+}
+
+func TestSol61NoLongContextSurcharge(t *testing.T) {
+	for _, tc := range []struct {
+		tier   string
+		factor int64
+	}{
+		{"", 2}, {"standard", 2}, {"default", 2}, {"flex", 1}, {"fast", 4}, {"priority", 4},
+	} {
+		t.Run(tc.tier, func(t *testing.T) {
+			for _, multiplier := range []float64{1, 2} {
+				overrides := map[string]float64{"gpt-6.1-sol": multiplier}
+				r, _, ok := Lookup(" /OPENAI/GPT-6.1-SOL ", tc.tier, overrides)
+				if !ok || r.LongContextThreshold != 0 || r.LongContext != nil || r.UnpricedLongContext {
+					t.Fatalf("long context pricing still enabled: %+v", r)
+				}
+				for _, input := range []int64{271999, 272000, 272001, 1000000} {
+					// uncached + cached/20 + write*1.25 + output*5, scaled by tier and override.
+					want := (input - 150000 + 5000 + 62500 + 5000) * tc.factor * int64(multiplier)
+					requireCost(t, r, input, 100000, 50000, 1000, want)
+					d := Explain("gpt-6.1-sol", tc.tier, overrides, input, 100000, 50000, 1000)
+					if d.LongContext || d.ContextThreshold != 0 || d.TotalCostMicros == nil || *d.TotalCostMicros != want || d.UnavailableReason != "" {
+						t.Fatalf("incorrect bill: %+v, want %d", d, want)
+					}
+					if *d.ContextMultipliers != (Rates{1, 1, 1, 1}) {
+						t.Fatalf("context surcharge in bill: %+v", d.ContextMultipliers)
+					}
+				}
 			}
 		})
 	}

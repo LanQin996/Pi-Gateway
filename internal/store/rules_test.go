@@ -180,7 +180,7 @@ func exerciseRuleSnapshotMarker(t *testing.T, first, second *Store) {
 }
 
 func TestRulesSQLitePublication(t *testing.T) {
-	path := t.TempDir() + "/rules.db"
+	path := storeTestPath(t)
 	first, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
@@ -279,7 +279,7 @@ func TestRulesWhitespaceAndMissingPreconditions(t *testing.T) {
 }
 
 func TestRulesAdditiveMigrationKeepsLegacyData(t *testing.T) {
-	path := t.TempDir() + "/old.db"
+	path := storeTestPath(t)
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)

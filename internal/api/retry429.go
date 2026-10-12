@@ -68,12 +68,6 @@ func (s *Server) streamWith429RetryWindow(ctx context.Context, p *prepared, req 
 	attempts := max(1, s.settings.Get().MaxAttempts)
 	excluded := map[int64]bool{}
 	var waitCtx context.Context
-	var cancelWait context.CancelFunc
-	defer func() {
-		if cancelWait != nil {
-			cancelWait()
-		}
-	}()
 	for attempt := 1; ; attempt++ {
 		mayRetry := attempt < attempts && p.Continuation == nil && p.PreviousResponseID == ""
 		maySwitch := mayRetry && s.switchOn429(ctx, p)
@@ -97,7 +91,9 @@ func (s *Server) streamWith429RetryWindow(ctx context.Context, p *prepared, req 
 			message = err.Error()
 		}
 		if status == 429 && mayRetry && !maySwitch && !delivered && waitCtx == nil {
+			var cancelWait context.CancelFunc
 			waitCtx, cancelWait = context.WithTimeout(ctx, waitTimeout)
+			defer cancelWait()
 		}
 		recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		healthStatus := status

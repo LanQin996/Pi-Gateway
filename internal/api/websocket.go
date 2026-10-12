@@ -66,6 +66,8 @@ func (s *Server) handleResponsesWS(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), s.wsMaxAge)
 	wsID := uuid.NewString()
 	ctx = context.WithValue(ctx, downstreamWSContextKey{}, wsID)
+	control := &upstream.ResponseControl{}
+	ctx = upstream.WithResponseControl(ctx, control)
 	r = r.WithContext(ctx)
 	if !s.lifecycle.track(wsID, cancel) {
 		cancel()
@@ -84,7 +86,7 @@ func (s *Server) handleResponsesWS(w http.ResponseWriter, r *http.Request) {
 	writer := newWSFrameWriter(conn)
 	go func() {
 		defer cancel()
-		_ = readWSMessages(ctx, conn, writer, messages)
+		_ = readWSMessages(ctx, conn, writer, messages, control)
 	}()
 	go func() {
 		<-ctx.Done()
@@ -132,7 +134,7 @@ type wsReadEvent struct {
 	payload     []byte
 }
 
-func readWSMessages(ctx context.Context, conn *websocket.Conn, writer *wsFrameWriter, messages chan<- wsReadEvent) error {
+func readWSMessages(ctx context.Context, conn *websocket.Conn, writer *wsFrameWriter, messages chan<- wsReadEvent, controls ...*upstream.ResponseControl) error {
 	defer close(messages)
 	for {
 		messageType, payload, err := conn.ReadMessage()
@@ -143,6 +145,28 @@ func readWSMessages(ctx context.Context, conn *websocket.Conn, writer *wsFrameWr
 			return ctx.Err()
 		}
 		if messageType != websocket.TextMessage {
+			continue
+		}
+		var frame struct {
+			Type       string          `json:"type"`
+			ResponseID json.RawMessage `json:"response_id"`
+			Mode       json.RawMessage `json:"mode"`
+			EventID    json.RawMessage `json:"event_id"`
+		}
+		if json.Unmarshal(payload, &frame) == nil && frame.Type == "response.interrupt" && len(controls) > 0 {
+			var responseID, mode, eventID string
+			_ = json.Unmarshal(frame.ResponseID, &responseID)
+			_ = json.Unmarshal(frame.Mode, &mode)
+			_ = json.Unmarshal(frame.EventID, &eventID)
+			if err := controls[0].Interrupt(ctx, responseID, mode); err != nil {
+				rejection := errorFramePayload(&apiError{Status: http.StatusBadRequest, Type: "invalid_request_error", Message: err.Error()})
+				if eventID != "" {
+					rejection["event_id"] = eventID
+				}
+				if err := writer.writeJSON(ctx, rejection); err != nil {
+					return err
+				}
+			}
 			continue
 		}
 		// A second request may wait, but further requests must receive an explicit

@@ -249,18 +249,24 @@ curl -N http://127.0.0.1:8317/v1/responses \
 
 主要端点：
 
-| 端点                   | 用途                                        |
-|----------------------|-------------------------------------------|
-| `POST /v1/responses` | HTTP Responses 请求，支持 SSE 和聚合 JSON         |
-| `GET /v1/responses`  | WebSocket Upgrade，使用 `response.create` 消息 |
-| `GET /v1/models`     | 当前 Key 可访问的模型目录                           |
-| `GET /healthz`       | 健康检查                                      |
+| 端点                   | 用途                                                                 |
+|----------------------|--------------------------------------------------------------------|
+| `POST /v1/responses` | HTTP Responses 请求，支持 SSE 和聚合 JSON                                  |
+| `GET /v1/responses`  | WebSocket Upgrade，支持 `response.create` 和活动响应的 `response.interrupt` |
+| `GET /v1/models`     | 当前 Key 可访问的模型目录                                                    |
+| `GET /healthz`       | 健康检查                                                               |
 
 网关还提供 `/backend-api/codex/responses`、`/codex/responses` 的 HTTP / WebSocket 兼容别名，以及 HTTP `POST /responses`
 。根据客户端实际追加的路径选择 Base URL，避免重复拼接 `/v1` 或 `/responses`。这些别名**不会改变上游凭据类型或生成端点**。
 
 上游协议由账号设置优先决定，其次使用 Key 或全局配置；下游使用 WebSocket 不代表上游也必须使用 WebSocket。`passthrough`
 模式才会按客户端协议选择上游。
+
+Codex 的 `response.interrupt` 控制帧会即时发送到活动响应占用的原上游 WebSocket，
+要求 `response_id` 匹配且 `mode` 为 `discard_partial_items`；重复中断只发送一次。
+上游确认 `response.incomplete` 且原因为 `interrupted` 后可继续使用原连接续接。
+实际上游为 HTTP/SSE 时，中断控制帧返回 400 且不影响当前生成；关闭客户端连接可取消请求。
+下游 SSE 原样转发上游中断终态，不追加流截断错误。
 
 ## 配置
 

@@ -24,10 +24,10 @@ var pricingRules = map[string]modelPricing{
 		standard: tokenRates{100_000, 500_000, 10_000}, flex: tokenRates{50_000, 250_000, 5_000}, fast: tokenRates{200_000, 1_000_000, 20_000},
 		longStandard: tokenRates{200_000, 750_000, 20_000}, longFlex: tokenRates{100_000, 375_000, 10_000}, longFast: tokenRates{400_000, 1_500_000, 40_000}, cacheWritePercent: 125,
 	},
-	// 来源 :247-256。
+	// 基础价格来源 :247-256；GPT-6.1 Sol 不启用长上下文加价。
 	"gpt-6.1-sol": {
 		standard: tokenRates{20_000, 100_000, 1_000}, flex: tokenRates{10_000, 50_000, 500}, fast: tokenRates{40_000, 200_000, 2_000},
-		longStandard: tokenRates{40_000, 150_000, 2_000}, longFlex: tokenRates{20_000, 75_000, 1_000}, longFast: tokenRates{80_000, 300_000, 4_000}, cacheWritePercent: 125,
+		cacheWritePercent: 125,
 	},
 	// 来源 :258-267。
 	"gpt-6-sol": {

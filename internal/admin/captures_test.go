@@ -5,14 +5,13 @@ import (
 	"encoding/json"
 	"io"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
 
 	"pi-gateway/internal/store"
 )
 
 func TestHandleExportCapturesLimit(t *testing.T) {
-	db, err := store.Open(filepath.Join(t.TempDir(), "captures.db"))
+	db, err := store.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}

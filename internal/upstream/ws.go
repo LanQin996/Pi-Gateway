@@ -55,6 +55,10 @@ func buildWSFrame(body []byte) ([]byte, error) {
 // streamWS makes one attempt. After any response.create write, even a first-frame
 // rejection cannot trigger a transparent retry: execution may already have begun.
 func (c *Client) streamWS(ctx context.Context, req *Request, onEvent func(*Event) error, usePool bool) (*StreamResult, error) {
+	control, _ := ctx.Value(responseControlKey{}).(*ResponseControl)
+	if control != nil {
+		defer func() { control.clear(); control.flush(req.Sink) }()
+	}
 	frame, err := buildWSFrame(req.Body)
 	if err != nil {
 		return nil, err
@@ -144,6 +148,9 @@ func (c *Client) streamWS(ctx context.Context, req *Request, onEvent func(*Event
 		}
 	}()
 	defer func() {
+		if control != nil {
+			control.clear()
+		}
 		close(watchDone)
 		<-watchExited // Never let a previous request's watcher close a reused socket.
 		if ctx.Err() != nil {
@@ -183,6 +190,9 @@ func (c *Client) streamWS(ctx context.Context, req *Request, onEvent func(*Event
 		_ = conn.socket.SetReadDeadline(time.Now().Add(idle))
 
 		messageType, payload, err := conn.socket.ReadMessage()
+		if control != nil {
+			control.flush(req.Sink)
+		}
 		if err != nil {
 			conn.markDead()
 			if errors.Is(err, websocket.ErrReadLimit) {
@@ -240,6 +250,14 @@ func (c *Client) streamWS(ctx context.Context, req *Request, onEvent func(*Event
 		deliveryEvent := failureEventForDelivery(event, failure)
 
 		responseID := ExtractResponseID(decoded)
+		if control != nil {
+			if IsTerminal(eventType) || failure != nil {
+				control.clear()
+				control.flush(req.Sink)
+			} else if responseID != "" {
+				control.bind(conn, responseID)
+			}
+		}
 		if req.Sink != nil {
 			kind := "ws_frame"
 			if messageType == websocket.BinaryMessage {
@@ -253,7 +271,7 @@ func (c *Client) streamWS(ctx context.Context, req *Request, onEvent func(*Event
 				req.Sink.OnUsage(ExtractUsage(decoded))
 			}
 		}
-		ready := failure == nil && successfulTerminal(event) && responseID != "" && ctx.Err() == nil && !conn.isDead()
+		ready := failure == nil && (successfulTerminal(event) || interruptedTerminal(event)) && responseID != "" && ctx.Err() == nil && !conn.isDead()
 		var record *session.Record
 		if ready {
 			record = c.completedRecord(req, conn, key, responseID)

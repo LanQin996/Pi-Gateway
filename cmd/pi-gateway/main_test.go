@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -84,7 +83,7 @@ func TestWithRequestLoggingWebSocketUpgradeRoundTrip(t *testing.T) {
 }
 
 func TestStartupHintUsesModernChatGPTBasePath(t *testing.T) {
-	st, err := store.Open(filepath.Join(t.TempDir(), "startup.db"))
+	st, err := store.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}

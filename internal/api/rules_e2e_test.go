@@ -25,6 +25,10 @@ import (
 
 const unifiedRulesTimeout = 5 * time.Second
 
+// Cold rule compilation and SQLite setup under -race need their own budget;
+// stream I/O keeps the short timeout above.
+const unifiedRulesSetupTimeout = 30 * time.Second
+
 // Both fake transports deliver exactly the same protocol identities and usage.
 // Deliberately retain noncanonical spacing to catch needless Raw re-encoding.
 var unifiedRulesEvents = []string{
@@ -64,7 +68,7 @@ func unifiedEventRule(id, kind string, actions ...rules.Action) rules.Rule {
 // an injected Engine. Subsequent calls update existing IDs with their revisions.
 func publishUnifiedRules(t *testing.T, h *testHarness, definitions ...rules.Rule) int64 {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), unifiedRulesTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), unifiedRulesSetupTimeout)
 	defer cancel()
 	if err := rulesruntime.New(h.store).Ensure(ctx); err != nil {
 		t.Fatalf("initialize rules: %v", err)
@@ -928,7 +932,7 @@ func TestUnifiedRulesCachedAndAutoUpstreamProtocols(t *testing.T) {
 		for _, captureEnabled := range []bool{true, false} {
 			t.Run(fmt.Sprintf("%s/capture=%t", tc.transport, captureEnabled), func(t *testing.T) {
 				h, _, calls := unifiedHarness(t, tc.transport, unifiedRulesEvents)
-				ctx, cancel := context.WithTimeout(context.Background(), unifiedRulesTimeout)
+				ctx, cancel := context.WithTimeout(context.Background(), unifiedRulesSetupTimeout)
 				defer cancel()
 				settings := h.dataPlane.settings.Get()
 				settings.CaptureEnabled = captureEnabled
@@ -993,7 +997,7 @@ func TestUnifiedRulesBlockedCaptureDisabledOrNotPersisted(t *testing.T) {
 		for _, downstream := range []string{"sse", "ws"} {
 			t.Run(mode+"/"+downstream, func(t *testing.T) {
 				h, _, calls := unifiedHarness(t, "sse", unifiedRulesEvents)
-				ctx, cancel := context.WithTimeout(context.Background(), unifiedRulesTimeout)
+				ctx, cancel := context.WithTimeout(context.Background(), unifiedRulesSetupTimeout)
 				defer cancel()
 				if mode == "disabled" {
 					settings := h.dataPlane.settings.Get()

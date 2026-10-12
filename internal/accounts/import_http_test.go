@@ -41,7 +41,17 @@ func importHarness(t *testing.T, transport http.RoundTripper) (*store.Store, fun
 	// still present, so drop them after the store closes (cleanups run LIFO).
 	t.Cleanup(func() {
 		for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
-			_ = os.Remove(dbPath + suffix)
+			for attempt := 0; attempt < 50; attempt++ {
+				err := os.Remove(dbPath + suffix)
+				if err == nil || os.IsNotExist(err) {
+					break
+				}
+				if attempt == 49 {
+					t.Errorf("remove SQLite fixture: %v", err)
+					break
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
 		}
 	})
 	t.Cleanup(func() { _ = st.Close() })

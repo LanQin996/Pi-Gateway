@@ -2,7 +2,10 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="$PROJECT_DIR$" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/_research/CLIProxyAPI" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/_research/codex-proxy-rs" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/_research/codex2api" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/_research/pi" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/_research/sub2api" vcs="Git" />
   </component>
 </project>

@@ -2,7 +2,7 @@ package pricing
 
 // Version is stored with the settled bill, so future price changes do not
 // rewrite historical explanations.
-const Version = "model-pricing-v2"
+const Version = "model-pricing-v3"
 
 type Rates struct {
 	Input       float64 `json:"input"`
