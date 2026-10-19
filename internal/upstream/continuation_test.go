@@ -2,7 +2,10 @@ package upstream
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
+
+	"pi-gateway/internal/codexbridge"
 )
 
 func mustJSON(t *testing.T, v any) []byte {
@@ -152,6 +155,85 @@ func TestResponseItemsFromTerminal(t *testing.T) {
 		item, _ := raw.(map[string]any)
 		if item["type"] == "function_call_output" || item["type"] == "custom_tool_call_output" {
 			t.Errorf("tool output item was not excluded: %v", item)
+		}
+	}
+}
+
+func TestBuildDeltaBodyCodexBridgeProjection(t *testing.T) {
+	profile := codexbridge.Profile{Version: 1, Tools: codexbridge.ToolSendMessage}
+	for _, rawDotted := range []bool{false, true} {
+		for _, replayDotted := range []bool{false, true} {
+			for _, marker := range []string{"absent", "null", "empty"} {
+				t.Run(fmt.Sprintf("raw_dotted=%v/replay_dotted=%v/marker=%s", rawDotted, replayDotted, marker), func(t *testing.T) {
+					first := mustJSON(t, map[string]any{"model": "m", "input": []any{"first"}})
+					exceptInput, input, _ := bodyExceptInput(first)
+					raw := map[string]any{"type": "function_call", "id": "fc1", "call_id": "c1", "namespace": codexbridge.Alias, "name": "send_message", "arguments": `{"id":"child","message":"完整任务"}`}
+					if rawDotted {
+						delete(raw, "namespace")
+						raw["name"] = codexbridge.Alias + ".send_message"
+					}
+					if marker == "null" {
+						raw["encrypted_function_args"] = nil
+					}
+					if marker == "empty" {
+						raw["encrypted_function_args"] = []any{}
+					}
+					// Replay exactly the native identity/marker delivered to a Codex client.
+					replay := mustDecode(t, mustJSON(t, raw))
+					replay["name"], replay["namespace"] = "send_message", "collaboration"
+					if replayDotted {
+						delete(replay, "namespace")
+						replay["name"] = "collaboration.send_message"
+					}
+					replay["encrypted_function_args"] = []any{}
+					cont := &wsContinuation{bodyExceptInput: exceptInput, lastInput: input, lastResponseItems: []any{raw}, lastResponseID: "r1", codexBridge: profile}
+					before := string(mustJSON(t, raw))
+					body := mustJSON(t, map[string]any{"model": "m", "input": []any{"first", replay, "new"}})
+					delta, ok := buildDeltaBody(body, cont, profile)
+					if !ok {
+						t.Fatal("client replay did not match raw upstream baseline")
+					}
+					if got := mustDecode(t, delta); got["previous_response_id"] != "r1" || !jsonEqual(got["input"], []any{"new"}) {
+						t.Fatalf("bad delta: %s", delta)
+					}
+					if string(mustJSON(t, raw)) != before {
+						t.Fatal("comparison mutated raw decoded baseline")
+					}
+					// Retained serialized baselines must use the identical projection.
+					cont.size()
+					if _, ok := buildDeltaBody(body, cont, profile); !ok {
+						t.Fatal("serialized baseline did not match")
+					}
+					if _, ok := buildDeltaBody(body, cont); ok {
+						t.Fatal("profile omission accepted a bridged baseline")
+					}
+					for _, field := range []string{"call_id", "arguments", "encrypted_function_args"} {
+						changed := mustDecode(t, mustJSON(t, replay))
+						changed[field] = "different"
+						bad := mustJSON(t, map[string]any{"model": "m", "input": []any{"first", changed, "new"}})
+						if _, ok := buildDeltaBody(bad, cont, profile); ok {
+							t.Fatalf("changed %s matched", field)
+						}
+					}
+					plain := *cont
+					plain.codexBridge = codexbridge.Profile{}
+					if _, ok := buildDeltaBody(body, &plain); ok {
+						t.Fatal("ordinary request used bridge equivalence")
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestBuildDeltaBodyRejectsCodexBridgeProfileChanges(t *testing.T) {
+	profile := codexbridge.Profile{Version: 1, Tools: codexbridge.ToolSendMessage}
+	body := []byte(`{"model":"m","input":["first","new"]}`)
+	exceptInput, _, _ := bodyExceptInput(body)
+	cont := &wsContinuation{bodyExceptInput: exceptInput, lastInput: []any{"first"}, lastResponseID: "r1", codexBridge: profile}
+	for _, changed := range []codexbridge.Profile{{}, {Version: 1, Tools: codexbridge.ToolSpawnAgent}, {Version: 99}, {Tools: 1}} {
+		if _, ok := buildDeltaBody(body, cont, changed); ok {
+			t.Fatalf("accepted changed profile %#v", changed)
 		}
 	}
 }

@@ -115,6 +115,7 @@ func (s *Server) newUpstreamRequest(ctx context.Context, p *prepared) (*upstream
 		PoolSessionID:      p.PoolSessionID,
 		ClientKeyID:        p.Key.ID,
 		Continuation:       p.Continuation,
+		CodexBridge:        p.CodexBridge,
 		AccountID:          p.Account.ID,
 		Transport:          p.Transport,
 		Sink:               p.sink(),

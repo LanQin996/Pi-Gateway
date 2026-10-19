@@ -94,6 +94,9 @@ type UpstreamConfig struct {
 	//   auto              - prefer websocket-cached, fall back to SSE (Pi's default behaviour)
 	Transport string `yaml:"transport"`
 
+	// CodexMultiAgentCompat adapts recognized Codex collaboration messages and tools.
+	CodexMultiAgentCompat bool `yaml:"codex_multi_agent_compat"`
+
 	// SSEZstd compresses SSE request bodies with zstd and sets content-encoding: zstd.
 	// It is off by default: the ChatGPT route does not compress its request body.
 	SSEZstd bool `yaml:"sse_zstd"`
@@ -205,6 +208,7 @@ func Default() *Config {
 		Upstream: UpstreamConfig{
 			BaseURL:                        DefaultUpstreamBaseURL,
 			Transport:                      "sse",
+			CodexMultiAgentCompat:          true,
 			SSEZstd:                        false,
 			WebsocketPool:                  true,
 			WebsocketMaxBaselineBytes:      2 << 20,
@@ -345,8 +349,9 @@ func (c *Config) applyEnv() error {
 // Parse errors deliberately name only the field, never its supplied value.
 func (c *Config) applyLimitEnv() error {
 	for name, dst := range map[string]*bool{
-		"PI_GATEWAY_REDIS_ENABLED": &c.Redis.Enabled,
-		"PI_GATEWAY_REDIS_TLS":     &c.Redis.TLS,
+		"PI_GATEWAY_REDIS_ENABLED":                     &c.Redis.Enabled,
+		"PI_GATEWAY_REDIS_TLS":                         &c.Redis.TLS,
+		"PI_GATEWAY_UPSTREAM_CODEX_MULTI_AGENT_COMPAT": &c.Upstream.CodexMultiAgentCompat,
 	} {
 		if v, ok := os.LookupEnv(name); ok {
 			n, err := strconv.ParseBool(v)

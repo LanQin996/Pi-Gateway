@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 
+	"pi-gateway/internal/codexbridge"
 	"pi-gateway/internal/piwire"
 )
 
@@ -18,6 +19,7 @@ type wsContinuation struct {
 	// lastResponseItems are the assistant items the previous response produced.
 	lastResponseItems []any
 	lastResponseID    string
+	codexBridge       codexbridge.Profile
 	// Pooled baselines retain serialized arrays, not decoded object graphs.
 	// This makes the retained byte budget independent of JSON map overhead.
 	encodedInput         []byte
@@ -78,7 +80,14 @@ func inputDelta(input []any, cont *wsContinuation) []any {
 		return nil
 	}
 	for i := range baseline {
-		if !jsonEqual(input[i], baseline[i]) {
+		current, previous := input[i], baseline[i]
+		if cont.codexBridge.Enabled() {
+			// Canonical only projects registered bridge identities and empty markers.
+			// The request and raw upstream baseline must remain untouched.
+			current = codexbridge.Canonical(current, cont.codexBridge)
+			previous = codexbridge.Canonical(previous, cont.codexBridge)
+		}
+		if !jsonEqual(current, previous) {
 			return nil
 		}
 	}
@@ -96,8 +105,12 @@ func jsonEqual(a, b any) bool {
 
 // buildDeltaBody rewrites a full request body into the incremental continuation Pi
 // sends on a reused socket. It reports ok=false when the cached state does not apply.
-func buildDeltaBody(body []byte, cont *wsContinuation) ([]byte, bool) {
-	if cont == nil || cont.lastResponseID == "" {
+func buildDeltaBody(body []byte, cont *wsContinuation, profiles ...codexbridge.Profile) ([]byte, bool) {
+	var profile codexbridge.Profile
+	if len(profiles) > 0 {
+		profile = profiles[0]
+	}
+	if cont == nil || cont.lastResponseID == "" || !profile.Valid() || !cont.codexBridge.Valid() || profile != cont.codexBridge {
 		return nil, false
 	}
 	exceptInput, input, ok := bodyExceptInput(body)

@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"pi-gateway/internal/codexbridge"
 )
 
 const (
@@ -73,22 +75,23 @@ const (
 // A connection_local hit is not proof of a live socket: callers must separately
 // verify instance, connection generation, and that response is the socket's latest.
 type Record struct {
-	ResponseID          string    `json:"-"`
-	KeyID               int64     `json:"key_id,string"`
-	AccountID           int64     `json:"account_id,string"`
-	SessionID           string    `json:"session_id"`
-	InstanceID          string    `json:"instance_id"`
-	ConnectionID        string    `json:"connection_id"`
-	IdentityHash        string    `json:"identity_hash"`
-	Provider            string    `json:"provider"`
-	Scope               Scope     `json:"scope"`
-	Version             uint64    `json:"version,string"`
-	CreatedAt           time.Time `json:"created_at"`
-	ExpiresAt           time.Time `json:"expires_at"`
-	OpaqueState         []byte    `json:"opaque_state,omitempty"`
-	ResponseFingerprint string    `json:"response_fingerprint"`
-	SessionFingerprint  string    `json:"session_fingerprint"`
-	SchemaVersion       int       `json:"schema_version"`
+	ResponseID          string              `json:"-"`
+	KeyID               int64               `json:"key_id,string"`
+	AccountID           int64               `json:"account_id,string"`
+	SessionID           string              `json:"session_id"`
+	InstanceID          string              `json:"instance_id"`
+	ConnectionID        string              `json:"connection_id"`
+	IdentityHash        string              `json:"identity_hash"`
+	Provider            string              `json:"provider"`
+	Scope               Scope               `json:"scope"`
+	Version             uint64              `json:"version,string"`
+	CreatedAt           time.Time           `json:"created_at"`
+	ExpiresAt           time.Time           `json:"expires_at"`
+	OpaqueState         []byte              `json:"opaque_state,omitempty"`
+	CodexBridge         codexbridge.Profile `json:"codex_bridge,omitempty"`
+	ResponseFingerprint string              `json:"response_fingerprint"`
+	SessionFingerprint  string              `json:"session_fingerprint"`
+	SchemaVersion       int                 `json:"schema_version"`
 }
 
 // Invalidation cannot remove a replacement belonging to another socket or version.
@@ -163,11 +166,11 @@ func (r Record) valid() bool {
 			return false
 		}
 	}
-	return r.Version > 0 && r.SchemaVersion == 1 && len(r.OpaqueState) <= MaxRecordBytes
+	return r.Version > 0 && r.SchemaVersion == 1 && r.CodexBridge.Valid() && len(r.OpaqueState) <= MaxRecordBytes
 }
 
 func prepare(r Record, old *Record, o Options, now time.Time) (Record, []byte, error) {
-	if !validReference(r.KeyID, r.ResponseID) || len(r.OpaqueState) > o.MaxRecordBytes {
+	if !validReference(r.KeyID, r.ResponseID) || !r.CodexBridge.Valid() || len(r.OpaqueState) > o.MaxRecordBytes {
 		return Record{}, nil, ErrInvalid
 	}
 	if old == nil {
@@ -179,7 +182,7 @@ func prepare(r Record, old *Record, o Options, now time.Time) (Record, []byte, e
 		r.Version = 1
 		r.CreatedAt = now.UTC()
 	} else {
-		if err := checkOwner(*old, Record{KeyID: r.KeyID, AccountID: r.AccountID, Provider: r.Provider, InstanceID: r.InstanceID, ConnectionID: r.ConnectionID, SessionFingerprint: Fingerprint("session", r.SessionID), IdentityHash: r.IdentityHash, Scope: r.Scope, Version: old.Version + 1}); err != nil {
+		if err := checkOwner(*old, Record{KeyID: r.KeyID, AccountID: r.AccountID, Provider: r.Provider, InstanceID: r.InstanceID, ConnectionID: r.ConnectionID, SessionFingerprint: Fingerprint("session", r.SessionID), IdentityHash: r.IdentityHash, Scope: r.Scope, CodexBridge: r.CodexBridge, Version: old.Version + 1}); err != nil {
 			return Record{}, nil, err
 		}
 		if r.Version == 0 && bytes.Equal(r.OpaqueState, old.OpaqueState) {
@@ -229,6 +232,9 @@ func (r Record) clone() Record {
 func checkOwner(old, next Record) error {
 	if old.KeyID != next.KeyID || old.AccountID != next.AccountID || old.Provider != next.Provider || old.InstanceID != next.InstanceID || old.ConnectionID != next.ConnectionID || old.SessionFingerprint != next.SessionFingerprint || old.IdentityHash != next.IdentityHash || old.Scope != next.Scope {
 		return ErrWrongOwner
+	}
+	if old.CodexBridge != next.CodexBridge {
+		return ErrInvalid
 	}
 	if next.Version <= old.Version || next.Version-old.Version != 1 {
 		return ErrInvalid

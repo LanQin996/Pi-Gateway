@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -10,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"pi-gateway/internal/codexbridge"
 
 	"github.com/alicebob/miniredis/v2"
 )
@@ -70,6 +73,63 @@ func TestStoreContract(t *testing.T) {
 
 // runStoreContract is shared by memory, miniredis, and the opt-in real Redis test.
 func runStoreContract(t *testing.T, makeFixture fixtureFactory) {
+	t.Run("codex_bridge_profile", func(t *testing.T) {
+		f := makeFixture(t, Options{})
+		ctx := context.Background()
+		profile := codexbridge.Profile{Version: 1, Tools: codexbridge.ToolSpawnAgent}
+		r := sample("bridge-profile")
+		r.CodexBridge = profile
+		requireStatus(t, f.store.RecordCompleted(ctx, r), Hit)
+		got, err := f.store.Resolve(ctx, r.KeyID, r.ResponseID)
+		requireStatus(t, err, Hit)
+		if got.CodexBridge != profile || string(got.OpaqueState) != string(r.OpaqueState) {
+			t.Fatal("bounded profile was lost or placed in opaque state")
+		}
+		requireStatus(t, f.store.RecordCompleted(ctx, r), Hit)
+		changed := r
+		changed.CodexBridge = codexbridge.Profile{}
+		requireStatus(t, f.store.RecordCompleted(ctx, changed), Invalid)
+		changed = *got
+		changed.CodexBridge = codexbridge.Profile{}
+		requireStatus(t, f.store.RecordCompleted(ctx, changed), Invalid)
+		for i, invalid := range []codexbridge.Profile{{Version: 99}, {Tools: 1}, {Version: 1, Tools: 1 << 31}} {
+			bad := sample(fmt.Sprintf("invalid-profile-%d", i))
+			bad.CodexBridge = invalid
+			requireStatus(t, f.store.RecordCompleted(ctx, bad), Invalid)
+		}
+		legacy := sample("legacy-no-profile")
+		requireStatus(t, f.store.RecordCompleted(ctx, legacy), Hit)
+		got, err = f.store.Resolve(ctx, legacy.KeyID, legacy.ResponseID)
+		requireStatus(t, err, Hit)
+		if got.CodexBridge != (codexbridge.Profile{}) {
+			t.Fatal("zero-value legacy profile changed")
+		}
+		_, payload, err := prepare(r, nil, Options{}.normalized(), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wire map[string]any
+		if err := json.Unmarshal(payload, &wire); err != nil {
+			t.Fatal(err)
+		}
+		wire["codex_bridge"] = map[string]any{"version": 99, "tools": 1}
+		payload, err = json.Marshal(wire)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = decode(payload, r.ResponseID, Options{}.normalized(), time.Now())
+		requireStatus(t, err, Invalid)
+		delete(wire, "codex_bridge")
+		payload, err = json.Marshal(wire)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := decode(payload, r.ResponseID, Options{}.normalized(), time.Now())
+		requireStatus(t, err, Hit)
+		if decoded.CodexBridge != (codexbridge.Profile{}) {
+			t.Fatal("old serialized records must remain valid")
+		}
+	})
 	t.Run("ownership_version_and_invalidation", func(t *testing.T) {
 		f := makeFixture(t, Options{})
 		ctx := context.Background()

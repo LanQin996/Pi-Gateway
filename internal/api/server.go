@@ -18,6 +18,7 @@ import (
 
 	"pi-gateway/internal/accounts"
 	"pi-gateway/internal/capture"
+	"pi-gateway/internal/codexbridge"
 	"pi-gateway/internal/config"
 	"pi-gateway/internal/keylimit"
 	"pi-gateway/internal/middleware"
@@ -130,7 +131,8 @@ type prepared struct {
 	PoolSessionID      string // Opaque downstream scope; never sent on the wire.
 	PreviousResponseID string
 	Continuation       *session.Record
-	ResponseHeaders    http.Header // Safe upstream retry metadata, independent of capture.
+	CodexBridge        codexbridge.Profile // Bounded protocol metadata; never task content.
+	ResponseHeaders    http.Header         // Safe upstream retry metadata, independent of capture.
 	Transport          string
 	Recorder           *capture.Recorder
 	// Usage is the billing/statistics ledger entry; it is recorded even when
@@ -254,6 +256,10 @@ func (s *Server) prepare(ctx context.Context, r *http.Request, rawBody []byte, c
 	if apiErr := s.applyRequestRules(ctx, p); apiErr != nil {
 		return p, apiErr
 	}
+	// Capture tool identity before compact finalization removes the tools table.
+	if apiErr := s.detectCodexBridge(p); apiErr != nil {
+		return p, apiErr
+	}
 	beforeShape, _ := json.Marshal(built.Body)
 	if engine != nil {
 		if p.Compact {
@@ -302,6 +308,9 @@ func (s *Server) prepare(ctx context.Context, r *http.Request, rawBody []byte, c
 	}
 	p.SessionID, p.PreviousResponseID, p.Continuation = sessionID, previousID, continuation
 	p.PoolSessionID = poolSessionID(ctx, sessionID)
+	if apiErr := s.prepareCodexBridge(p); apiErr != nil {
+		return p, apiErr
+	}
 
 	keyRelease := func() {}
 	if key != nil {

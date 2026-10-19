@@ -137,6 +137,21 @@ func (p *prepared) recordRuleResult(result rules.Result, eventID, eventType stri
 // transformResponseEvent is shared by SSE, aggregated HTTP and downstream WS.
 // The upstream sink/session bookkeeping sees the original event before this call.
 func (p *prepared) transformResponseEvent(ctx context.Context, event *upstream.Event) (*upstream.Event, error) {
+	// Rules see the same native tool identities as the client. Re-validate after
+	// rules too: a rule must not turn plaintext tool arguments into ciphertext or
+	// leak the reserved upstream alias. Both passes are immutable and idempotent.
+	restored, err := p.restoreCodexEvent(event)
+	if err != nil {
+		return nil, err
+	}
+	transformed, err := p.applyResponseEventRules(ctx, restored)
+	if err != nil {
+		return nil, err
+	}
+	return p.restoreCodexEvent(transformed)
+}
+
+func (p *prepared) applyResponseEventRules(ctx context.Context, event *upstream.Event) (*upstream.Event, error) {
 	if event == nil {
 		return nil, nil
 	}
@@ -172,6 +187,18 @@ func (p *prepared) transformResponseEvent(ctx context.Context, event *upstream.E
 }
 
 func (p *prepared) transformResponseBody(ctx context.Context, body map[string]any) (map[string]any, error) {
+	restored, err := p.restoreCodexBody(body)
+	if err != nil {
+		return nil, err
+	}
+	transformed, err := p.applyResponseBodyRules(ctx, restored)
+	if err != nil {
+		return nil, err
+	}
+	return p.restoreCodexBody(transformed)
+}
+
+func (p *prepared) applyResponseBodyRules(ctx context.Context, body map[string]any) (map[string]any, error) {
 	if p.RuleEngine == nil {
 		return body, nil
 	}

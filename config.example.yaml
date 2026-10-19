@@ -88,6 +88,10 @@ upstream:
   #   auto             prefer websocket-cached, fall back to SSE on transport failure
   transport: sse
 
+  # Adapt recognized Codex multi-agent V2 messages/tools. Set false to preserve
+  # native wire semantics. Env: PI_GATEWAY_UPSTREAM_CODEX_MULTI_AGENT_COMPAT.
+  codex_multi_agent_compat: true
+
   # Compress SSE request bodies with zstd and send content-encoding: zstd. Off by
   # default: the ChatGPT route does not compress its request body.
   sse_zstd: false

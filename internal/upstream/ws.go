@@ -72,7 +72,7 @@ func (c *Client) streamWS(ctx context.Context, req *Request, onEvent func(*Event
 	explicit := req.PreviousResponseID != ""
 	if explicit {
 		r := req.Continuation
-		if !c.cfg.Pool || !c.validRecord(r, req.ClientKeyID, req.PreviousResponseID) || r.AccountID != req.AccountID || r.IdentityHash != c.identityHash(req) || !c.pool.matches(r) {
+		if !c.cfg.Pool || !c.validRecord(r, req.ClientKeyID, req.PreviousResponseID) || r.AccountID != req.AccountID || r.IdentityHash != c.identityHash(req) || r.CodexBridge != req.CodexBridge || !c.pool.matches(r) {
 			return nil, continuationMismatch()
 		}
 		key = r.SessionID // trusted opaque original pool scope, not this downstream's ID
@@ -119,7 +119,7 @@ func (c *Client) streamWS(ctx context.Context, req *Request, onEvent func(*Event
 
 	if usePool && !explicit && reused && conn.continuation != nil {
 		continued := false
-		if deltaBody, ok := buildDeltaBody(req.Body, conn.continuation); ok {
+		if deltaBody, ok := buildDeltaBody(req.Body, conn.continuation, req.CodexBridge); ok {
 			if deltaFrame, err := buildWSFrame(deltaBody); err == nil {
 				frame = deltaFrame
 				continued = true
@@ -314,7 +314,7 @@ func (c *Client) streamWS(ctx context.Context, req *Request, onEvent func(*Event
 				if usePool && !explicit && int64(len(req.Body)) <= c.cfg.MaxBaselineBytes {
 					if exceptInput, input, ok := bodyExceptInput(req.Body); ok {
 						baseline = &wsContinuation{bodyExceptInput: exceptInput, lastInput: input,
-							lastResponseItems: responseItemsFromTerminal(decoded), lastResponseID: responseID}
+							lastResponseItems: responseItemsFromTerminal(decoded), lastResponseID: responseID, codexBridge: req.CodexBridge}
 						size = baseline.size()
 					}
 				}

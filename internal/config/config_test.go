@@ -3,8 +3,49 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestCodexMultiAgentCompatConfig(t *testing.T) {
+	if !Default().Upstream.CodexMultiAgentCompat {
+		t.Fatal("compatibility must be enabled by default")
+	}
+	for _, tc := range []struct {
+		name, yaml, env string
+		want            bool
+	}{
+		{"omitted", "upstream: {}\n", "", true},
+		{"explicit_false", "upstream:\n  codex_multi_agent_compat: false\n", "", false},
+		{"explicit_true", "upstream:\n  codex_multi_agent_compat: true\n", "", true},
+		{"env_false", "upstream:\n  codex_multi_agent_compat: true\n", "false", false},
+		{"env_true", "upstream:\n  codex_multi_agent_compat: false\n", "true", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.env != "" {
+				t.Setenv("PI_GATEWAY_UPSTREAM_CODEX_MULTI_AGENT_COMPAT", tc.env)
+			}
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(tc.yaml), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Upstream.CodexMultiAgentCompat != tc.want {
+				t.Fatalf("compat = %v, want %v", cfg.Upstream.CodexMultiAgentCompat, tc.want)
+			}
+		})
+	}
+	t.Run("invalid_env_redacted", func(t *testing.T) {
+		t.Setenv("PI_GATEWAY_UPSTREAM_CODEX_MULTI_AGENT_COMPAT", "private-invalid-value")
+		_, err := Load("")
+		if err == nil || !strings.Contains(err.Error(), "PI_GATEWAY_UPSTREAM_CODEX_MULTI_AGENT_COMPAT") || strings.Contains(err.Error(), "private-invalid-value") {
+			t.Fatalf("invalid boolean was accepted or leaked: %v", err)
+		}
+	})
+}
 
 // Pi's modern OpenAI provider shares its Responses URL between API-key and
 // ChatGPT OAuth auth. The separate legacy Codex provider has a different path.

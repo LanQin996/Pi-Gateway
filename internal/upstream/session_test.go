@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"pi-gateway/internal/codexbridge"
 	"pi-gateway/internal/session"
 
 	"github.com/gorilla/websocket"
@@ -135,6 +136,184 @@ func (s *continuationStore) RecordCompleted(_ context.Context, r session.Record)
 	}
 	s.records[r.ResponseID] = r
 	return nil
+}
+
+func TestContinuationCodexBridgeProfileIsolation(t *testing.T) {
+	for _, initial := range []codexbridge.Profile{{}, {Version: 1, Tools: codexbridge.ToolSendMessage}} {
+		t.Run(fmt.Sprintf("initial=%v", initial), func(t *testing.T) {
+			f := newContinuationFixture(t, nil)
+			c := testClient(t, f.server.URL)
+			store := session.NewMemory(session.Options{})
+			defer store.Close()
+			c.cfg.Sessions = store
+			req := continuationRequest(1, "profile-scope")
+			req.CodexBridge = initial
+			runContinuation(t, c, req)
+			<-f.frames
+			record, err := c.ResolveContinuation(context.Background(), 1, "r1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			shared, err := store.Resolve(context.Background(), 1, "r1")
+			if err != nil || shared.CodexBridge != initial || record.CodexBridge != initial {
+				t.Fatalf("profile not retained: local=%#v shared=%#v err=%v", record, shared, err)
+			}
+			next := explicitRequest(t, req, "r1", []any{"delta"})
+			next.Continuation = record
+			next.CodexBridge = codexbridge.Profile{Version: 1, Tools: codexbridge.ToolSpawnAgent}
+			if _, err := c.Stream(context.Background(), next, func(*Event) error { return nil }); !errors.Is(err, ErrContinuationUnavailable) {
+				t.Fatalf("cross-profile explicit continuation = %v", err)
+			}
+			forged := *record
+			forged.CodexBridge = next.CodexBridge
+			if c.pool.matches(&forged) {
+				t.Fatal("forged pool profile matched local record")
+			}
+			next.Continuation = &forged
+			if _, err := c.Stream(context.Background(), next, func(*Event) error { return nil }); !errors.Is(err, ErrContinuationUnavailable) {
+				t.Fatalf("forged-profile continuation = %v", err)
+			}
+			if f.requests.Load() != 1 {
+				t.Fatal("mismatched explicit delta reached upstream")
+			}
+			// An implicit profile change falls back to full input on the same socket.
+			req.CodexBridge = next.CodexBridge
+			req.Body = []byte(`{"model":"m","input":["one","answer","new"]}`)
+			runContinuation(t, c, req)
+			frame := <-f.frames
+			if _, ok := frame.body["previous_response_id"]; ok {
+				t.Fatal("profile change used cached delta")
+			}
+			if !reflect.DeepEqual(frame.body["input"], []any{"one", "answer", "new"}) || f.dials.Load() != 1 {
+				t.Fatalf("profile fallback did not preserve full input/socket: %+v", frame)
+			}
+			// Matching profile with no tools is valid for an explicit delta, and
+			// must not strip a prefix even if it resembles cached full history.
+			delta := []any{"one", "answer", "new", "explicit"}
+			same := explicitRequest(t, req, "r2", delta)
+			runContinuation(t, c, same)
+			explicitFrame := <-f.frames
+			if explicitFrame.body["previous_response_id"] != "r2" || !reflect.DeepEqual(explicitFrame.body["input"], delta) {
+				t.Fatalf("same-profile explicit delta was changed: %+v", explicitFrame)
+			}
+			if _, ok := explicitFrame.body["tools"]; ok {
+				t.Fatal("explicit delta unexpectedly acquired tool definitions")
+			}
+		})
+	}
+}
+
+func TestContinuationRejectsInvalidCodexBridgeProfile(t *testing.T) {
+	f := newContinuationFixture(t, nil)
+	c := testClient(t, f.server.URL)
+	req := continuationRequest(1, "invalid-profile")
+	req.CodexBridge = codexbridge.Profile{Version: 99}
+	if _, err := c.Stream(context.Background(), req, func(*Event) error { return nil }); !errors.Is(err, session.ErrInvalid) {
+		t.Fatalf("invalid request profile = %v", err)
+	}
+	if f.dials.Load() != 0 || f.requests.Load() != 0 {
+		t.Fatal("invalid profile reached upstream")
+	}
+	req.CodexBridge = codexbridge.Profile{}
+	runContinuation(t, c, req)
+	<-f.frames
+	record, err := c.ResolveContinuation(context.Background(), 1, "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.CodexBridge = codexbridge.Profile{Version: 99}
+	if c.validRecord(record, 1, "r1") {
+		t.Fatal("invalid persisted profile accepted")
+	}
+	c.pool.mu.Lock()
+	c.pool.entries[record.SessionID].record = record
+	c.pool.mu.Unlock()
+	if _, err := c.ResolveContinuation(context.Background(), 1, "r1"); !errors.Is(err, session.ErrInvalid) {
+		t.Fatalf("invalid local profile = %v", err)
+	}
+}
+
+func TestContinuationCodexBridgeClientReplayKeepsRawBaseline(t *testing.T) {
+	profile := codexbridge.Profile{Version: 1, Tools: codexbridge.ToolSendMessage}
+	rawCall := map[string]any{"type": "function_call", "id": "fc1", "call_id": "call-1", "name": codexbridge.Alias + ".send_message", "arguments": `{"id":"child","message":"complete task"}`}
+	frames := make(chan map[string]any, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer ws.Close()
+		for n := 1; ; n++ {
+			_, body, err := ws.ReadMessage()
+			if err != nil {
+				return
+			}
+			var frame map[string]any
+			if json.Unmarshal(body, &frame) != nil {
+				return
+			}
+			frames <- frame
+			if err := ws.WriteJSON(map[string]any{"type": "response.completed", "response": map[string]any{"id": fmt.Sprintf("r%d", n), "status": "completed", "output": []any{rawCall}}}); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+	c := testClient(t, server.URL)
+	req := continuationRequest(1, "client-replay")
+	req.CodexBridge = profile
+	var clientCall map[string]any
+	_, err := c.Stream(context.Background(), req, func(event *Event) error {
+		restored, _, err := codexbridge.RestoreEvent(event.Data, profile)
+		if err != nil {
+			return err
+		}
+		// API delivery replaces Data; ws.go still reads its original decoded map.
+		event.Data = restored
+		clientCall = restored["response"].(map[string]any)["output"].([]any)[0].(map[string]any)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-frames
+	if clientCall["name"] != "send_message" || clientCall["namespace"] != "collaboration" {
+		t.Fatalf("client identity was not restored: %#v", clientCall)
+	}
+	if marker, ok := clientCall["encrypted_function_args"].([]any); !ok || len(marker) != 0 {
+		t.Fatal("client did not receive empty plaintext marker")
+	}
+	record, err := c.ResolveContinuation(context.Background(), 1, "r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.pool.mu.Lock()
+	cont := c.pool.entries[record.SessionID].continuation
+	encodedOutput := append([]byte(nil), cont.encodedResponseItems...)
+	c.pool.mu.Unlock()
+	var baseline []any
+	if err := json.Unmarshal(encodedOutput, &baseline); err != nil {
+		t.Fatal(err)
+	}
+	if !jsonEqual(baseline, []any{rawCall}) {
+		t.Fatalf("callback restoration polluted raw baseline: %s", encodedOutput)
+	}
+	// The API forwards the client's restored replay before upstream comparison.
+	replayed := map[string]any{"model": "m", "input": []any{"one", clientCall, map[string]any{"type": "function_call_output", "call_id": "call-1", "output": "delivered"}}}
+	forwarded, _, err := codexbridge.Forward(replayed, profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Body = mustJSON(t, forwarded)
+	runContinuation(t, c, req)
+	frame := <-frames
+	if frame["previous_response_id"] != "r1" {
+		t.Fatalf("actual client replay did not use cached delta: %#v", frame)
+	}
+	items, _ := frame["input"].([]any)
+	if len(items) != 1 || items[0].(map[string]any)["type"] != "function_call_output" {
+		t.Fatalf("replay delta = %#v", items)
+	}
 }
 
 func TestContinuationKeyIsolationAndReconnectExplicitDelta(t *testing.T) {

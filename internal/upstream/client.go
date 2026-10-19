@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"pi-gateway/internal/codexbridge"
 	"pi-gateway/internal/egress"
 	"pi-gateway/internal/session"
 )
@@ -165,6 +166,8 @@ type Request struct {
 	PoolSessionID string
 	ClientKeyID   int64
 	Continuation  *session.Record
+	// CodexBridge is bounded protocol metadata, never tool arguments or history.
+	CodexBridge codexbridge.Profile
 	// AccountID participates in the pool key so accounts never share a socket.
 	AccountID int64
 	// Transport is one of: sse, websocket, websocket-cached, auto.
@@ -193,6 +196,9 @@ type StreamResult struct {
 //   - auto:             websocket-cached, falling back to SSE only for allowed
 //     setup failures known to precede sending response.create
 func (c *Client) Stream(ctx context.Context, req *Request, onEvent func(*Event) error) (*StreamResult, error) {
+	if !req.CodexBridge.Valid() {
+		return nil, &ContinuationError{Cause: session.ErrInvalid}
+	}
 	body, err := c.ExpandCompactionBody(req.Body, req.ClientKeyID)
 	if err != nil {
 		return nil, err

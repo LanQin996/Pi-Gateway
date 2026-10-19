@@ -98,6 +98,9 @@ func (c *Client) ResolveContinuation(ctx context.Context, keyID int64, responseI
 		return nil, &ContinuationError{Cause: session.ErrInvalid}
 	}
 	if record := c.pool.resolve(keyID, responseID); record != nil {
+		if !c.validRecord(record, keyID, responseID) {
+			return nil, &ContinuationError{Cause: session.ErrInvalid}
+		}
 		return record, nil
 	}
 	if c.cfg.Sessions == nil {
@@ -121,16 +124,16 @@ func (c *Client) validRecord(r *session.Record, keyID int64, responseID string) 
 	return r != nil && r.KeyID == keyID && keyID > 0 && r.AccountID > 0 && r.ResponseID == responseID &&
 		r.Scope == session.ScopeConnectionLocal && r.SchemaVersion == 1 && r.Version == 1 && r.Provider == "openai-codex" && r.InstanceID == c.instanceID &&
 		r.ConnectionID != "" && r.SessionID != "" && r.IdentityHash != "" && !r.CreatedAt.IsZero() &&
-		r.CreatedAt.Before(time.Now().Add(time.Minute)) && r.ExpiresAt.After(time.Now())
+		r.CreatedAt.Before(time.Now().Add(time.Minute)) && r.ExpiresAt.After(time.Now()) && r.CodexBridge.Valid()
 }
 
 func (c *Client) completedRecord(req *Request, conn *wsConn, key, responseID string) *session.Record {
-	if key == "" || req.ClientKeyID <= 0 || req.AccountID <= 0 || responseID == "" {
+	if key == "" || req.ClientKeyID <= 0 || req.AccountID <= 0 || responseID == "" || !req.CodexBridge.Valid() {
 		return nil
 	}
 	now := time.Now()
 	return &session.Record{KeyID: req.ClientKeyID, AccountID: req.AccountID, ResponseID: responseID,
-		SessionID: key, InstanceID: c.instanceID, ConnectionID: conn.id, IdentityHash: c.identityHash(req),
+		SessionID: key, InstanceID: c.instanceID, ConnectionID: conn.id, IdentityHash: c.identityHash(req), CodexBridge: req.CodexBridge,
 		Provider: "openai-codex", Scope: session.ScopeConnectionLocal, SchemaVersion: 1, Version: 1, CreatedAt: now, ExpiresAt: now.Add(c.cfg.SessionTTL)}
 }
 

@@ -304,7 +304,7 @@ func (p *wsPool) closeAll() {
 func (p *wsPool) Size() int { p.mu.Lock(); defer p.mu.Unlock(); return len(p.entries) }
 
 func sameRecord(a, b *session.Record) bool {
-	return a != nil && b != nil && a.ResponseID == b.ResponseID && a.KeyID == b.KeyID && a.AccountID == b.AccountID && a.ConnectionID == b.ConnectionID && a.InstanceID == b.InstanceID && a.IdentityHash == b.IdentityHash && a.SessionID == b.SessionID && a.Scope == b.Scope && a.Version == b.Version
+	return a != nil && b != nil && a.ResponseID == b.ResponseID && a.KeyID == b.KeyID && a.AccountID == b.AccountID && a.ConnectionID == b.ConnectionID && a.InstanceID == b.InstanceID && a.IdentityHash == b.IdentityHash && a.SessionID == b.SessionID && a.Scope == b.Scope && a.Version == b.Version && a.CodexBridge.Valid() && b.CodexBridge.Valid() && a.CodexBridge == b.CodexBridge
 }
 func (p *wsPool) matches(r *session.Record) bool {
 	if r == nil {
