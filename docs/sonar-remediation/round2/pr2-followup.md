@@ -41,11 +41,22 @@
 - **回歸**：共用測試涵蓋 HTTP-like 僅有 getRandomValues、正確 receiver、兩個獨立模組的 10,000 個 UUID 樣本無碰撞、固定輸入的 version／variant 位元、crypto getter／API 缺失與拋錯，以及 import 不請求熵。樣本無碰撞不是數學上的碰撞不可能保證。
 - **瀏覽器測試**：保留無 randomUUID 的 HTTP 新增／追加／複製與未連線節點禁止保存流程；以三個明確錯誤案例取代舊的無 crypto 仍成功契約。完整 Playwright 清單為 57 項，真正瀏覽器結果以新提交 CI 為準，不把清單解析算作測試通過。
 
-S2245 狀態為已實作、等待新提交的 Sonar 重分析，不預先宣稱議題關閉或 Security A。
+`79193674d37b332328659e9e8f2ce5dc19f53e85` 的 Sonar check `119680305731`（06:41:50 UTC）已不再列出 S2245，只剩 S5332；當次新程式碼 Security B、Quality Gate 仍失敗，並非全 A。
 
-### S5332：loopback HTTP 仍待決策
+### S5332：經批准改為測試專用、驗證憑證的 TLS
 
-`compose_smoke.py` probe 僅允許 loopback HTTP，proxy／redirect 仍禁止；真正 TLS 改造仍需要 endpoint 與信任設定決策。本次未變更 HTTP/TLS，亦未在服務端標記 Safe／Accepted／False Positive。**不能據此宣稱 Quality Gate 已通過。**
+`compose_smoke.py` 現在只接受 loopback HTTPS；CLI 必須提供本次 fixture 的 CA。使用系統的憑證鏈／IP SAN 驗證，最低 TLS 1.2，不使用 insecure context、不關閉驗證，並保留禁止 redirect、停用環境 proxy 與路徑／ID allowlist。這是真實 TLS endpoint，不是將字串或 scheme 隱藏。
+
+- **隔離方式**：新增 `.github/compose.tls.yaml`，只在 CI 作為最後一份 override。TLS sidecar 使用同一個已測試的 gateway image，加掛本次編譯的 Go 標準函式庫 fixture；不新增外部代理 image、不修改正式 Dockerfile。sidecar 與 gateway 共用 `network_mode: service:pi-gateway`。gateway 透過既有 `PI_GATEWAY_HOST` 僅綁 `127.0.0.1:8317`；主機僅公開 `127.0.0.1:18443` 的 TLS 入口。
+- **最後一段的真實邊界**：代理向固定 `http://127.0.0.1:8317` 轉送，仍是明文，只在共享的 network namespace 內回環；不聲稱端到端加密，也不把此測試 fixture 當正式環境 TLS 部署指引。正式 Compose、產品 HTTP／SSE／WS 支援與公開設定不變。
+- **憑證與私鑰**：每次 job 產生短效 ECDSA CA／server certificate，SAN 為 `127.0.0.1` 與 `::1`；CA 私鑰只存在產生流程的記憶體。新建目錄為 0700、檔案 0600，拒絕覆寫既有目錄／檔案；server key 不提交、不上傳 artifact。sidecar 使用 runner 相同 UID/GID、唯讀 mount、唯讀根檔案系統、移除 capabilities；沒有為讀取私鑰放寬權限。EXIT trap 刪除本次臨時目錄，runner 銷毀亦不保留憑證。
+- **Compose 合併防護**：要求 Compose >= 2.24.4，使用 `!override` 取代而不是附加 ports。啟動前驗證合併 JSON 的 loopback bind、單一 TLS port、共享 namespace、同 image／UID 與唯讀 mounts；若舊 HTTP port 仍公開、代理落在其他網路或配置不符即失敗。
+- **保持測試內容**：四種 SQLite／PostgreSQL × memory／Redis 組合仍執行 seed→移除 containers→重建→verify→清理，Redis 的跨重建資料斷言不變。backend 的真實 gateway 測試也經同一個 TLS fixture，而不是使用僅為測試建立的不同代理實作。
+- **新增成本／限制**：CI 多一個輕量 sidecar、一次靜態 fixture build、每組一次憑證產生及 TLS 握手；不宣稱整體效能提升。fixture 僅供目前 Linux amd64 Compose runtime matrix；正式 image 的 amd64／arm64 build 仍照舊驗證。這不是擴大為正式環境憑證管理功能。
+
+本地最終 17 項 Python 測試通過：保留原 10 項，新增未信任／錯誤 CA、錯誤 IP SAN、ambient proxy、Compose 版本／port／namespace／owner／mount guard。錯誤 CA／SAN 會在發出 bearer request 前被拒絕。Go fixture `go vet` 與 6 項 `-race` 測試通過，另涵蓋憑證過期、0600／拒絕覆寫、明文送往 TLS port 被拒絕、轉送方法／路徑／body／認證保持，以及 healthcheck 不接受錯誤 CA 或 redirect。新增 Go 函式的本地 gocognit 均不超過 10，仍非 Sonar 計分保證。
+
+本地沒有 Docker daemon，YAML parse 與合併 guard 單元測試不冒充 Docker runtime；四組真實 Compose 與新提交 Sonar 結果由遠端 CI 確認。沒有在服務端標記 Safe／Accepted／False Positive，**新提交完成分析前仍不宣稱全 A 或 Quality Gate 已通過。**
 
 ## 服務端重分析回饋
 

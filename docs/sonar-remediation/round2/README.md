@@ -67,9 +67,11 @@
 
 使用相同複製流程重新執行 `check:rules`／`check:sonar-regressions` 通過；遠端最終結果以 PR checks 為準。
 
-首個遠端分析（`a981cb788c99cb9e13a8d6ffd87ae09c4f1b100f`）仍因新程式碼 Security C 未通過 Quality Gate。PR 的兩項安全 review comments 為：`editorId.ts` 非 credential 的 PRNG fallback（`AaFh_hhMwr3G9Zas3V9V`），以及 `compose_smoke.py` 固定 loopback HTTP（`AaFh_h1swr3G9Zas3V9Y`）。這些情境審查仍未獲服務端核准；不以改寫字串或刪除防碰撞行為規避規則。這是首個分析的歷史結果；S2245 後續已按批准移除 fallback、等待重新分析，S5332 仍待決策，不能宣稱全 A。
+首個遠端分析（`a981cb788c99cb9e13a8d6ffd87ae09c4f1b100f`）仍因新程式碼 Security C 未通過 Quality Gate。PR 的兩項安全 review comments 為：`editorId.ts` 非 credential 的 PRNG fallback（`AaFh_hhMwr3G9Zas3V9V`），以及 `compose_smoke.py` 固定 loopback HTTP（`AaFh_h1swr3G9Zas3V9Y`）。這些情境審查仍未獲服務端核准；不以改寫字串或刪除防碰撞行為規避規則。這是首個分析的歷史結果；後續 `7919367` 分析已不再列 S2245，當次 Security B、只剩 S5332。S5332 現已依批准實作測試專用 verified TLS，新的 CI／Sonar 仍需確認；詳見 [逐次補修與影響](pr2-followup.md)，不能預先宣稱全 A。
 
 ## 驗證狀態
+
+本節保留第二輪初次交付時的本地證據與限制；後續 `7919367` 的兩組遠端 CI 均已通過（57 項 Chromium、21 個 Go race 套件、9 項必跑整合無 skip、雙架構 image 與四組 Compose）。最新 TLS fixture 的 17 項 Python／6 項 Go race 本地證據與待驗證項目見 [後續記錄](pr2-followup.md)。不同提交的結果不能相互代替。
 
 **第二輪完整 Go vet／race 及最後 accounts race 均通過。** 使用 Go 1.26.0；完整 `go vet ./...` 與 `go test -race -json -count=1 -timeout=30m ./...` 通過 21 個測試套件（API 603.809 秒）。PostgreSQL 17.11／Redis 7.4.11 實機環境的 9 個必跑整合項目全部通過且無 skip，包含四種 backend 組合。
 
@@ -93,7 +95,7 @@
 
 - Probe 只接受目前實際使用的 API／資產路徑；若未來路由或資產命名改變，須同步 allowlist，不能一律恢復任意路徑。
 - Go 工具鏈在不安全共用安裝目錄、相對 PATH 或外部使用者擁有的目錄可能被拒絕；可透過受信的絕對 `PI_GO_BINARY`／`GOROOT` 指定，但不繞過 Unix ownership／ancestor 檢查。
-- JSON clone 僅對 wire 資料設計；Date、自訂 prototype／toJSON 不視為支援輸入。跨 realm fallback ID 為機率性防碰撞，非 credential。
+- JSON clone 僅對 wire 資料設計；Date、自訂 prototype／toJSON 不視為支援輸入。後續 editor ID 已改為 getRandomValues-only UUIDv4，不再有跨 realm 弱亂數 fallback；仍非 credential。
 - SQL／HTTP／可及性／順序 await 等保留項目需逐項確認信任邊界與契約；不把通用 SQL wrapper 當 sanitizer，不將 HTTP 字串改 HTTPS 偽裝 TLS，不移除鍵盤焦點或 reduced-motion 保護以通過掃描。
 - [x] 確認最後完整 Go aggregate、必跑整合無 skip、accounts 與 embedded webui／command race 結果。
 - [ ] 重跑本輪瀏覽器與容器 CI，補實際可及性驗證。

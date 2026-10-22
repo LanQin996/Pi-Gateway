@@ -1,6 +1,6 @@
 """Exercise a disposable Compose gateway before/after container recreation.
 
-Only loopback is accepted. No external model/OAuth calls are made. State contains
+Only verified loopback HTTPS is accepted. No external model/OAuth calls are made. State contains
 one disposable client key, is written owner-only, and is removed after verify.
 """
 
@@ -10,10 +10,11 @@ import os
 from pathlib import Path
 import re
 import sys
+import ssl
 import tempfile
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
-from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
+from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler, HTTPSHandler
 from uuid import uuid4
 
 ACCOUNT_GROUPS_PATH = "/api/account-groups"
@@ -61,19 +62,21 @@ class NoRedirects(HTTPRedirectHandler):
 
 
 class Probe:
-    def __init__(self, base_url, password):
+    def __init__(self, base_url, password, ca_file=None):
         parsed = urlsplit(base_url)
-        if (parsed.scheme != "http" or parsed.hostname not in ("127.0.0.1", "::1")
+        if (parsed.scheme != "https" or parsed.hostname not in ("127.0.0.1", "::1")
                 or parsed.path not in ("", "/") or parsed.query or parsed.fragment
                 or parsed.username is not None or parsed.password is not None):
-            raise ValueError("the Compose probe only accepts a loopback HTTP endpoint")
+            raise ValueError("the Compose probe only accepts a loopback HTTPS endpoint")
         host = "[::1]" if parsed.hostname == "::1" else "127.0.0.1"
         port = "" if parsed.port is None else ":" + str(int(parsed.port))
-        self.base_url = "http://" + host + port
+        self.base_url = "https://" + host + port
         self.password = password
         self.token = ""
         # Do not send disposable credentials through ambient HTTP proxy settings.
-        self.client = build_opener(ProxyHandler({}), NoRedirects())
+        context = ssl.create_default_context(cafile=ca_file)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        self.client = build_opener(ProxyHandler({}), NoRedirects(), HTTPSHandler(context=context))
 
     def request(self, method, path, payload=None, *, token=None, status=200, raw=False):
         path = request_path(path)
@@ -180,14 +183,15 @@ def read_state(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("phase", choices=("seed", "verify"))
-    parser.add_argument("--url", default="http://127.0.0.1:8317")
+    parser.add_argument("--url", default="https://127.0.0.1:18443")
     parser.add_argument("--state", type=Path, required=True)
+    parser.add_argument("--ca-file", type=Path, required=True, help="CA certificate of this disposable TLS fixture")
     args = parser.parse_args()
     args.state = state_path(args.state)
     password = os.environ.get("PI_GATEWAY_ADMIN_PASSWORD")
     if not password:
         raise ValueError("PI_GATEWAY_ADMIN_PASSWORD is required for the disposable probe")
-    probe = Probe(args.url, password)
+    probe = Probe(args.url, password, ca_file=args.ca_file)
     if args.phase == "seed":
         state = probe.seed()
         # Refuse to overwrite another run's state or follow a pre-existing symlink.
