@@ -18,13 +18,13 @@ func TestPostgresV3CooldownMigration(t *testing.T) {
 		t.Skip("PI_GATEWAY_TEST_POSTGRES_DSN is not set")
 	}
 	cfg, err := pgx.ParseConfig(dsn)
-	requireDataCondition(t, !(err != nil), "invalid PostgreSQL test configuration")
+	requireDataCondition(t, err == nil, "invalid PostgreSQL test configuration")
 	admin := stdlib.OpenDB(*cfg)
 	defer admin.Close()
 	schema := "cooldown_test_" + strings.TrimPrefix(GenerateKey(), "sk-pi-")
 	{
 		_, err := admin.Exec(`CREATE SCHEMA ` + schema)
-		requireDataTrue(t, !(err != nil), err)
+		requireDataTrue(t, err == nil, err)
 	}
 	defer func() {
 		{
@@ -55,7 +55,7 @@ func TestPostgresV3CooldownMigration(t *testing.T) {
 	} {
 		{
 			_, err := first.ExecContext(ctx, statement)
-			requireDataTrue(t, !(err != nil), err)
+			requireDataTrue(t, err == nil, err)
 		}
 	}
 	{
@@ -65,7 +65,7 @@ func TestPostgresV3CooldownMigration(t *testing.T) {
 	requireDataNoError(t, first.Close())
 	for pass := 0; pass < 2; pass++ {
 		s, err := OpenOptions(opts)
-		requireDataTruef(t, !(err != nil), "upgrade/reopen %d: %v", pass, err)
+		requireDataTruef(t, err == nil, "upgrade/reopen %d: %v", pass, err)
 		defer s.Close()
 		accounts, err := s.ListAccounts(ctx)
 		reportStoreTestFailure(t, err != nil || len(accounts) != 1, func() {

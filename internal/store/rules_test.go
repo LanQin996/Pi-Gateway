@@ -73,7 +73,7 @@ func exerciseRulePublication(t *testing.T, first, second *Store) {
 	requireDataTruef(t, !(!errors.Is(err, ErrRuleConflict)), "non-atomic batch: %v", err)
 	{
 		row, _ := first.GetRule(ctx, "a")
-		requireDataTrue(t, !(row == nil), "first batch deletion committed before conflict")
+		requireDataTrue(t, row != nil, "first batch deletion committed before conflict")
 	}
 	snapshot, err = first.PublishRules(ctx, nil, []RuleChange{{Kind: "duplicate", ID: "a", NewID: "copy", ExpectedRevision: 2}}, acceptRuleSet)
 	requireDataTruef(t, !(err != nil || snapshot.Version != 3 || len(snapshot.Rules) != 3), "duplicate=%+v %v", snapshot, err)
@@ -111,7 +111,7 @@ func exerciseRuleSnapshotMarker(t *testing.T, first, second *Store) {
 	requireDataTruef(t, !(err != nil || !installed), "publication did not persist installation marker: installed=%t err=%v", installed, err)
 	{
 		_, err := first.ExecContext(ctx, `DELETE FROM settings WHERE key='rules.language.v2'`)
-		requireDataTrue(t, !(err != nil), err)
+		requireDataTrue(t, err == nil, err)
 	}
 	// Mimic an earlier V2 installation that has the rule but no durable setting.
 	loaded, err := second.LoadRuleSet(ctx)
@@ -187,9 +187,7 @@ func TestRulesInitializationAtomicOnceAndDeletion(t *testing.T) {
 	calls := 0
 	convert := func(_ context.Context, old []*MiddlewareRow) ([]*RuleRow, error) {
 		calls++
-		if len(old) != 1 || old[0].Config != legacy.Config {
-			t.Fatal("legacy source changed")
-		}
+		assertLegacyRuleSource(t, old, legacy)
 		return []*RuleRow{{ID: "legacy:rewrite_model", Rule: testRuleJSON("legacy", 0), LegacyName: legacy.Name, Source: "legacy"}}, nil
 	}
 	if _, err := s.InitializeRules(ctx, convert, func(context.Context, *RuleSetSnapshot) error { return errors.New("invalid legacy") }); err == nil {
@@ -203,22 +201,39 @@ func TestRulesInitializationAtomicOnceAndDeletion(t *testing.T) {
 	if err != nil || snapshot.Version != 1 || !snapshot.LegacyMigrated {
 		t.Fatalf("initialize=%+v err=%v", snapshot, err)
 	}
+	assertLegacyRuleSourceRecorded(t, s, ctx)
+	if _, err := s.PublishRules(ctx, nil, []RuleChange{{Kind: "delete", ID: "legacy:rewrite_model", ExpectedRevision: 1}}, acceptRuleSet); err != nil {
+		t.Fatal(err)
+	}
+	assertDeletedLegacyRulesStayDeleted(t, s, ctx, convert, &calls)
+	old, err := s.GetMiddleware(ctx, legacy.Name)
+	if err != nil || old.Config != legacy.Config {
+		t.Fatalf("legacy table mutated: %+v %v", old, err)
+	}
+}
+
+func assertLegacyRuleSourceRecorded(t *testing.T, s *Store, ctx context.Context) {
+	t.Helper()
 	var raw string
 	if err := s.QueryRowContext(ctx, `SELECT legacy_source FROM rule_set_metadata WHERE singleton=1`).Scan(&raw); err != nil || !strings.Contains(raw, "rewrite_model") {
 		t.Fatalf("original migration source missing: %s %v", raw, err)
 	}
-	if _, err := s.PublishRules(ctx, nil, []RuleChange{{Kind: "delete", ID: "legacy:rewrite_model", ExpectedRevision: 1}}, acceptRuleSet); err != nil {
-		t.Fatal(err)
+}
+
+func assertLegacyRuleSource(t *testing.T, old []*MiddlewareRow, legacy *MiddlewareRow) {
+	t.Helper()
+	if len(old) != 1 || old[0].Config != legacy.Config {
+		t.Fatal("legacy source changed")
 	}
+}
+
+func assertDeletedLegacyRulesStayDeleted(t *testing.T, s *Store, ctx context.Context, convert LegacyRuleConverter, calls *int) {
+	t.Helper()
 	for i := 0; i < 2; i++ {
-		snapshot, err = s.InitializeRules(ctx, convert, acceptRuleSet)
-		if err != nil || len(snapshot.Rules) != 0 || snapshot.Version != 2 || calls != 2 {
-			t.Fatalf("deleted rules resurrected: %+v calls=%d err=%v", snapshot, calls, err)
+		snapshot, err := s.InitializeRules(ctx, convert, acceptRuleSet)
+		if err != nil || len(snapshot.Rules) != 0 || snapshot.Version != 2 || *calls != 2 {
+			t.Fatalf("deleted rules resurrected: %+v calls=%d err=%v", snapshot, *calls, err)
 		}
-	}
-	old, err := s.GetMiddleware(ctx, legacy.Name)
-	if err != nil || old.Config != legacy.Config {
-		t.Fatalf("legacy table mutated: %+v %v", old, err)
 	}
 }
 

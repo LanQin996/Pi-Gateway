@@ -142,6 +142,7 @@ export async function checkRuleComponents(schema) {
         return {host, state, app, unmount: () => app.unmount()}
     }
 
+    // Independent wire-format oracle; do not reuse production cloneJson here.
     const normalized = value => JSON.parse(JSON.stringify(value))
     let fieldsEdited = 0, enumsEdited = 0, capabilitiesRendered = 0, roundtrips = 0
 
@@ -223,19 +224,19 @@ export async function checkRuleComponents(schema) {
             for (const field of cap.fields) await editField(field)
         }
         await checkConditions()
+    }
 
-        async function checkConditions() {
-            for (const cap of schema.conditions) {
-                const condition = components.defaultCondition(cap.id, schema)
-                const mounted = mount(components.ConditionEditor, condition, {schema})
-                const options = walk(control(mounted.host, n => n.type === 'select')).filter(n => n.type === 'option').map(n => n.props.value)
-                assert.deepEqual(options, schema.conditions.map(c => c.id))
-                if (['all', 'any', 'not'].includes(cap.id)) assert.ok(walk(mounted.host).some(n => n.props['data-rule-path'] === '/when/conditions/0'))
-                else for (const field of cap.fields) assert.ok(walk(mounted.host).some(n => n.props['data-rule-path'] === `/when/${field.name}`))
-                mounted.unmount();
-                capabilitiesRendered++
-                for (const field of cap.fields) await editField(field)
-            }
+    async function checkConditions() {
+        for (const cap of schema.conditions) {
+            const condition = components.defaultCondition(cap.id, schema)
+            const mounted = mount(components.ConditionEditor, condition, {schema})
+            const options = walk(control(mounted.host, n => n.type === 'select')).filter(n => n.type === 'option').map(n => n.props.value)
+            assert.deepEqual(options, schema.conditions.map(c => c.id))
+            if (['all', 'any', 'not'].includes(cap.id)) assert.ok(walk(mounted.host).some(n => n.props['data-rule-path'] === '/when/conditions/0'))
+            else for (const field of cap.fields) assert.ok(walk(mounted.host).some(n => n.props['data-rule-path'] === `/when/${field.name}`))
+            mounted.unmount();
+            capabilitiesRendered++
+            for (const field of cap.fields) await editField(field)
         }
     }
     // Create nested object/array/scalar values using only actual component controls.

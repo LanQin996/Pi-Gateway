@@ -60,11 +60,27 @@ function crop(text: string, limit: number): string {
     return text.slice(0, start) + TRUNCATED + text.slice(text.length - (available - start))
 }
 
+function canonicalKeys(keys: string[]): void {
+    keys.sort((a, b) => a.localeCompare(b) || compareText(a, b))
+}
+
+function displayKeyOrder(orders: Map<string, string[]>) {
+    return (keys: string[], path: string): void => {
+        const previous = orders.get(path)
+        if (!previous) {
+            orders.set(path, [...keys])
+            return
+        }
+        const ranks = new Map(previous.map((key, index) => [key, index]))
+        keys.sort((a, b) => (ranks.get(a) ?? Infinity) - (ranks.get(b) ?? Infinity))
+    }
+}
+
 /**
  * Serialize without constructing keyed objects, invoking toJSON/getters, or mutating inputs.
  * Incomplete output is only a preview, never evidence of equality.
  */
-function preparePayload(input: unknown, orders?: Map<string, string[]>, canonical = false): PreparedPayload {
+function preparePayload(input: unknown, orderKeys: (keys: string[], path: string) => void): PreparedPayload {
     let value = input
     if (typeof value === 'string') {
         if (value.length > MAX_CHARACTERS) {
@@ -176,17 +192,6 @@ function preparePayload(input: unknown, orders?: Map<string, string[]>, canonica
         }
     }
 
-    function orderKeys(keys: string[], path: string): void {
-        if (canonical) keys.sort((a, b) => a.localeCompare(b) || compareText(a, b))
-        else if (orders) {
-            const previous = orders.get(path)
-            if (previous) {
-                const ranks = new Map(previous.map((key, index) => [key, index]))
-                keys.sort((a, b) => (ranks.get(a) ?? Infinity) - (ranks.get(b) ?? Infinity))
-            } else orders.set(path, [...keys])
-        }
-
-    }
 
     try {
         visit(value, 0)
@@ -210,7 +215,7 @@ function preparedEqual(before: PreparedPayload, after: PreparedPayload): boolean
 export function equalPayloads(before: unknown, after: unknown): boolean {
     // Full raw string equality is conclusive even when rendering will be truncated.
     if (before === after) return true
-    return preparedEqual(preparePayload(before, undefined, true), preparePayload(after, undefined, true))
+    return preparedEqual(preparePayload(before, canonicalKeys), preparePayload(after, canonicalKeys))
 }
 
 function displayLines(payload: PreparedPayload, labelType: boolean): DisplayPayload {
@@ -264,9 +269,9 @@ function replacement(before: DisplayLine[], after: DisplayLine[]): DiffResult {
  * Arrays retain their order; recorded raw values retain each side's actual order. */
 export function diffPayloads(before: unknown, after: unknown): DiffResult {
     const identical = before === after
-    const orders = new Map<string, string[]>()
-    const first = preparePayload(before, orders)
-    const second = identical ? first : preparePayload(after, orders)
+    const orderKeys = displayKeyOrder(new Map<string, string[]>())
+    const first = preparePayload(before, orderKeys)
+    const second = identical ? first : preparePayload(after, orderKeys)
     const equal = identical || equalPayloads(before, after)
     // For example, JSON string "null" and JSON null need visibly distinct types.
     const labelType = !equal && first.kind !== second.kind && first.text === second.text

@@ -42,7 +42,7 @@ func TestAcquirePinnedRetainsAccountAndIdempotentRelease(t *testing.T) {
 		releases.Wait()
 		{
 			got := m.Inflight(target.ID)
-			requireDataTruef(t, !(got != 1), "duplicate release stole the other held slot: inflight=%d", got)
+			requireDataTruef(t, got == 1, "duplicate release stole the other held slot: inflight=%d", got)
 		}
 		result := routingAwaitAcquire(t, finished)
 		if result.release != nil {
@@ -56,7 +56,7 @@ func TestAcquirePinnedRetainsAccountAndIdempotentRelease(t *testing.T) {
 		result.release()
 		{
 			got := m.Inflight(target.ID)
-			requireDataTruef(t, !(got != 1), "waiter release changed another request's slot: inflight=%d", got)
+			requireDataTruef(t, got == 1, "waiter release changed another request's slot: inflight=%d", got)
 		}
 		holders[1]()
 		requireDataCondition(t, !(m.Inflight(target.ID) != 0 || m.Inflight(decoy.ID) != 0), "pinned acquisition leaked a reservation")
@@ -170,7 +170,7 @@ func TestAcquirePinnedWaitingTimeoutAndCancellation(t *testing.T) {
 				routingAssertDenied(t, routingAwaitAcquire(t, finished), tc.want)
 				{
 					elapsed := time.Since(started)
-					requireDataTruef(t, !(elapsed != wait), "wait ended at %v, want %v (virtual time)", elapsed, wait)
+					requireDataTruef(t, elapsed == wait, "wait ended at %v, want %v (virtual time)", elapsed, wait)
 				}
 				requireDataCondition(t, !(m.Inflight(target.ID) != 1 || m.Inflight(decoy.ID) != 0), "timed-out/canceled waiter stole or switched a reservation")
 				release()

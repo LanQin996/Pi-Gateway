@@ -753,8 +753,8 @@ func runWSActiveAgeLimitAndBusyCapacityCase(t *testing.T, capturedAge *bool) {
 
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	f := newContinuationFixture(t, func(ws *websocket.Conn, ignoredParameter1_0, n int64) bool {
-		return verifyWSActiveAgeLimitAndBusyCapacity(ws, ignoredParameter1_0, n, &capturedAge, &entered, &release)
+	f := newContinuationFixture(t, func(ws *websocket.Conn, ignoredConnectionID, n int64) bool {
+		return verifyWSActiveAgeLimitAndBusyCapacity(ws, ignoredConnectionID, n, &capturedAge, &entered, &release)
 	})
 	c := testClient(t, f.server.URL)
 	c.pool.maxConnections = 1
@@ -803,7 +803,7 @@ func runWSActiveAgeLimitAndBusyCapacityCase(t *testing.T, capturedAge *bool) {
 }
 
 // verifyWSActiveAgeLimitAndBusyCapacity exercises one isolated test phase with the original shared state.
-func verifyWSActiveAgeLimitAndBusyCapacity(ws *websocket.Conn, ignoredParameter1_0, n int64, capturedCapturedAge **bool, capturedEntered *chan struct{}, capturedRelease *chan struct{}) bool {
+func verifyWSActiveAgeLimitAndBusyCapacity(ws *websocket.Conn, ignoredConnectionID, n int64, capturedCapturedAge **bool, capturedEntered *chan struct{}, capturedRelease *chan struct{}) bool {
 	if n == 1 {
 		close((*capturedEntered))
 		if *(*capturedCapturedAge) {

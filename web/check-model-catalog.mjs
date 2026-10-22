@@ -1,29 +1,14 @@
-import assert from 'node:assert/strict'
 import {readFileSync} from 'node:fs'
-import ts from 'typescript'
+import {loadTestModule} from './test-module-loader.mjs'
+import assert from 'node:assert/strict'
 import * as vue from 'vue'
-import {compileScript, parse} from '@vue/compiler-sfc'
 import {renderToString} from '@vue/server-renderer'
+
 
 const read = path => readFileSync(new URL(path, import.meta.url), 'utf8')
 
-function load(source, imports) {
-    const compiled = ts.transpileModule(source, {
-        compilerOptions: {
-            module: ts.ModuleKind.CommonJS,
-            target: ts.ScriptTarget.ES2022
-        }
-    })
-    const exports = {}
-    new Function('exports', 'require', compiled.outputText)(exports, name => {
-        assert.ok(Object.hasOwn(imports, name), `Unexpected import: ${name}`)
-        return imports[name]
-    })
-    return exports
-}
-
 const locale = vue.ref('en')
-const translations = load(read('./src/components/accounts/accountControlsLocale.ts'), {
+const translations = await loadTestModule('./src/components/accounts/accountControlsLocale.ts', {
     '../../i18n': {useI18n: () => ({locale})},
 })
 const inertVue = {
@@ -31,7 +16,7 @@ const inertVue = {
     }, onBeforeUnmount: () => {
     }
 }
-const catalog = load(read('./src/components/accounts/useAccountModelCatalog.ts'), {
+const catalog = await loadTestModule('./src/components/accounts/useAccountModelCatalog.ts', {
     vue: inertVue,
     '../../api/client': {
         ApiError: class extends Error {
@@ -186,18 +171,15 @@ await check('preview truncation is explicit and full local JSON remains availabl
     assert.equal(preview.truncated, true)
     assert.deepEqual(JSON.parse(modelMetadataJSON(metadata)), metadata)
 })
-const selectorText = read('./src/components/accounts/ModelRestrictionSelector.vue')
-const {descriptor} = parse(selectorText)
-const componentSource = compileScript(descriptor, {id: 'catalog-regression', inlineTemplate: true}).content
+const selectorText = readFileSync(new URL('./src/components/accounts/ModelRestrictionSelector.vue', import.meta.url), 'utf8')
 let fixtures = []
-const sourceStatusDescriptor = parse(read('./src/components/accounts/ModelCatalogSourceStatus.vue')).descriptor
-const sourceStatus = load(compileScript(sourceStatusDescriptor, {id: 'catalog-source-status-regression', inlineTemplate: true}).content, {
+const sourceStatus = await loadTestModule('./src/components/accounts/ModelCatalogSourceStatus.vue', {
     vue,
     '../../stores/ui': {formatTime: String},
     './accountControlsLocale': translations,
     './useAccountModelCatalog': catalog,
 })
-const Selector = load(componentSource, {
+const Selector = (await loadTestModule('./src/components/accounts/ModelRestrictionSelector.vue', {
     './ModelCatalogSourceStatus.vue': sourceStatus,
     vue,
     'lucide-vue-next': Object.fromEntries(['RefreshCw', 'Search', 'ShieldBan'].map(name => [name, {render: () => vue.h('svg')}])),
@@ -207,7 +189,7 @@ const Selector = load(componentSource, {
         ...catalog,
         useAccountModelCatalog: sources => ({...useAccountModelCatalog(sources), models: vue.ref(fixtures)})
     },
-}).default
+})).default
 const render = props => renderToString(vue.h(Selector, {sources: [], modelValue: [], ...props}))
 await check('real selector escapes metadata markup and renders unknown fields', async () => {
     fixtures = [{

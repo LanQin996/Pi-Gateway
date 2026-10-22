@@ -1,6 +1,6 @@
 """Exercise a disposable Compose gateway before/after container recreation.
 
-Only loopback is accepted. No external model/OAuth calls are made. State contains
+Only verified loopback HTTPS is accepted. No external model/OAuth calls are made. State contains
 one disposable client key, is written owner-only, and is removed after verify.
 """
 
@@ -10,28 +10,76 @@ import os
 from pathlib import Path
 import re
 import sys
+import ssl
 import tempfile
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
-from urllib.request import Request, build_opener, ProxyHandler
+from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler, HTTPSHandler
 from uuid import uuid4
 
 ACCOUNT_GROUPS_PATH = "/api/account-groups"
 KEYS_PATH = "/api/keys"
 MODELS_PATH = "/v1/models"
+AUTH_LOGOUT_PATH = "/api/auth/logout"
+
+def entity_id(value):
+    """State and API responses may select only positive signed-64-bit IDs."""
+    if type(value) is not int or not 0 < value <= (1 << 63) - 1:
+        raise ValueError("probe entity IDs must be positive signed-64-bit integers")
+    return int(value)
+
+
+def entity_path(collection, value):
+    # Numeric conversion prevents file content from supplying URL delimiters,
+    # even if an upstream state/schema validation is changed later.
+    identifier = entity_id(value)
+    if collection == KEYS_PATH:
+        return "/api/keys/" + str(identifier)
+    if collection == ACCOUNT_GROUPS_PATH:
+        return "/api/account-groups/" + str(identifier)
+    raise ValueError("unsupported probe collection")
+
+
+def request_path(path):
+    # No encoded separators, traversal segments, queries, fragments or origins.
+    if not isinstance(path, str):
+        raise ValueError("unsupported Compose probe request path")
+    static_paths = ("/", "/healthz", "/api/auth/login", AUTH_LOGOUT_PATH,
+                    MODELS_PATH, KEYS_PATH, ACCOUNT_GROUPS_PATH)
+    entity_pattern = r"/api/(?:keys|account-groups)/[1-9]\d{0,18}"
+    asset_pattern = r"/assets/[A-Za-z0-9_-][A-Za-z0-9_.-]*\.(?:js|css)"
+    if not (path in static_paths
+            or re.fullmatch(entity_pattern, path, flags=re.ASCII)
+            or re.fullmatch(asset_pattern, path, flags=re.ASCII)):
+        raise ValueError("unsupported Compose probe request path")
+    return path
+
+
+class NoRedirects(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # A local server must not redirect disposable bearer credentials elsewhere.
+        return None
+
 
 class Probe:
-    def __init__(self, base_url, password):
+    def __init__(self, base_url, password, ca_file=None):
         parsed = urlsplit(base_url)
-        if parsed.scheme != "http" or parsed.hostname not in ("127.0.0.1", "::1") or parsed.path not in ("", "/"):
-            raise ValueError("the Compose probe only accepts a loopback HTTP endpoint")
-        self.base_url = base_url.rstrip("/")
+        if (parsed.scheme != "https" or parsed.hostname not in ("127.0.0.1", "::1")
+                or parsed.path not in ("", "/") or parsed.query or parsed.fragment
+                or parsed.username is not None or parsed.password is not None):
+            raise ValueError("the Compose probe only accepts a loopback HTTPS endpoint")
+        host = "[::1]" if parsed.hostname == "::1" else "127.0.0.1"
+        port = "" if parsed.port is None else ":" + str(int(parsed.port))
+        self.base_url = "https://" + host + port
         self.password = password
         self.token = ""
         # Do not send disposable credentials through ambient HTTP proxy settings.
-        self.client = build_opener(ProxyHandler({}))
+        context = ssl.create_default_context(cafile=ca_file)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        self.client = build_opener(ProxyHandler({}), NoRedirects(), HTTPSHandler(context=context))
 
     def request(self, method, path, payload=None, *, token=None, status=200, raw=False):
+        path = request_path(path)
         headers = {}
         if token is None:
             token = self.token
@@ -72,39 +120,46 @@ class Probe:
         group = self.request("POST", ACCOUNT_GROUPS_PATH, {
             "name": marker, "notes": "must survive recreation", "disabled_models": ["blocked-ci-model"],
         })["group"]
+        group_id = entity_id(group["id"])
         key = self.request("POST", KEYS_PATH, {
-            "name": marker, "group_ids": [group["id"]], "max_concurrency": 2,
+            "name": marker, "group_ids": [group_id], "max_concurrency": 2,
         })["key"]
+        key_id = entity_id(key["id"])
         # Exercise update as well as insert and ensure it survives restart.
-        self.request("PATCH", f'/api/keys/{key["id"]}', {"name": marker + "-updated"})
+        self.request("PATCH", entity_path(KEYS_PATH, key_id), {"name": marker + "-updated"})
         self.request("GET", MODELS_PATH, token=key["key"])
         self.request("GET", MODELS_PATH, token="invalid-" + uuid4().hex, status=401)
-        self.request("POST", "/api/auth/logout")
+        self.request("POST", AUTH_LOGOUT_PATH)
         self.token = ""
-        return {"marker": marker, "group_id": group["id"], "key_id": key["id"], "client_key": key["key"]}
+        return {"marker": marker, "group_id": group_id, "key_id": key_id, "client_key": key["key"]}
 
     def verify(self, state):
         if not re.fullmatch(r"compose-ci-[0-9a-f]{32}", state["marker"]):
             raise AssertionError("not a disposable Compose probe state")
+        # Validate file-derived identifiers before any authenticated request.
+        group_id = entity_id(state["group_id"])
+        key_id = entity_id(state["key_id"])
+        group_path = entity_path(ACCOUNT_GROUPS_PATH, group_id)
+        key_path = entity_path(KEYS_PATH, key_id)
         self.health_and_login()
         groups = self.request("GET", ACCOUNT_GROUPS_PATH)["groups"]
-        group = next((entry for entry in groups if entry["id"] == state["group_id"]), None)
+        group = next((entry for entry in groups if entry["id"] == group_id), None)
         if group is None or group["name"] != state["marker"] or group["notes"] != "must survive recreation" or group["disabled_models"] != ["blocked-ci-model"]:
             raise AssertionError("group data or model restrictions did not survive container recreation")
         keys = self.request("GET", KEYS_PATH)["keys"]
-        key = next((entry for entry in keys if entry["id"] == state["key_id"]), None)
-        if key is None or key["name"] != state["marker"] + "-updated" or key["group_ids"] != [state["group_id"]] or key["max_concurrency"] != 2:
+        key = next((entry for entry in keys if entry["id"] == key_id), None)
+        if key is None or key["name"] != state["marker"] + "-updated" or key["group_ids"] != [group_id] or key["max_concurrency"] != 2:
             raise AssertionError("key data or group binding did not survive container recreation")
         self.request("GET", MODELS_PATH, token=state["client_key"])
-        self.request("PATCH", f'/api/keys/{state["key_id"]}', {"enabled": False})
+        self.request("PATCH", key_path, {"enabled": False})
         self.request("GET", MODELS_PATH, token=state["client_key"], status=401)
-        self.request("DELETE", f'/api/keys/{state["key_id"]}')
-        self.request("DELETE", f'/api/account-groups/{state["group_id"]}')
-        if any(entry["id"] == state["key_id"] for entry in self.request("GET", KEYS_PATH)["keys"]):
+        self.request("DELETE", key_path)
+        self.request("DELETE", group_path)
+        if any(entry["id"] == key_id for entry in self.request("GET", KEYS_PATH)["keys"]):
             raise AssertionError("deleted probe key still exists")
-        if any(entry["id"] == state["group_id"] for entry in self.request("GET", ACCOUNT_GROUPS_PATH)["groups"]):
+        if any(entry["id"] == group_id for entry in self.request("GET", ACCOUNT_GROUPS_PATH)["groups"]):
             raise AssertionError("deleted probe group still exists")
-        self.request("POST", "/api/auth/logout")
+        self.request("POST", AUTH_LOGOUT_PATH)
 
 
 def state_path(value):
@@ -128,14 +183,15 @@ def read_state(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("phase", choices=("seed", "verify"))
-    parser.add_argument("--url", default="http://127.0.0.1:8317")
+    parser.add_argument("--url", default="https://127.0.0.1:18443")
     parser.add_argument("--state", type=Path, required=True)
+    parser.add_argument("--ca-file", type=Path, required=True, help="CA certificate of this disposable TLS fixture")
     args = parser.parse_args()
     args.state = state_path(args.state)
     password = os.environ.get("PI_GATEWAY_ADMIN_PASSWORD")
     if not password:
         raise ValueError("PI_GATEWAY_ADMIN_PASSWORD is required for the disposable probe")
-    probe = Probe(args.url, password)
+    probe = Probe(args.url, password, ca_file=args.ca_file)
     if args.phase == "seed":
         state = probe.seed()
         # Refuse to overwrite another run's state or follow a pre-existing symlink.

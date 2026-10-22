@@ -12,38 +12,68 @@ import {
     showCanvas
 } from './rules-ui.helpers'
 
-for (const missing of ['randomUUID', 'crypto'] as const) {
-    test(`HTTP 缺少 ${missing} 仍可新建、追加和复制动作`, async ({page, admin}) => {
-        await page.addInitScript(mode => {
-            if (mode === 'crypto') Object.defineProperty(window, 'crypto', {value: undefined, configurable: true})
-            else Object.defineProperty(Crypto.prototype, 'randomUUID', {value: undefined, configurable: true})
-        }, missing)
-        await admin.open()
-        expect(new URL(page.url()).protocol).toBe('http:')
-        expect(await page.evaluate(() => typeof window.crypto?.randomUUID)).toBe('undefined')
-        await page.getByRole('button', {name: '新增规则', exact: true}).click()
-        await ruleName(page).fill(`No ${missing}`)
-        await showCanvas(page)
-        await addModule(page, 'action', 'text_replace')
-        await focusNode(page)
-        await configureModelReplacement(inlineNodeControls(page), 'fixture-model-a')
-        await expect(page.locator('.rule-graph-action')).toHaveCount(1)
-        await closeParameters(page)
-        await page.locator('.rule-canvas-toolbar').getByRole('button', {name: '复制', exact: true}).click()
-        await expect(page.locator('.rule-graph-action')).toHaveCount(2)
-        const nodeIDs = await page.locator('.rule-graph-node').evaluateAll(nodes => nodes.map(node => node.getAttribute('data-node-id')))
-        expect(new Set(nodeIDs).size).toBe(nodeIDs.length)
-        // A copied, unconnected node must be retained and block serialization.
-        await ruleEditor(page).getByRole('button', {name: '保存规则', exact: true}).click()
-        await expect(ruleEditor(page).getByRole('alert').filter({hasText: '草稿包含未连接节点'})).toBeVisible()
-        expect(admin.requests.some(request => request.method === 'POST' && request.path === '/api/rules')).toBe(false)
-        await page.locator('.rule-canvas-toolbar').getByRole('button', {name: '撤销', exact: true}).click()
-        await addModule(page, 'action', 'text_replace')
-        await focusNode(page)
-        await configureModelReplacement(inlineNodeControls(page), 'fixture-model-b')
-        const rule = await readCode(page)
-        expect(rule.actions).toHaveLength(2)
-        expect(new Set(rule.actions.map(action => action.id)).size).toBe(2)
+test('HTTP 僅使用 getRandomValues 仍可新增、追加和複製動作', async ({page, admin}) => {
+    await page.addInitScript(() => {
+        Object.defineProperty(Crypto.prototype, 'randomUUID', {value: undefined, configurable: true})
+    })
+    await admin.open()
+    expect(new URL(page.url()).protocol).toBe('http:')
+    expect(await page.evaluate(() => typeof window.crypto?.randomUUID)).toBe('undefined')
+    expect(await page.evaluate(() => typeof window.crypto?.getRandomValues)).toBe('function')
+    await page.getByRole('button', {name: '新增规则', exact: true}).click()
+    await ruleName(page).fill('HTTP getRandomValues')
+    await showCanvas(page)
+    await addModule(page, 'action', 'text_replace')
+    await focusNode(page)
+    await configureModelReplacement(inlineNodeControls(page), 'fixture-model-a')
+    await expect(page.locator('.rule-graph-action')).toHaveCount(1)
+    await closeParameters(page)
+    await page.locator('.rule-canvas-toolbar').getByRole('button', {name: '复制', exact: true}).click()
+    await expect(page.locator('.rule-graph-action')).toHaveCount(2)
+    const nodeIDs = await page.locator('.rule-graph-node').evaluateAll(nodes => nodes.map(node => node.getAttribute('data-node-id')))
+    expect(new Set(nodeIDs).size).toBe(nodeIDs.length)
+    // A copied, unconnected node must be retained and block serialization.
+    await ruleEditor(page).getByRole('button', {name: '保存规则', exact: true}).click()
+    await expect(ruleEditor(page).getByRole('alert').filter({hasText: '草稿包含未连接节点'})).toBeVisible()
+    expect(admin.requests.some(request => request.method === 'POST' && request.path === '/api/rules')).toBe(false)
+    await page.locator('.rule-canvas-toolbar').getByRole('button', {name: '撤销', exact: true}).click()
+    await addModule(page, 'action', 'text_replace')
+    await focusNode(page)
+    await configureModelReplacement(inlineNodeControls(page), 'fixture-model-b')
+    const rule = await readCode(page)
+    expect(rule.actions).toHaveLength(2)
+    expect(new Set(rule.actions.map(action => action.id)).size).toBe(2)
+    await ruleEditor(page).getByRole('button', {name: '保存规则', exact: true}).click()
+    await expect.poll(() => admin.rules.find(saved => saved.name === rule.name)?.id).toBeTruthy()
+    const saved = admin.rules.find(candidate => candidate.name === rule.name)!
+    expect(saved.actions).toEqual(rule.actions)
+    await page.reload()
+    await admin.editRule(rule.name)
+    expect(await readCode(page)).toEqual(saved)
+})
+
+for (const mode of ['absent', 'missing', 'throwing'] as const) {
+    test(`安全亂數 ${mode} 時載入不崩潰、請求 ID 明確失敗`, async ({page}) => {
+        await page.addInitScript(unavailable => {
+            if (unavailable === 'absent') {
+                Object.defineProperty(window, 'crypto', {value: undefined, configurable: true})
+            } else {
+                const getRandomValues = unavailable === 'missing' ? undefined : () => { throw new Error('entropy blocked') }
+                Object.defineProperty(Crypto.prototype, 'getRandomValues', {value: getRandomValues, configurable: true})
+            }
+        }, mode)
+        await page.goto('/login')
+        const result = await page.evaluate(async sourcePath => {
+            const module = await import(sourcePath)
+            try {
+                return {loaded: true, id: module.editorId()}
+            } catch (error) {
+                return {loaded: true, error: error instanceof Error ? error.message : String(error)}
+            }
+        }, '/src/utils/editorId.ts')
+        expect(result.loaded).toBe(true)
+        expect(result.error).toContain('Secure random values are unavailable')
+        expect(result).not.toHaveProperty('id')
     })
 }
 

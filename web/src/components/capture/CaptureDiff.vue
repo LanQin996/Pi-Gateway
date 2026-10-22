@@ -71,6 +71,7 @@ const singleLabel = computed(() => props.after.available ? props.afterLabel : pr
 				<div v-if="!same" class="diff-legend"><span class="removed-label">{{ c('removed') }} · {{ beforeLabel }}</span><span class="added-label">{{ c('added') }} · {{ afterLabel }}</span><code>{{ c('changes', { added: diff.added, removed: diff.removed }) }}</code></div>
 				<output v-if="diff.limited" class="capture-note" >{{ c('limited') }}</output>
 				<p v-if="partial" class="capture-note">{{ c('partial') }}</p>
+				<!-- Overflow must remain keyboard-scrollable, including when no links/buttons occur in the payload. -->
 				<div class="diff-lines" :aria-label="title" tabindex="0">
 					<div v-for="(line, index) in diff.lines" :key="index" class="diff-line" :class="`diff-${line.kind}`">
 						<span class="line-number" aria-hidden="true">{{ line.beforeLine ?? '' }}</span><span class="line-number" aria-hidden="true">{{ line.afterLine ?? '' }}</span><span class="line-sign">{{ (() => { if (line.kind === 'added') { return '+'; } if (line.kind === 'removed') { return '−'; } return ' '; })() }}</span><code>{{ line.text || ' ' }}</code>

@@ -48,7 +48,7 @@ func testOutputTPSCodex2APIBoundariesCase1(t *testing.T, tc struct {
 			t.Fatalf("TPS=%v", *got)
 		})
 	} else {
-		requireDataCondition(t, !(got == nil), "missing TPS")
+		requireDataCondition(t, got != nil, "missing TPS")
 		checkFloat(t, "record", *got, *tc.want)
 	}
 	finishTestUsage(t, s, r)

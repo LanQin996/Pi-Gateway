@@ -26,11 +26,24 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Prepare a private Go toolchain for frontend checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          # Hosted toolcache ancestors can be writable by other users. Copy the
+          # setup-go installation; do not weaken the resolver's trust checks.
+          source_root="$(go env GOROOT)"
+          private_root="$(mktemp -d /tmp/pi-gateway-go.XXXXXXXX)"
+          cp -R "$source_root/." "$private_root/"
+          chmod -R go-w "$private_root"
+          printf 'GOROOT=%s\nPI_GO_BINARY=%s/bin/go\n' "$private_root" "$private_root" >> "$GITHUB_ENV"
       - run: npm ci --ignore-scripts
       - run: npm run typecheck
       - run: npm run check:i18n
       - run: npm run check:capture
       - run: npm run check:rules
+      - run: npm run check:sonar-regressions
       - run: npm run build
       - name: Install Chromium for real-browser regression
         run: ./node_modules/.bin/playwright install --with-deps chromium
@@ -134,6 +147,18 @@ jobs:
           print('Real PostgreSQL/Redis contracts and all four protocol variants executed and passed.')
           PY
 
+      - name: Validate and build the disposable TLS fixture
+        run: |
+          go vet ./.github/compose_tls
+          go test -race -count=1 ./.github/compose_tls
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o "$RUNNER_TEMP/compose-tls" ./.github/compose_tls
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: compose-tls-fixture
+          path: ${{ runner.temp }}/compose-tls
+          retention-days: 1
+          if-no-files-found: error
+
   image:
     needs: backend
     runs-on: ubuntu-latest
@@ -202,6 +227,10 @@ jobs:
         with:
           name: pi-gateway-test-image
           path: ${{ runner.temp }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: compose-tls-fixture
+          path: ${{ runner.temp }}/compose-tls-bin
       - name: Load the verified local image
         run: docker load --input "$RUNNER_TEMP/pi-gateway-image.tar"
       - name: Start, persist data, recreate, and verify the stack
@@ -212,7 +241,13 @@ jobs:
         run: |
           set -euo pipefail
           read -r -a files <<< "$COMPOSE_FILES"
-          compose=(docker compose --env-file .env.example "${files[@]}")
+          umask 077
+          tls_root=$(mktemp -d "$RUNNER_TEMP/pi-gateway-ci-tls-XXXXXX")
+          export PI_GATEWAY_TLS_UID="$(id -u)" PI_GATEWAY_TLS_GID="$(id -g)"
+          export PI_GATEWAY_TLS_BINARY="$RUNNER_TEMP/compose-tls-bin/compose-tls"
+          export PI_GATEWAY_TLS_CERTS="$tls_root/certs"
+          chmod 0755 "$PI_GATEWAY_TLS_BINARY"
+          compose=(docker compose --env-file .env.example "${files[@]}" -f .github/compose.tls.yaml)
           state_file="$RUNNER_TEMP/$COMPOSE_PROJECT_NAME.json"
           cleanup() {
             status=$?
@@ -221,12 +256,18 @@ jobs:
             fi
             "${compose[@]}" down --volumes --remove-orphans || true
             rm -f "$state_file"
+            rm -rf -- "$tls_root"
             exit "$status"
           }
           trap cleanup EXIT
-          "${compose[@]}" config --quiet
+          "$PI_GATEWAY_TLS_BINARY" certs --dir "$PI_GATEWAY_TLS_CERTS"
+          compose_version=$(docker compose version --short)
+          python3 .github/validate_compose_tls.py --version "$compose_version" --version-only
+          "${compose[@]}" config --format json |
+            python3 .github/validate_compose_tls.py --version "$compose_version" \
+              --uid "$PI_GATEWAY_TLS_UID" --gid "$PI_GATEWAY_TLS_GID"
           "${compose[@]}" up -d --no-build --wait --wait-timeout 180
-          python3 .github/compose_smoke.py seed --state "$state_file"
+          python3 .github/compose_smoke.py seed --state "$state_file" --ca-file "$PI_GATEWAY_TLS_CERTS/ca.crt"
           if [[ "$USE_REDIS" == true ]]; then
             "${compose[@]}" exec -T redis redis-cli SET "$COMPOSE_PROJECT_NAME:probe" kept EX 600
           fi
@@ -234,7 +275,7 @@ jobs:
           # than merely restarting a process in the same container filesystem.
           "${compose[@]}" down
           "${compose[@]}" up -d --no-build --wait --wait-timeout 180
-          python3 .github/compose_smoke.py verify --state "$state_file"
+          python3 .github/compose_smoke.py verify --state "$state_file" --ca-file "$PI_GATEWAY_TLS_CERTS/ca.crt"
           if [[ "$USE_REDIS" == true ]]; then
             test "$("${compose[@]}" exec -T redis redis-cli --raw GET "$COMPOSE_PROJECT_NAME:probe")" = kept
             "${compose[@]}" exec -T redis redis-cli DEL "$COMPOSE_PROJECT_NAME:probe"

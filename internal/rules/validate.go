@@ -35,6 +35,8 @@ type compiledRule struct {
 var actionSpecs = actionCapabilities()
 var conditionSpecs = conditionCapabilities()
 
+const mustBeTypeMessage = "must be %s"
+
 func lookupCapability(caps []Capability, id string) (Capability, bool) {
 	for _, c := range caps {
 		if c.ID == id {
@@ -199,7 +201,7 @@ func validateFieldValue(v any, f FieldSpec, path, phase string, item bool) error
 		}
 	case "boolean":
 		if _, ok := v.(bool); !ok {
-			return invalid(path, "must be %s", f.Type)
+			return invalid(path, mustBeTypeMessage, f.Type)
 		}
 	case "integer":
 		if err := validateFieldInteger(v, f, path, phase, item); err != nil {
@@ -571,7 +573,7 @@ func (out *compiledAction) validateMergeValue(phase string, nodes *int) error {
 func validateFieldString(v any, f FieldSpec, path, phase string, item bool) error {
 	s, ok := v.(string)
 	if !ok {
-		return invalid(path, "must be %s", f.Type)
+		return invalid(path, mustBeTypeMessage, f.Type)
 	}
 	if f.NonEmpty && (s == "" || (f.Name == "model" && strings.TrimSpace(s) == "")) {
 		return invalid(path, "must be nonempty")
@@ -606,7 +608,7 @@ func validateFieldInteger(v any, f FieldSpec, path, phase string, item bool) err
 func validateFieldStringArray(v any, f FieldSpec, path, phase string, item bool) error {
 	a, ok := asArray(v)
 	if !ok {
-		return invalid(path, "must be %s", f.Type)
+		return invalid(path, mustBeTypeMessage, f.Type)
 	}
 	for i, x := range a {
 		typ := "string"
@@ -624,7 +626,7 @@ func validateFieldStringArray(v any, f FieldSpec, path, phase string, item bool)
 func validateFieldValueArray(v any, f FieldSpec, path, phase string, item bool) error {
 	a, ok := asArray(v)
 	if !ok {
-		return invalid(path, "must be %s", f.Type)
+		return invalid(path, mustBeTypeMessage, f.Type)
 	}
 	for i, x := range a {
 		if e := validateExpression(x, fmt.Sprintf("%s/%d", path, i), phase, item, 0); e != nil {
@@ -639,7 +641,7 @@ func validateFieldConditionArray(v any, f FieldSpec, path, phase string, item bo
 	switch v.(type) {
 	case []Condition, []any:
 	default:
-		return invalid(path, "must be %s", f.Type)
+		return invalid(path, mustBeTypeMessage, f.Type)
 	}
 
 	return nil

@@ -98,47 +98,53 @@ func TestAcquireWaitingCurrentPolicy(t *testing.T) {
 }
 
 func TestAcquireUsesCurrentKeyStrategyWhileWaiting(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		st := newAccountsTestStore(t)
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		first := routingAccount(t, st, "held", 1)
-		second := routingAccount(t, st, "free", 1)
-		key := routingKey(t, st)
-		key.Strategy = string(StrategySingle)
-		if err := st.UpdateKey(ctx, key); err != nil {
-			t.Fatal(err)
-		}
-		m := New(st, nil, nil, Options{})
-		_, release, err := m.Acquire(ctx, key, "model")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer release()
-		finished := routingQueuedAcquire(t, func() (*store.Account, func(), error) {
-			return m.Acquire(ctx, key, "model")
-		})
-		current := *key
-		current.Strategy = string(StrategyLeastInflight)
-		if err := st.UpdateKey(ctx, &current); err != nil {
-			t.Fatal(err)
-		}
-		result := routingAwaitAcquire(t, finished)
-		if result.release != nil {
-			defer result.release()
-		}
-		if result.err != nil || result.account == nil || result.account.ID != second.ID || result.release == nil {
-			t.Fatalf("queued request ignored current strategy: account=%v err=%v", result.account, result.err)
-		}
-		if m.Inflight(first.ID) != 1 || m.Inflight(second.ID) != 1 {
-			t.Fatal("strategy edit lost a reservation")
-		}
-		result.release()
-		release()
-		if m.Inflight(first.ID) != 0 || m.Inflight(second.ID) != 0 {
-			t.Fatal("strategy edit leaked reservations")
-		}
+	synctest.Test(t, testAcquireUsesCurrentKeyStrategyWhileWaiting)
+}
+
+func testAcquireUsesCurrentKeyStrategyWhileWaiting(t *testing.T) {
+	t.Helper()
+	st := newAccountsTestStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	first := routingAccount(t, st, "held", 1)
+	second := routingAccount(t, st, "free", 1)
+	key := routingKey(t, st)
+	key.Strategy = string(StrategySingle)
+	if err := st.UpdateKey(ctx, key); err != nil {
+		t.Fatal(err)
+	}
+	m := New(st, nil, nil, Options{})
+	_, release, err := m.Acquire(ctx, key, "model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	finished := routingQueuedAcquire(t, func() (*store.Account, func(), error) {
+		return m.Acquire(ctx, key, "model")
 	})
+	current := *key
+	current.Strategy = string(StrategyLeastInflight)
+	if err := st.UpdateKey(ctx, &current); err != nil {
+		t.Fatal(err)
+	}
+	result := routingAwaitAcquire(t, finished)
+	if result.release != nil {
+		defer result.release()
+	}
+	if result.err != nil || result.account == nil || result.account.ID != second.ID || result.release == nil {
+		t.Fatalf("queued request ignored current strategy: account=%v err=%v", result.account, result.err)
+	}
+	assertStrategyReservations(t, m, first.ID, second.ID, 1, "strategy edit lost a reservation")
+	result.release()
+	release()
+	assertStrategyReservations(t, m, first.ID, second.ID, 0, "strategy edit leaked reservations")
+}
+
+func assertStrategyReservations(t *testing.T, m *Manager, first, second int64, want int, message string) {
+	t.Helper()
+	if m.Inflight(first) != want || m.Inflight(second) != want {
+		t.Fatal(message)
+	}
 }
 
 func TestAcquireKeyIdentityAndNilSemantics(t *testing.T) {
@@ -232,12 +238,12 @@ func testAcquireWaitingKeyRevocationPhase1(t *testing.T, capturedPinned *bool) {
 					err = st.DeleteKey(ctx, key.ID)
 				}
 				requireDataNoError(t, err)
-				requireDataCondition(t, !(m.Inflight(a.ID) != 1), "waiter modified the held reservation")
+				requireDataCondition(t, m.Inflight(a.ID) == 1, "waiter modified the held reservation")
 				release()
 				routingAssertDenied(t, routingAwaitAcquire(t, finished), ErrNoAccounts)
 				{
 					got := m.Inflight(a.ID)
-					requireDataTruef(t, !(got != 0), "revoked acquisition leaked %d slots", got)
+					requireDataTruef(t, got == 0, "revoked acquisition leaked %d slots", got)
 				}
 			})
 		})
@@ -302,7 +308,7 @@ func testAcquireWaitingCurrentPolicyPhase1(t *testing.T, capturedPinned *bool) {
 				routingAssertDenied(t, routingAwaitAcquire(t, finished), tc.want)
 				{
 					got := m.Inflight(a.ID)
-					requireDataTruef(t, !(got != 0), "policy denial leaked %d slots", got)
+					requireDataTruef(t, got == 0, "policy denial leaked %d slots", got)
 				}
 			})
 		})

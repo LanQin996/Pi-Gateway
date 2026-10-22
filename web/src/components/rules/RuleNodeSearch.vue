@@ -103,6 +103,7 @@ onBeforeUnmount(() => { window.removeEventListener('resize', resize); document.r
             <div v-if="!kind && !wrap" class="search-filters">
                 <button v-for="item in (['', 'condition', 'action'] as const)" :key="item" type="button" :class="{active: filter === item}" :aria-pressed="filter === item" @click="filter = item; input?.focus()">{{ t((() => { if (item === '') { return 'rules.canvas.allModules'; } if (item === 'condition') { return 'rules.addCondition'; } return 'rules.addAction'; })()) }}</button>
             </div>
+            <!-- Rich searchable choices use the combobox/listbox active-descendant pattern; native options cannot contain help text and badges. -->
             <div :id="listID" class="search-results" role="listbox" :aria-label="t('rules.canvas.searchResults')">
                 <button v-for="(entry, index) in entries" :id="`${listID}-${index}`" :key="`${entry.kind}:${entry.type}`" :data-testid="`node-search-${entry.kind}-${entry.type}`" :data-search-index="index" class="search-entry" :class="{active: index === active}" type="button" role="option" :aria-selected="index === active" @pointermove="active = index" @click="choose(index)">
                     <span class="entry-title"><span class="entry-dot" :class="entry.kind" />{{ entry.label }}</span>

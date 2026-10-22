@@ -1,0 +1,31 @@
+# CI only. Add LAST after the normal sqlite/postgres/redis Compose files.
+# The public product Compose files retain their original HTTP behavior.
+services:
+  pi-gateway:
+    environment:
+      PI_GATEWAY_HOST: 127.0.0.1
+    # Replacement is essential: appending would leave the HTTP port published.
+    ports: !override
+      - "127.0.0.1:18443:18443"
+  compose-tls:
+    image: ${PI_GATEWAY_IMAGE:?The previously tested gateway image is required}
+    user: "${PI_GATEWAY_TLS_UID:?}:${PI_GATEWAY_TLS_GID:?}"
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    network_mode: service:pi-gateway
+    depends_on:
+      pi-gateway:
+        condition: service_healthy
+    entrypoint: ["/ci/compose-tls", "serve", "--listen", "0.0.0.0:18443", "--backend-port", "8317", "--dir", "/ci/certs"]
+    command: []
+    volumes:
+      - "${PI_GATEWAY_TLS_BINARY:?}:/ci/compose-tls:ro"
+      - "${PI_GATEWAY_TLS_CERTS:?}:/ci/certs:ro"
+    healthcheck:
+      test: ["CMD", "/ci/compose-tls", "check", "--listen", "127.0.0.1:18443", "--dir", "/ci/certs"]
+      interval: 2s
+      timeout: 6s
+      retries: 20
+      start_period: 5s

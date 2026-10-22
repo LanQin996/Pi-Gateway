@@ -150,10 +150,7 @@ func runOAuthFlowKeepAndExplicitProxyUseRealTokenTransportCase(t *testing.T, cap
 	}
 	roots := x509.NewCertPool()
 	roots.AddCert(tokenServer.Certificate())
-	serverName := "127.0.0.1"
-	if len(tokenServer.Certificate().DNSNames) > 0 {
-		serverName = tokenServer.Certificate().DNSNames[0]
-	}
+	serverName := oauthProxyCertificateServerName(tokenServer.Certificate())
 	for _, endpoint := range []string{"", first.URL, second.URL} {
 		client, err := h.factory.HTTPClient(endpoint)
 		reportTestFailure(t, err != nil, func() {
@@ -361,4 +358,12 @@ func verifyOAuthFlowKeepAndExplicitProxyUseRealTokenTransport2(flow *oauth.Flow,
 		flow.DBAccountID = a.ID
 	}
 	return err
+}
+
+// oauthProxyCertificateServerName matches the local token server certificate.
+func oauthProxyCertificateServerName(cert *x509.Certificate) string {
+	if len(cert.DNSNames) > 0 {
+		return cert.DNSNames[0]
+	}
+	return "127.0.0.1"
 }

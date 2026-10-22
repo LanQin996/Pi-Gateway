@@ -67,11 +67,11 @@ func TestModelCatalogPersistsFailureAndConcurrentAttemptOrdering(t *testing.T) {
 		got := get().SourceCatalogs[ModelSourceChatGPT]
 		requireDataTruef(t, !(got.Models[0].ID != "model-new" || got.FetchedAt != 105 || got.AttemptedAt != 110 || got.Error != "HTTP 403"), "out-of-order success diverged from source snapshot: %+v", got)
 	}
-	requireDataCondition(t, !(catalogRevisionForTest(t, s) == before), "out-of-order successful snapshot did not invalidate revision")
+	requireDataCondition(t, catalogRevisionForTest(t, s) != before, "out-of-order successful snapshot did not invalidate revision")
 	save(&ModelCatalog{Models: []CatalogModel{{ID: "stale"}}, FetchedAt: 99, AttemptedAt: 80})
 	{
 		got := get()
-		requireDataTrue(t, !(got.Models[0].ID != "model-new"), "stale success rolled catalog back")
+		requireDataTrue(t, got.Models[0].ID == "model-new", "stale success rolled catalog back")
 	}
 	requireDataNoError(t, s.Close())
 	s, err = Open(path)
@@ -109,14 +109,7 @@ func TestModelCatalogManualMergeKeepsUpstreamPersistenceSeparate(t *testing.T) {
 	}
 	get := func(want []CatalogModel, fetched, attempted int64, wantError string) *ModelCatalog {
 		t.Helper()
-		got, err := s.GetAccountModelCatalog(ctx, a.ID)
-		if err != nil || got == nil {
-			t.Fatalf("catalog=%+v err=%v", got, err)
-		}
-		if !reflect.DeepEqual(got.Models, want) || got.FetchedAt != fetched || got.AttemptedAt != attempted || got.Error != wantError {
-			t.Fatalf("catalog=%+v want models=%+v fetched=%d attempted=%d error=%q", got, want, fetched, attempted, wantError)
-		}
-		return got
+		return assertManualCatalogSnapshot(t, s, ctx, a.ID, &ModelCatalog{Models: want, FetchedAt: fetched, AttemptedAt: attempted, Error: wantError})
 	}
 	save := func(catalog *ModelCatalog) {
 		t.Helper()
@@ -144,19 +137,7 @@ func TestModelCatalogManualMergeKeepsUpstreamPersistenceSeparate(t *testing.T) {
 	snapshot := get(merged, 100, 100, "")
 	// Even an accidental save of a merged read cannot persist artificial models.
 	save(snapshot)
-	var raw string
-	if err := s.DB().QueryRow("SELECT models_json FROM account_model_catalog WHERE account_id=?", a.ID).Scan(&raw); err != nil {
-		t.Fatal(err)
-	}
-	var persisted []CatalogModel
-	if err := json.Unmarshal([]byte(raw), &persisted); err != nil || len(persisted) != 2 {
-		t.Fatalf("persisted=%s err=%v", raw, err)
-	}
-	for _, model := range persisted {
-		if model.Source != "" || model.ID == "manual-only" {
-			t.Fatalf("manual merge contaminated upstream snapshot: %s", raw)
-		}
-	}
+	assertOnlyUpstreamCatalogPersisted(t, s, a.ID)
 	save(&ModelCatalog{Models: []CatalogModel{{ID: "failed-result"}}, FetchedAt: 999, AttemptedAt: 110, Error: "HTTP 403"})
 	get(merged, 100, 110, "HTTP 403")
 	// Upstream removal changes the duplicate's source back to manual.
@@ -170,6 +151,35 @@ func TestModelCatalogManualMergeKeepsUpstreamPersistenceSeparate(t *testing.T) {
 		t.Fatal(err)
 	}
 	get([]CatalogModel{}, 120, 120, "")
+}
+
+func assertManualCatalogSnapshot(t *testing.T, s *Store, ctx context.Context, accountID int64, want *ModelCatalog) *ModelCatalog {
+	t.Helper()
+	got, err := s.GetAccountModelCatalog(ctx, accountID)
+	if err != nil || got == nil {
+		t.Fatalf("catalog=%+v err=%v", got, err)
+	}
+	if !reflect.DeepEqual(got.Models, want.Models) || got.FetchedAt != want.FetchedAt || got.AttemptedAt != want.AttemptedAt || got.Error != want.Error {
+		t.Fatalf("catalog=%+v want models=%+v fetched=%d attempted=%d error=%q", got, want.Models, want.FetchedAt, want.AttemptedAt, want.Error)
+	}
+	return got
+}
+
+func assertOnlyUpstreamCatalogPersisted(t *testing.T, s *Store, accountID int64) {
+	t.Helper()
+	var raw string
+	if err := s.DB().QueryRow("SELECT models_json FROM account_model_catalog WHERE account_id=?", accountID).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	var persisted []CatalogModel
+	if err := json.Unmarshal([]byte(raw), &persisted); err != nil || len(persisted) != 2 {
+		t.Fatalf("persisted=%s err=%v", raw, err)
+	}
+	for _, model := range persisted {
+		if model.Source != "" || model.ID == "manual-only" {
+			t.Fatalf("manual merge contaminated upstream snapshot: %s", raw)
+		}
+	}
 }
 
 func TestModelCatalogInvalidMetadataRejectedBeforeNoOp(t *testing.T) {
@@ -277,7 +287,7 @@ func TestModelCatalogLegacyWritesPreserveSourcesAndRefreshFences(t *testing.T) {
 	// with a larger timestamp.
 	{
 		_, err := s.BeginAccountModelCatalogRefresh(ctx, a.ID)
-		requireDataTrue(t, !(err != nil), err)
+		requireDataTrue(t, err == nil, err)
 	}
 	before = get()
 	revision = catalogRevisionForTest(t, s)
@@ -343,7 +353,7 @@ func TestModelCatalogMetadataPersistenceAndLegacyJSON(t *testing.T) {
 	const legacy = `[{"id":"legacy","name":"Legacy","description":"old cache"}]`
 	{
 		_, err := s.ExecContext(ctx, `INSERT INTO account_model_catalog(account_id,models_json,fetched_at,attempted_at,error) VALUES(?,?,?,?,?)`, a.ID, legacy, 10, 10, "")
-		requireDataTrue(t, !(err != nil), err)
+		requireDataTrue(t, err == nil, err)
 	}
 	old, err := s.GetAccountModelCatalog(ctx, a.ID)
 	requireDataTruef(t, !(err != nil || old == nil || len(old.Models) != 3 || old.Models[0].ID != "legacy" || old.Models[0].Metadata != nil), "legacy cache incompatible: %+v err=%v", old, err)
@@ -391,7 +401,7 @@ func testModelCatalogInvalidMetadataRejectedBeforeNoOpCase1(t *testing.T, a *Acc
 	if tc.name == "active-refresh" {
 		{
 			_, err := s.BeginAccountModelCatalogRefresh(ctx, a.ID)
-			requireDataTrue(t, !(err != nil), err)
+			requireDataTrue(t, err == nil, err)
 		}
 	}
 	if len(tc.catalog.Models) == 0 {
@@ -401,9 +411,9 @@ func testModelCatalogInvalidMetadataRejectedBeforeNoOpCase1(t *testing.T, a *Acc
 	tc.catalog.Models[0].Metadata = map[string]json.RawMessage{"bad": json.RawMessage(`not-json`)}
 	{
 		err := s.SaveAccountModelCatalog(ctx, tc.id, &tc.catalog)
-		requireDataTrue(t, !(err == nil), "invalid metadata bypassed validation")
+		requireDataTrue(t, err != nil, "invalid metadata bypassed validation")
 	}
-	requireDataCondition(t, !(catalogRevisionForTest(t, s) != revision), "invalid metadata changed catalog revision")
+	requireDataCondition(t, catalogRevisionForTest(t, s) == revision, "invalid metadata changed catalog revision")
 	{
 		got, err := s.GetAccountModelCatalog(ctx, a.ID)
 		requireDataTruef(t, !(err != nil || !reflect.DeepEqual(got, before)), "invalid metadata changed source snapshots: %+v err=%v", got, err)

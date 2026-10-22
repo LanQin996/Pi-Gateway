@@ -258,32 +258,35 @@ func TestAcquireAffinityRevalidatesAfterCacheIO(t *testing.T) {
 
 func TestAcquireAffinityReturnsFreshAccount(t *testing.T) {
 	for _, stage := range []string{"get", "set"} {
-		t.Run(stage, func(t *testing.T) {
-			st := newAccountsTestStore(t)
-			ctx := context.Background()
-			a := routingAccount(t, st, "target", 1)
-			key := routingKey(t, st)
-			mutate := func() {
-				_, err := st.ExecContext(ctx, `UPDATE accounts SET access_token=?, proxy_url=? WHERE id=?`, "fresh-token", "http://fresh-proxy.invalid", a.ID)
-				if err != nil {
-					t.Fatal(err)
-				}
-			}
-			probe := &affinityProbe{}
-			if stage == "get" {
-				probe.get = func(context.Context, session.AffinityKey) (int64, error) { mutate(); return a.ID, nil }
-			} else {
-				probe.set = func(context.Context, session.AffinityKey, int64) error { mutate(); return nil }
-			}
-			m := New(st, nil, nil, Options{Affinity: probe})
-			account, release, err := m.AcquireWithAffinity(ctx, key, "model", "connection")
-			if release != nil {
-				defer release()
-			}
-			if err != nil || account == nil || account.AccessToken != "fresh-token" || account.ProxyURL != "http://fresh-proxy.invalid" {
-				t.Fatalf("cache IO caused stale account forwarding: %v %v", account, err)
-			}
-		})
+		t.Run(stage, func(t *testing.T) { testAcquireAffinityReturnsFreshAccount(t, stage) })
+	}
+}
+
+func testAcquireAffinityReturnsFreshAccount(t *testing.T, stage string) {
+	t.Helper()
+	st := newAccountsTestStore(t)
+	ctx := context.Background()
+	a := routingAccount(t, st, "target", 1)
+	key := routingKey(t, st)
+	mutate := func() {
+		_, err := st.ExecContext(ctx, `UPDATE accounts SET access_token=?, proxy_url=? WHERE id=?`, "fresh-token", "http://fresh-proxy.invalid", a.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	probe := &affinityProbe{}
+	if stage == "get" {
+		probe.get = func(context.Context, session.AffinityKey) (int64, error) { mutate(); return a.ID, nil }
+	} else {
+		probe.set = func(context.Context, session.AffinityKey, int64) error { mutate(); return nil }
+	}
+	m := New(st, nil, nil, Options{Affinity: probe})
+	account, release, err := m.AcquireWithAffinity(ctx, key, "model", "connection")
+	if release != nil {
+		defer release()
+	}
+	if err != nil || account == nil || account.AccessToken != "fresh-token" || account.ProxyURL != "http://fresh-proxy.invalid" {
+		t.Fatalf("cache IO caused stale account forwarding: %v %v", account, err)
 	}
 }
 
@@ -416,7 +419,7 @@ func TestAffinityIdentityCanonicalAndExcludesVolatileState(t *testing.T) {
 	key.LastUsedAt, key.RequestCount, key.UpdatedAt = 12, 4, 30
 	first.LastUsedAt, first.RequestCount, first.ErrorCount = 13, 5, 1
 	first.LastStartedAt, first.UpdatedAt, first.EWMAFailureRateBP = 15, 31, 20
-	requireDataCondition(t, !(m.affinityKey(key, []*store.Account{second, first}, "model", "scope", "smart") != original), "membership order or request telemetry changed the credential identity")
+	requireDataCondition(t, m.affinityKey(key, []*store.Account{second, first}, "model", "scope", "smart") == original, "membership order or request telemetry changed the credential identity")
 	for _, mutate := range []func(*store.APIKey){
 		func(k *store.APIKey) { k.MaxConcurrency++ },
 		func(k *store.APIKey) { k.RequestsPerMinute++ },
@@ -426,7 +429,7 @@ func TestAffinityIdentityCanonicalAndExcludesVolatileState(t *testing.T) {
 	} {
 		changed := *key
 		mutate(&changed)
-		requireDataCondition(t, !(m.affinityKey(&changed, []*store.Account{first, second}, "model", "scope", "smart") == original), "key budget/concurrency/transport policy reused an old identity")
+		requireDataCondition(t, m.affinityKey(&changed, []*store.Account{first, second}, "model", "scope", "smart") != original, "key budget/concurrency/transport policy reused an old identity")
 	}
 }
 
@@ -439,17 +442,17 @@ func TestAffinityRequestCachesMissesAndFailures(t *testing.T) {
 			candidates := []*store.Account{{ID: 1, AccessToken: "one"}}
 			var request requestAffinity
 			for i := 0; i < 100; i++ {
-				requireDataCondition(t, !(request.load(context.Background(), m, key, candidates, "model", "scope", "smart") != 0), "faulty cache value became a preference")
+				requireDataCondition(t, request.load(context.Background(), m, key, candidates, "model", "scope", "smart") == 0, "faulty cache value became a preference")
 			}
 			{
 				gets, _ := probe.counts()
-				requireDataTruef(t, !(gets != 1), "same-identity miss/failure was fetched %d times", gets)
+				requireDataTruef(t, gets == 1, "same-identity miss/failure was fetched %d times", gets)
 			}
 			candidates[0].AccessToken = "rotated"
 			request.load(context.Background(), m, key, candidates, "model", "scope", "smart")
 			{
 				gets, _ := probe.counts()
-				requireDataTruef(t, !(gets != 2), "changed identity was not re-read: %d", gets)
+				requireDataTruef(t, gets == 2, "changed identity was not re-read: %d", gets)
 			}
 		})
 	}
@@ -607,7 +610,7 @@ func testAcquireAffinityRevalidatesAfterCacheIOPhase1(t *testing.T, capturedStag
 	m := New(st, nil, nil, Options{Affinity: probe})
 	account, release, err := m.AcquireWithAffinity(ctx, key, "model", "connection")
 	routingAssertDenied(t, routingAcquireResult{account, release, err}, want)
-	requireDataCondition(t, !(m.Inflight(a.ID) != 0), "denied hinted reservation leaked a slot")
+	requireDataCondition(t, m.Inflight(a.ID) == 0, "denied hinted reservation leaked a slot")
 }
 
 // testAcquireAffinityQueuedReadsAreBoundedAndRevalidatedPhase1 exercises one isolated test phase with the original shared state.
@@ -673,6 +676,6 @@ func testAcquireAffinityQueuedReadsAreBoundedAndRevalidatedPhase1(t *testing.T, 
 			gets, sets := probe.counts()
 			requireDataTruef(t, !(gets != wantGets || sets != wantSets), "cache calls=%d/%d, want %d/%d", gets, sets, wantGets, wantSets)
 		}
-		requireDataCondition(t, !(m.Inflight(a.ID) != 0), "queued hint handling leaked a slot")
+		requireDataCondition(t, m.Inflight(a.ID) == 0, "queued hint handling leaked a slot")
 	})
 }

@@ -10,6 +10,9 @@ export async function checkRuleGraph(schema, backend) {
         }, bundle: true, write: false, format: 'esm', platform: 'node'
     })
     const m = await import(`data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].text).toString('base64')}`)
+    assert.equal(m.ruleLabel('field', 'then', 'en'), 'Then')
+    assert.equal(m.ruleLabel('field', 'constructor', 'en'), 'constructor')
+    assert.equal(await Promise.resolve(m.ruleLabels.field), m.ruleLabels.field, 'label keys cannot create thenable objects')
     const fixtures = [...(schema.examples ?? [])]
     const special = {
         ...m.newRule(),
@@ -330,7 +333,7 @@ function checkCatalogLabels(m, schema, backend) {
     // Coverage is against the authoritative backend catalog, not equality of locale key counts.
     let labels = 0
     const label = (group, value) => {
-        assert.ok(m.ruleLabels[group]?.[value], `missing label ${group}.${value}`);
+        assert.ok(m.ruleLabels[group]?.has(value), `missing label ${group}.${value}`);
         for (const locale of ['en', 'zh-CN']) assert.ok(m.ruleLabel(group, value, locale).trim());
         labels++
     }
@@ -343,7 +346,7 @@ function checkCatalogLabels(m, schema, backend) {
             for (const field of cap.fields) {
                 label('field', field.name);
                 for (const value of field.enum ?? []) {
-                    const found = ['option', 'phase', 'source', 'condition'].find(group => m.ruleLabels[group]?.[value]);
+                    const found = ['option', 'phase', 'source', 'condition'].find(group => m.ruleLabels[group]?.has(value));
                     assert.ok(found, `missing enum label ${cap.id}.${field.name}:${value}`);
                     label(found, value)
                 }
@@ -351,18 +354,19 @@ function checkCatalogLabels(m, schema, backend) {
         }
     }
     for (const field of backend.rule_fields) for (const value of field.enum ?? []) {
-        const group = ['option', 'phase', 'source'].find(group => m.ruleLabels[group]?.[value]);
+        const group = ['option', 'phase', 'source'].find(group => m.ruleLabels[group]?.has(value));
         assert.ok(group);
         label(group, value)
     }
     for (const phase of backend.phases) label('phase', phase)
     for (const source of schema.sources) label('source', source)
-    for (const status of Object.keys(m.ruleLabels.status)) label('status', status)
+    for (const status of m.ruleLabels.status.keys()) label('status', status)
     return labels
 }
 
 function checkNestedWorkflow(m, schema) {
     const set = id => ({id, type: 'json_set', params: {path: `/${id}`, value: false}})
+    // `then` is the required JSON wire branch, not a callable Promise method.
     const branch = {
         id: 'branch', type: 'if', params: {
             predicate: {op: 'always'},
@@ -370,6 +374,7 @@ function checkNestedWorkflow(m, schema) {
             else: [set('shared')],
         },
     }
+    assert.ok(Array.isArray(branch.params.then), 'the wire then branch is data, never a callable thenable')
     const rule = {...m.newRule(), actions: [set('before'), branch, set('after')]}
     const graph = m.ruleToGraph(rule), owner = graph.nodes.find(node => node.data.id === 'branch')
     assert.deepEqual(m.graphToRule(graph, schema), rule)
