@@ -26,6 +26,18 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Prepare a private Go toolchain for frontend checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          # Hosted toolcache ancestors can be writable by other users. Copy the
+          # setup-go installation; do not weaken the resolver's trust checks.
+          source_root="$(go env GOROOT)"
+          private_root="$(mktemp -d /tmp/pi-gateway-go.XXXXXXXX)"
+          cp -R "$source_root/." "$private_root/"
+          chmod -R go-w "$private_root"
+          printf 'GOROOT=%s\nPI_GO_BINARY=%s/bin/go\n' "$private_root" "$private_root" >> "$GITHUB_ENV"
       - run: npm ci --ignore-scripts
       - run: npm run typecheck
       - run: npm run check:i18n

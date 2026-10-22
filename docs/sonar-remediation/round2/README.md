@@ -57,6 +57,14 @@
 
 同時撤回以 production clone 作測試 oracle、以及以 method values 隱藏 context 的做法；相關項目保留 review。這些調整以維持真實行為及可驗證性為優先，不為追求 A 而壓制規則。
 
+## 遠端 CI 相容性修正
+
+首次提交的 hosted runner 在 `check:rules` 拒絕 setup-go 的共用 toolcache 信任鏈。CI 現在將官方 setup-go 安裝複製到本次 job 專屬、目前使用者擁有的 `/tmp` 隨機私有目錄，移除 group/world 寫入權限，並明確設定 `GOROOT`／`PI_GO_BINARY`；不放寬 resolver 的 owner／全部 ancestor 驗證。此目錄隨 disposable runner 銷毀，額外成本為一次本機工具鏈複製，不涉及部署。
+
+使用相同複製流程重新執行 `check:rules`／`check:sonar-regressions` 通過；遠端最終結果以 PR checks 為準。
+
+首個遠端分析（`a981cb788c99cb9e13a8d6ffd87ae09c4f1b100f`）仍因新程式碼 Security C 未通過 Quality Gate。PR 的兩項安全 review comments 為：`editorId.ts` 非 credential 的 PRNG fallback（`AaFh_hhMwr3G9Zas3V9V`），以及 `compose_smoke.py` 固定 loopback HTTP（`AaFh_h1swr3G9Zas3V9Y`）。這些情境審查仍未獲服務端核准；不以改寫字串或刪除防碰撞行為規避規則。維持未解決狀態，不能宣稱全 A。
+
 ## 驗證狀態
 
 **第二輪完整 Go vet／race 及最後 accounts race 均通過。** 使用 Go 1.26.0；完整 `go vet ./...` 與 `go test -race -json -count=1 -timeout=30m ./...` 通過 21 個測試套件（API 603.809 秒）。PostgreSQL 17.11／Redis 7.4.11 實機環境的 9 個必跑整合項目全部通過且無 skip，包含四種 backend 組合。
