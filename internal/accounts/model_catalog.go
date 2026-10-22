@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -48,6 +49,137 @@ func ModelOperationTimeout(cfg *config.Config, ceiling time.Duration) time.Durat
 		return time.Duration(seconds) * time.Second
 	}
 	return ceiling
+}
+
+// StartModelCatalogRefresher keeps enabled accounts' ChatGPT and linked Codex
+// model catalogs current. interval is in seconds; zero disables automatic sync.
+// The provider is read for every sweep so runtime user-agent edits take effect.
+func (m *Manager) StartModelCatalogRefresher(ctx context.Context, interval, concurrency int, cfg *config.Config, userAgent func() string) {
+	if interval <= 0 || cfg == nil || m == nil || m.store == nil || ctx.Err() != nil {
+		return
+	}
+	period := time.Duration(interval) * time.Second
+	if period < 30*time.Second {
+		period = 30 * time.Second
+	}
+	if concurrency <= 0 {
+		concurrency = 2
+	}
+	m.mu.Lock()
+	if m.modelCatalogRefresherRunning {
+		m.mu.Unlock()
+		return
+	}
+	m.modelCatalogRefresherRunning = true
+	m.mu.Unlock()
+	go func() {
+		defer func() {
+			m.mu.Lock()
+			m.modelCatalogRefresherRunning = false
+			m.mu.Unlock()
+		}()
+		// Let startup finish before contacting account backends.
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+			}
+			m.refreshAllModelCatalogs(ctx, concurrency, cfg, userAgent, period)
+			// Discover newly imported or newly linked accounts promptly without
+			// refetching catalogs whose last attempt is still within the interval.
+			timer.Reset(min(period, 30*time.Second))
+		}
+	}()
+}
+
+func (m *Manager) refreshAllModelCatalogs(ctx context.Context, concurrency int, cfg *config.Config, userAgent func() string, period time.Duration) {
+	if ctx.Err() != nil || cfg == nil || !m.modelCatalogSweepMu.TryLock() {
+		return
+	}
+	defer m.modelCatalogSweepMu.Unlock()
+	if concurrency <= 0 {
+		concurrency = 2
+	}
+	accounts, err := m.store.ListEnabledAccounts(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			m.logger.Error("listing accounts for a model catalog refresh failed", "error", err)
+		}
+		return
+	}
+	if len(accounts) == 0 {
+		return
+	}
+	ids := make([]int64, 0, len(accounts))
+	for _, account := range accounts {
+		ids = append(ids, account.ID)
+	}
+	catalogs, err := m.store.GetAccountModelCatalogs(ctx, ids)
+	if err != nil {
+		if ctx.Err() == nil {
+			m.logger.Error("reading model catalogs for a scheduled refresh failed", "error", err)
+		}
+		return
+	}
+	now := m.nowTime().UnixMilli()
+	ua := ""
+	if userAgent != nil {
+		ua = userAgent()
+	}
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	for _, account := range accounts {
+		if !modelCatalogRefreshDue(account, catalogs[account.ID], now, period) {
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case sem <- struct{}{}:
+		}
+		if ctx.Err() != nil {
+			<-sem
+			return
+		}
+		wg.Add(1)
+		go func(accountID int64) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			// Accounts can be disabled or deleted while waiting for a slot.
+			account, err := m.store.GetAccount(ctx, accountID)
+			if err != nil {
+				if ctx.Err() == nil {
+					m.logger.Debug("loading account for a model catalog refresh failed", "account_id", accountID, "error", err)
+				}
+				return
+			}
+			if account == nil || !account.Enabled || ctx.Err() != nil {
+				return
+			}
+			if _, err := m.RefreshModelCatalog(ctx, account, cfg, ua); err != nil && ctx.Err() == nil {
+				m.logger.Debug("scheduled model catalog refresh failed", "account", account.Name, "error", err)
+			}
+		}(account.ID)
+	}
+}
+
+func modelCatalogRefreshDue(account *store.Account, catalog *store.ModelCatalog, now int64, period time.Duration) bool {
+	if catalog == nil || catalog.AttemptedAt <= 0 || now-catalog.AttemptedAt >= period.Milliseconds() {
+		return true
+	}
+	primary, exists := catalog.SourceCatalogs[store.ModelSourceChatGPT]
+	if !exists || primary.AttemptedAt <= 0 {
+		return true
+	}
+	if account.CodexLinked() {
+		codex, exists := catalog.SourceCatalogs[store.ModelSourceCodex]
+		return !exists || codex.Skipped || codex.AttemptedAt <= 0
+	}
+	return false
 }
 
 // RefreshModelCatalog explicitly refreshes independent ChatGPT/Codex catalogs.

@@ -199,6 +199,12 @@ func runGateway(cfg *config.Config) error {
 		time.Duration(cfg.Accounts.RefreshIntervalSeconds)*time.Second,
 		cfg.Accounts.RefreshConcurrency,
 	)
+	accountsMgr.StartModelCatalogRefresher(rootCtx,
+		cfg.Models.RefreshIntervalSeconds,
+		cfg.Accounts.RefreshConcurrency,
+		cfg,
+		func() string { return settingsHolder.Get().UserAgent },
+	)
 	accountsMgr.StartQuotaRefresher(rootCtx,
 		cfg.Accounts.QuotaRefreshSeconds,
 		cfg.Accounts.RefreshConcurrency,

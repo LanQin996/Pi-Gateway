@@ -5,7 +5,7 @@
 
 后端使用 Go，管理界面使用 Vue 3 + TypeScript；生产前端嵌入 Go 可执行文件，运行时不需要单独部署 Node.js 服务。
 
-> 本项目提供 Responses API 入口，并非所有 OpenAI API 的通用实现。当前部署模型是**单个活动网关实例**；启用 PostgreSQL 或
+> 本项目提供 Responses API 和 Chat Completions 兼容入口，并非所有 OpenAI API 的通用实现。当前部署模型是**单个活动网关实例**；启用 PostgreSQL 或
 > Redis 不等于支持多实例无状态负载均衡。
 
 ## 功能概览
@@ -15,11 +15,15 @@
   。管理员登录会话在有效期内跨网关重启保留。
 - **客户端 API Key**：按 Key 管理访问范围、并发、限额及预算；客户端使用网关签发的 Key，而不是管理员密码或账号令牌。
 - **协议转发**：HTTP SSE、非流式 JSON、下游 WebSocket；上游支持 SSE、WebSocket、缓存连接与自动回退。
-- **模型与配额**：账号模型目录同步、模型路由与禁用配置；可关联独立 Codex 凭据查询配额和补充模型目录。
+- **模型与配额**：账号模型目录自动同步、模型路由与禁用配置；可关联独立 Codex 凭据查询配额和补充模型目录。
 - **统一规则**：递归条件、多动作、优先级、启停、三阶段处理、图形 / JSON 双模式编辑，以及无上游副作用的试运行。
 - **传输分析**：查看原始客户端输入、实际发往上游的内容、响应帧及差异；按规则和动作追踪修改来源。
 - **持久化**：默认 SQLite，可选 PostgreSQL；Redis 用于有界、可丢弃的会话与缓存元数据。
 - **管理界面**：中英文切换、明暗主题、使用统计、传输记录和在线设置。
+
+启用模型自动同步时，网关在启动 5 秒后首次扫描启用账号，之后在每轮结束 30 秒后再次扫描，
+发现新增账号或新关联的 Codex 凭据；已有模型目录按 `models.refresh_interval_seconds` 间隔重新同步。
+账号较多时单轮同步可能耗时；后台同步失败保留上次成功目录和手动补充的模型。
 
 传输分析的 JSON diff 保留原始请求字段顺序，并仅在比较时对齐另一侧对象字段；数组和消息顺序始终保留。
 大 body、长行和 SSE 文本不会被前端裁切，原始值视图保留双方各自的字段顺序。
@@ -252,12 +256,38 @@ curl -N http://127.0.0.1:8317/v1/responses \
 | 端点                   | 用途                                                                 |
 |----------------------|--------------------------------------------------------------------|
 | `POST /v1/responses` | HTTP Responses 请求，支持 SSE 和聚合 JSON                                  |
+| `POST /v1/chat/completions` | Chat Completions 兼容请求，支持 SSE 和非流式 JSON                           |
 | `GET /v1/responses`  | WebSocket Upgrade，支持 `response.create` 和活动响应的 `response.interrupt` |
 | `GET /v1/models`     | 当前 Key 可访问的模型目录                                                    |
 | `GET /healthz`       | 健康检查                                                               |
 
 网关还提供 `/backend-api/codex/responses`、`/codex/responses` 的 HTTP / WebSocket 兼容别名，以及 HTTP `POST /responses`
 。根据客户端实际追加的路径选择 Base URL，避免重复拼接 `/v1` 或 `/responses`。这些别名**不会改变上游凭据类型或生成端点**。
+
+仅支持 Chat Completions 的客户端也可使用相同 Base URL 和网关 Key：
+
+```bash
+curl http://127.0.0.1:8317/v1/chat/completions \
+  -H "Authorization: Bearer $PI_GATEWAY_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"your-available-model","messages":[{"role":"user","content":"你好"}]}'
+```
+
+此入口默认返回非流式 `chat.completion`；设置 `stream:true` 时实时返回
+`chat.completion.chunk`，以 `data: [DONE]` 结束。`stream_options.include_usage:true`
+会在结束前增加 `choices:[]` 的用量块（上游提供用量时）。
+
+适配支持 system/developer/user/assistant 消息、用户图片 URL 或 data URL、自定义 function 工具及其
+调用历史和结果、`tool_choice`、`response_format` 和 `reasoning_effort`。内部将 `messages` 转换为
+Responses `input`，再把文本、拒绝信息、工具调用及 Token 用量转回 Chat Completions 格式；
+鉴权、账号调度、规则、429 重试和用量记录复用原有流程，传输记录保留原始客户端请求。
+规则处理的请求及响应事件仍为 Responses 格式，`client_body` 保留客户端的 Chat 请求。
+
+这是网关兼容层，上游仍调用 SiWC `/responses`，不会向上游请求 `/chat/completions`，
+也不增加账号权限。仅支持单候选（`n=1`）；音频、旧版 `functions/function_call`、
+`stop`、`seed`、`logprobs`、惩罚项等未适配参数明确返回 400。
+`max_tokens` / `max_completion_tokens` 映射到 `max_output_tokens` 后仍由现有 SiWC 限制移除；
+`temperature`、`top_p` 等同样沿用原有过滤，不保证生效。结构化输出和图片能力仍取决于模型。
 
 上游协议由账号设置优先决定，其次使用 Key 或全局配置；下游使用 WebSocket 不代表上游也必须使用 WebSocket。`passthrough`
 模式才会按客户端协议选择上游。
@@ -287,6 +317,7 @@ YAML 配置，`--host`、`--port` 可覆盖监听设置。
 | `upstream.transport`          | `PI_GATEWAY_UPSTREAM_TRANSPORT`                     | 默认上游传输模式                        |
 | `models.codex_base_url`       | `PI_GATEWAY_CODEX_BASE_URL`                         | 可选 Codex 模型目录端点                 |
 | `models.codex_client_version` | `PI_GATEWAY_CODEX_CLIENT_VERSION`                   | Codex 目录请求版本；`auto` 自动解析，也可固定版本 |
+| `models.refresh_interval_seconds` | `PI_GATEWAY_MODELS_REFRESH_INTERVAL_SECONDS` | 模型目录自动同步间隔，默认 3600 秒；0 禁用，启用时至少 30 秒 |
 | `logging.level`               | `PI_GATEWAY_LOG_LEVEL`                              | 日志级别                            |
 
 `upstream.transport` 支持 `sse`、`websocket`、`websocket-cached`、`auto` 和 `passthrough`。模型、路由策略、捕获等运行时选项也可在管理界面调整。

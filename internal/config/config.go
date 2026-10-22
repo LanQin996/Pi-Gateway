@@ -162,6 +162,8 @@ type ReasoningConfig struct {
 type ModelsConfig struct {
 	// DefaultModel is used when the client omits the model.
 	DefaultModel string `yaml:"default_model"`
+	// RefreshIntervalSeconds controls automatic catalog discovery. 0 disables it.
+	RefreshIntervalSeconds int `yaml:"refresh_interval_seconds"`
 	// Mappings rewrites requested model ids before they reach the upstream.
 	Mappings map[string]string `yaml:"mappings"`
 	// CodexBaseURL controls only catalog discovery for linked Codex accounts.
@@ -250,9 +252,10 @@ func Default() *Config {
 			DefaultSummary: "auto",
 		},
 		Models: ModelsConfig{
-			Mappings:           map[string]string{},
-			CodexBaseURL:       DefaultCodexBaseURL,
-			CodexClientVersion: AutoCodexClientVersion,
+			RefreshIntervalSeconds: 3600,
+			Mappings:               map[string]string{},
+			CodexBaseURL:           DefaultCodexBaseURL,
+			CodexClientVersion:     AutoCodexClientVersion,
 		},
 		Logging: LoggingConfig{Level: "info"},
 	}
@@ -353,6 +356,7 @@ func (c *Config) applyLimitEnv() error {
 		"PI_GATEWAY_REDIS_MAX_ENTRIES":                       &c.Redis.MaxEntries,
 		"PI_GATEWAY_REDIS_MAX_RECORD_BYTES":                  &c.Redis.MaxRecordBytes,
 		"PI_GATEWAY_REDIS_CATALOG_TTL_SECONDS":               &c.Redis.CatalogTTLSeconds,
+		"PI_GATEWAY_MODELS_REFRESH_INTERVAL_SECONDS":         &c.Models.RefreshIntervalSeconds,
 		"PI_GATEWAY_UPSTREAM_WEBSOCKET_MAX_POOL_CONNECTIONS": &c.Upstream.WebsocketMaxPoolConnections,
 	} {
 		if v, ok := os.LookupEnv(name); ok {
@@ -436,6 +440,9 @@ func (c *Config) Validate() error {
 	}
 	if _, err := c.codexModelsURL(); err != nil {
 		return err
+	}
+	if seconds := c.Models.RefreshIntervalSeconds; seconds < 0 || seconds > 0 && seconds < 30 || int64(seconds) > int64((1<<63-1)/time.Second) {
+		return errors.New("models.refresh_interval_seconds must be 0 or at least 30 seconds and fit a duration (value redacted)")
 	}
 	if err := c.validateDatabase(); err != nil {
 		return err

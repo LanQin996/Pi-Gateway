@@ -98,6 +98,7 @@ func New(opts Options) *Server {
 // this gateway by changing only their base URL, since Pi appends
 // "/codex/responses" to whatever base URL it is given.
 func (s *Server) Routes(mux *http.ServeMux) {
+	mux.HandleFunc("POST /v1/chat/completions", s.handleChatCompletionsHTTP)
 	for _, path := range []string{"/v1/responses/compact", "/backend-api/codex/responses/compact", "/codex/responses/compact", "/responses/compact"} {
 		mux.HandleFunc("POST "+path, s.handleResponsesHTTP)
 	}
@@ -153,6 +154,12 @@ type prepared struct {
 // prepare pins the rule snapshot before admission and retains diagnostic state
 // for every later early return, including requests which never select an account.
 func (s *Server) prepare(ctx context.Context, r *http.Request, rawBody []byte, clientTransport string) (*prepared, *apiError) {
+	return s.prepareInput(ctx, r, rawBody, rawBody, clientTransport)
+}
+
+// prepareInput keeps the original client payload for diagnostics and rule facts,
+// while protocol adapters supply a Responses payload to the shared pipeline.
+func (s *Server) prepareInput(ctx context.Context, r *http.Request, rawBody, responsesBody []byte, clientTransport string) (*prepared, *apiError) {
 	key, err := s.authenticate(ctx, r)
 	if err != nil {
 		return nil, &apiError{Status: http.StatusUnauthorized, Message: "invalid or missing API key", Type: "invalid_request_error"}
@@ -161,16 +168,23 @@ func (s *Server) prepare(ctx context.Context, r *http.Request, rawBody []byte, c
 	if bodyErr != nil {
 		return nil, bodyErr
 	}
+	responseInput := clientBody
+	if !bytes.Equal(rawBody, responsesBody) {
+		responseInput, bodyErr = decodeClientBody(responsesBody)
+		if bodyErr != nil {
+			return nil, bodyErr
+		}
+	}
 	compactDirect := strings.HasSuffix(r.URL.Path, "/responses/compact")
-	compact, compactErr := detectCompaction(clientBody, compactDirect)
+	compact, compactErr := detectCompaction(responseInput, compactDirect)
 	if compactErr != nil {
 		return nil, compactErr
 	}
 	rt := s.settings.Get()
 	headerHints := []string{r.Header.Get("x-client-request-id"), r.Header.Get("session-id"), r.Header.Get("session_id"), r.Header.Get("x-session-id")}
-	sessionID := piwire.DeriveSessionID(clientBody, headerHints, func() string { return internalSessionID(ctx) })
-	promptCacheKey := piwire.DeriveSessionID(clientBody, headerHints, nil)
-	normalizeBody, expandErr := s.expandClientCompaction(rawBody, clientBody, key.ID)
+	sessionID := piwire.DeriveSessionID(responseInput, headerHints, func() string { return internalSessionID(ctx) })
+	promptCacheKey := piwire.DeriveSessionID(responseInput, headerHints, nil)
+	normalizeBody, expandErr := s.expandClientCompaction(responsesBody, responseInput, key.ID)
 	if expandErr != nil {
 		return nil, expandErr
 	}
@@ -183,7 +197,7 @@ func (s *Server) prepare(ctx context.Context, r *http.Request, rawBody []byte, c
 		CompactionMode: rt.CompactionMode, CompactionModel: rt.CompactionModel, CompactionPrompt: rt.CompactionPrompt, Compact: compact, CompactDirect: compactDirect,
 		RuleEngine: engine, RuleVersion: version, Key: key, ClientBody: clientBody, ClientHeaders: r.Header.Clone(), Built: built, SessionID: sessionID,
 		WireSessionID: promptCacheKey, PoolSessionID: poolSessionID(ctx, sessionID),
-		WantsStream: wantsStream(clientBody), RawRequestBody: rawBody,
+		WantsStream: wantsStream(responseInput), RawRequestBody: rawBody,
 		RuleContext: map[string]any{"original_model": clientBody["model"], "model": clientBody["model"], "settings": s.ruleSettings(rt), "wire_session_id": promptCacheKey, "client_headers": rules.RedactedHeaders(r.Header),
 			"compact": compact, "api_key_id": key.ID, "client_protocol": clientTransport,
 			"request_path": r.URL.Path, "request_method": r.Method},

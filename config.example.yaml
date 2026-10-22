@@ -172,6 +172,10 @@ reasoning:
 models:
   # Used when a client sends no model.
   default_model: ''
+  # Automatically refresh enabled accounts' model catalogs every hour.
+  # 0 disables automatic sync; otherwise at least 30 seconds.
+  # Override with PI_GATEWAY_MODELS_REFRESH_INTERVAL_SECONDS.
+  refresh_interval_seconds: 3600
   # Rewrite requested model ids, e.g. {"gpt-4o": "gpt-5.1-codex"}.
   mappings: { }
   # Catalog discovery only, and only for accounts with linked Codex credentials.

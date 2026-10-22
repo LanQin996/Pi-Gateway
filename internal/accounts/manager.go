@@ -33,6 +33,9 @@ type Manager struct {
 
 	// Codex catalog negotiation is independent of Pi generation identity.
 	codexVersions codexVersionCache
+	// Scheduled catalog sweeps never overlap, even if started more than once.
+	modelCatalogSweepMu          sync.Mutex
+	modelCatalogRefresherRunning bool
 
 	mu sync.Mutex
 	// inflight tracks concurrent requests per account id.
