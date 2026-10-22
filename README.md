@@ -512,6 +512,13 @@ Vite 会将 `/api`、`/v1`、`/healthz` 代理到本机 `8317`；修改后端端
 
 ### 自动化检查
 
+日常 push（`master` / `main`）和 PR 的 CI 并行执行前端类型、契约检查与构建，以及无 race 的 Go 测试和静态检查，目标约 3 分钟；不安装浏览器，不启动数据库容器，也不重复构建 Docker 镜像。
+
+`master` / `main` 的 push 通过 CI 后，会自动触发 **Publish container image**，构建刚通过检查的提交并推送到 `ghcr.io/lanqin996/pi-gateway`；默认分支更新 `latest` / `edge` 标签。镜像发布单独计时，不再重复执行一遍 CI。
+
+完整的浏览器、`-race`、真实 PostgreSQL / Redis 与 Compose 回归保留在 Actions 的 **Full regression**，按需手动运行。版本标签发布会自动运行完整回归；手动发布也可勾选 `full_regression`。
+镜像仅构建 `linux/amd64`，在原生 x86 runner 上执行，不使用 QEMU；适用于 `uname -m` 显示 `x86_64` 的 Intel / AMD 服务器。
+
 从仓库根目录执行：
 
 ```bash
@@ -545,7 +552,7 @@ go test -race -count=1 ./...
 未设置变量时，依赖真实服务的测试会跳过；**跳过不代表实库验证通过**。默认 Compose 不开放这些服务的宿主机端口，也不会把 `.env`
 自动导出给测试进程，需要单独准备连接条件。
 
-[CI 工作流](.github/workflows/ci.yml) 提供临时 PostgreSQL / Redis 服务，并要求指定集成测试实际运行而不能跳过。
+[完整回归工作流](.github/workflows/full-ci.yml) 提供临时 PostgreSQL / Redis 服务，并要求指定集成测试实际运行而不能跳过。
 
 ## 项目结构
 

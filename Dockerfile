@@ -7,18 +7,20 @@ WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci --ignore-scripts
 COPY web/ ./
-RUN npm run typecheck && npm run check:i18n && npm run check:capture && npm run build
+# CI runs type and contract checks before the publish workflow starts.
+RUN npm run build
 
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-bookworm AS backend
-ARG TARGETOS
-ARG TARGETARCH
-ARG VERSION=dev
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd/ ./cmd/
 COPY internal/ ./internal/
 COPY --from=frontend /src/internal/webui/dist/ ./internal/webui/dist/
+# Keep target and version changes from invalidating the shared dependency layer.
+ARG TARGETOS
+ARG TARGETARCH
+ARG VERSION=dev
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
     -ldflags="-s -w -X main.version=${VERSION}" \
     -o /out/pi-gateway ./cmd/pi-gateway
