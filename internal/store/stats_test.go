@@ -165,7 +165,7 @@ func TestUsageLifecycleReconcileAndRetention(t *testing.T) {
 	requireDataTruef(t, !(err != nil || len(rows) != 1 || rows[0].ID != oldID || rows[0].CompletedAt <= 0), "orphan rows=%+v %v", rows, err)
 	{
 		err := s.FinishUsageRecord(ctx, recentID, &UsageRecord{Outcome: "running"})
-		requireDataTrue(t, !(err == nil), "accepted nonterminal finish")
+		requireDataTrue(t, err != nil, "accepted nonterminal finish")
 	}
 	for i := 0; i < 3; i++ {
 		finishTestUsage(t, s, UsageRecord{RequestID: "done", StartedAt: 10, CompletedAt: 50, Outcome: "succeeded"})
@@ -182,6 +182,6 @@ func TestUsageLifecycleReconcileAndRetention(t *testing.T) {
 	cancel()
 	{
 		_, err := s.DeleteUsageRecordsBefore(cancelled, 1000, 1, 1)
-		requireDataTrue(t, !(err == nil), "ignored cancellation")
+		requireDataTrue(t, err != nil, "ignored cancellation")
 	}
 }

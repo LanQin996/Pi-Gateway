@@ -84,7 +84,7 @@ func TestRoutingSpecificHealthAndModelNeverFallsBack(t *testing.T) {
 			case "cooling":
 				{
 					_, err := st.DB().ExecContext(ctx, `UPDATE accounts SET cooldown_until=? WHERE id=?`, time.Now().Add(time.Hour).UnixMilli(), a.ID)
-					requireDataTrue(t, !(err != nil), err)
+					requireDataTrue(t, err == nil, err)
 				}
 			default:
 				requireDataNoError(t, st.SetAccountStatus(ctx, a.ID, status, ""))
@@ -153,7 +153,7 @@ func TestRoutingConcurrentReservationsAndIdempotentRelease(t *testing.T) {
 	})
 	{
 		got := m.Inflight(a.ID)
-		requireDataTruef(t, !(got != 2), "inflight=%d want2", got)
+		requireDataTruef(t, got == 2, "inflight=%d want2", got)
 	}
 	cancel()
 	wg.Wait()
@@ -175,13 +175,13 @@ func TestRoutingConcurrentReservationsAndIdempotentRelease(t *testing.T) {
 	releases.Wait()
 	{
 		got := m.Inflight(a.ID)
-		requireDataTruef(t, !(got != 1), "double release stole another request slot: %d", got)
+		requireDataTruef(t, got == 1, "double release stole another request slot: %d", got)
 	}
 	second.release()
 	second.release()
 	{
 		got := m.Inflight(a.ID)
-		requireDataTruef(t, !(got != 0), "leaked slots: %d", got)
+		requireDataTruef(t, got == 0, "leaked slots: %d", got)
 	}
 }
 

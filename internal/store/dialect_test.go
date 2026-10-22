@@ -348,6 +348,7 @@ func TestPostgresStoreIntegration(t *testing.T) {
 
 func exerciseSQLBackend(t *testing.T, s *Store) {
 	t.Helper()
+	exerciseStoreSQLBoundaries(t, s)
 	ctx := context.Background()
 	p := &Proxy{Name: "test proxy", URL: "http://user:secret@localhost:8080"}
 	requireDataNoError(t, s.CreateProxy(ctx, p))
@@ -367,7 +368,7 @@ func exerciseSQLBackend(t *testing.T, s *Store) {
 		cooldown_until=CASE WHEN ? THEN MAX(cooldown_until,?) ELSE cooldown_until END,
 		ewma_first_output_ms=CASE WHEN CAST(? AS DOUBLE PRECISION)<=0 THEN ewma_first_output_ms ELSE ? END
 		WHERE id=?`, true, NowMS(), 12.5, 12.5, a.ID)
-		requireDataTrue(t, !(err != nil), err)
+		requireDataTrue(t, err == nil, err)
 	}
 	p.URL = "http://localhost:8081"
 	requireDataNoError(t, s.UpdateProxy(ctx, p))
@@ -375,11 +376,11 @@ func exerciseSQLBackend(t *testing.T, s *Store) {
 	requireDataTruef(t, !(err != nil || got.ProxyURL != p.URL || got.ErrorCount != 1), "updated account=%+v err=%v", got, err)
 	{
 		_, _, err := s.ListProxies(ctx, "localhost", 10, 0)
-		requireDataTrue(t, !(err != nil), err)
+		requireDataTrue(t, err == nil, err)
 	}
 	{
 		err := s.PatchAccountManagementFields(ctx, a.ID, AccountManagementPatch{GroupIDs: []int64{999999}})
-		requireDataTrue(t, !(err == nil), "invalid group accepted")
+		requireDataTrue(t, err != nil, "invalid group accepted")
 	}
 	got, err = s.GetAccount(ctx, a.ID)
 	requireDataTruef(t, !(err != nil || len(got.GroupIDs) != 1), "transaction not rolled back: %+v %v", got, err)
@@ -388,23 +389,23 @@ func exerciseSQLBackend(t *testing.T, s *Store) {
 	requireDataNoError(t, s.SaveAccountModelCatalog(ctx, a.ID, catalog))
 	{
 		_, err := s.GetAccountModelCatalog(ctx, a.ID)
-		requireDataTrue(t, !(err != nil), err)
+		requireDataTrue(t, err == nil, err)
 	}
 	requireDataNoError(t, s.SetSecret(ctx, "test.secret", "value"))
 	requireDataNoError(t, s.SaveSettings(ctx, &Settings{DefaultModel: "model"}))
 	{
 		_, err := s.LoadSettings(ctx, nil)
-		requireDataTrue(t, !(err != nil), err)
+		requireDataTrue(t, err == nil, err)
 	}
 	requireDataNoError(t, s.UpsertMiddleware(ctx, &MiddlewareRow{Name: "test", Enabled: true}))
 	{
 		_, err := s.ListMiddlewares(ctx)
-		requireDataTrue(t, !(err != nil), err)
+		requireDataTrue(t, err == nil, err)
 	}
 	requireDataNoError(t, s.RecordAudit(ctx, "test", "detail"))
 	{
 		_, err := s.ListAudit(ctx, 10)
-		requireDataTrue(t, !(err != nil), err)
+		requireDataTrue(t, err == nil, err)
 	}
 	now := NowMS()
 	for i := 0; i < 2; i++ {
@@ -437,18 +438,18 @@ func exerciseSQLBackend(t *testing.T, s *Store) {
 	}
 	{
 		_, err := s.UsageTrend(ctx, UsageFilter{}, "hour")
-		requireDataTrue(t, !(err != nil), err)
+		requireDataTrue(t, err == nil, err)
 	}
 	{
 		_, err := s.UsageByModel(ctx, UsageFilter{})
-		requireDataTrue(t, !(err != nil), err)
+		requireDataTrue(t, err == nil, err)
 	}
 	{
 		_, err := s.UsageByKey(ctx, UsageFilter{})
-		requireDataTrue(t, !(err != nil), err)
+		requireDataTrue(t, err == nil, err)
 	}
 	{
 		_, err := s.UsageByAccount(ctx, UsageFilter{})
-		requireDataTrue(t, !(err != nil), err)
+		requireDataTrue(t, err == nil, err)
 	}
 }

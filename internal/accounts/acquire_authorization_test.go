@@ -232,12 +232,12 @@ func testAcquireWaitingKeyRevocationPhase1(t *testing.T, capturedPinned *bool) {
 					err = st.DeleteKey(ctx, key.ID)
 				}
 				requireDataNoError(t, err)
-				requireDataCondition(t, !(m.Inflight(a.ID) != 1), "waiter modified the held reservation")
+				requireDataCondition(t, m.Inflight(a.ID) == 1, "waiter modified the held reservation")
 				release()
 				routingAssertDenied(t, routingAwaitAcquire(t, finished), ErrNoAccounts)
 				{
 					got := m.Inflight(a.ID)
-					requireDataTruef(t, !(got != 0), "revoked acquisition leaked %d slots", got)
+					requireDataTruef(t, got == 0, "revoked acquisition leaked %d slots", got)
 				}
 			})
 		})
@@ -302,7 +302,7 @@ func testAcquireWaitingCurrentPolicyPhase1(t *testing.T, capturedPinned *bool) {
 				routingAssertDenied(t, routingAwaitAcquire(t, finished), tc.want)
 				{
 					got := m.Inflight(a.ID)
-					requireDataTruef(t, !(got != 0), "policy denial leaked %d slots", got)
+					requireDataTruef(t, got == 0, "policy denial leaked %d slots", got)
 				}
 			})
 		})

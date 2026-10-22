@@ -95,11 +95,11 @@ func TestOpenMigratesLegacyKeyGroupsIdempotently(t *testing.T) {
 	ctx := context.Background()
 	for pass := 0; pass < 2; pass++ {
 		s, err := Open(path)
-		requireDataTruef(t, !(err != nil), "pass %d: %v", pass, err)
+		requireDataTruef(t, err == nil, "pass %d: %v", pass, err)
 		t.Cleanup(func() { _ = s.Close() })
 		groups, err := s.ListAccountGroups(ctx)
 		requireDataNoError(t, err)
-		requireDataTruef(t, !(len(groups) != 1), "groups=%+v", groups)
+		requireDataTruef(t, len(groups) == 1, "groups=%+v", groups)
 		g := groups[0]
 		requireDataTruef(t, !(g.Name != fmt.Sprintf("migrated:%x", sha256.Sum256([]byte("1,2"))) || !reflect.DeepEqual(g.AccountIDs, []int64{1, 2}) || !g.Enabled), "migrated group=%+v", g)
 		for _, id := range []int64{1, 2} {
@@ -121,7 +121,7 @@ func TestOpenMigratesLegacyKeyGroupsIdempotently(t *testing.T) {
 		}
 		{
 			_, err := s.db.Exec(`INSERT INTO api_keys(name,key,created_at,updated_at) VALUES ('duplicate','legacy-one',0,0)`)
-			requireDataTrue(t, !(err == nil), "lost unique key constraint")
+			requireDataTrue(t, err != nil, "lost unique key constraint")
 		}
 		requireDataNoError(t, s.Close())
 	}
@@ -167,7 +167,7 @@ func checkNewPoolColumns(t *testing.T, db *sql.DB) {
 		}
 		requireDataNoError(t, rows.Err())
 		rows.Close()
-		requireDataTruef(t, !(len(want) != 0), "missing columns %s: %v", table, want)
+		requireDataTruef(t, len(want) == 0, "missing columns %s: %v", table, want)
 	}
 	var nullable int
 	{

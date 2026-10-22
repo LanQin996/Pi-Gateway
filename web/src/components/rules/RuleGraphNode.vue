@@ -36,7 +36,7 @@ const {locale, t} = useI18n()
 const item = computed(() => props.data.data)
 const valueInputs = computed(()=>graphValueInputs({kind:props.data.kind,data:item.value}))
 const flowPorts = computed(() => props.data.kind === 'action' ? actionFlowPorts(item.value as RuleAction) : [])
-function flowLabel(port: string) { return port.startsWith('functions/') ? port.slice(10).replace(/~1/g,'/').replace(/~0/g,'~') : t(`rules.canvas.flow.${port}`) }
+function flowLabel(port: string) { return port.startsWith('functions/') ? port.slice(10).replaceAll('~1', '/').replaceAll('~0', '~') : t(`rules.canvas.flow.${port}`) }
 const group = computed(() => props.data.kind === 'condition' && ['all', 'any', 'not'].includes((item.value as RuleCondition).op))
 const childCount = computed(() => (item.value as RuleCondition).conditions?.length ?? 0)
 const title = computed(() => (() => {

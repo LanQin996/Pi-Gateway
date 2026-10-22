@@ -32,8 +32,9 @@ type wsProxyFixture struct {
 }
 
 // This is a real TCP CONNECT forwarder; it does not terminate the target TLS.
-func newWSProxyFixture(t *testing.T, secure bool, forwardAddr string) *wsProxyFixture {
+func newWSProxyFixture(t *testing.T, secure bool, forwardAddr, authority string) *wsProxyFixture {
 	t.Helper()
+	authority = wsProxyFixtureAuthority(t, forwardAddr, authority)
 	fixture := &wsProxyFixture{requests: make(chan *http.Request, 32)}
 	var handlers sync.WaitGroup
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -46,18 +47,13 @@ func newWSProxyFixture(t *testing.T, secure bool, forwardAddr string) *wsProxyFi
 		}
 		fixture.connects.Add(1)
 		fixture.requests <- r
-		addr := r.Host
-		if forwardAddr != "" {
-			addr = forwardAddr
-		}
-		// This fixture only forwards to local test servers, never arbitrary destinations.
-		host, _, splitErr := net.SplitHostPort(addr)
-		ip, parseErr := netip.ParseAddr(host)
-		if splitErr != nil || parseErr != nil || !ip.IsLoopback() {
-			http.Error(w, "only loopback test targets are allowed", http.StatusForbidden)
+		// The request only selects acceptance, never the network destination.
+		// Each fixture can reach exactly the listener supplied by trusted test setup.
+		if r.Host != authority {
+			http.Error(w, "only the configured test target is allowed", http.StatusForbidden)
 			return
 		}
-		target, err := net.DialTimeout("tcp", addr, 2*time.Second)
+		target, err := net.DialTimeout("tcp", forwardAddr, 2*time.Second)
 		if err != nil {
 			http.Error(w, "target unavailable", http.StatusBadGateway)
 			return
@@ -152,11 +148,11 @@ func TestWSProxyRoundTripAndAuthenticationIsolation(t *testing.T) {
 
 func TestWSHTTPSProxyStillVerifiesTargetCertificate(t *testing.T) {
 	target, handshakes, _, _ := newWSProxyTarget(t, true)
-	proxy := newWSProxyFixture(t, true, target.Listener.Addr().String())
+	_, port, _ := net.SplitHostPort(target.Listener.Addr().String())
+	proxy := newWSProxyFixture(t, true, target.Listener.Addr().String(), net.JoinHostPort("wrong-target.invalid", port))
 	roots := x509.NewCertPool()
 	roots.AddCert(proxy.server.Certificate())
 	roots.AddCert(target.Certificate())
-	_, port, _ := net.SplitHostPort(target.Listener.Addr().String())
 	c := New(Config{WSURL: "wss://" + net.JoinHostPort("wrong-target.invalid", port)}, egress.NewFactory(egress.Options{RootCAs: roots}))
 	t.Cleanup(c.Close)
 	conn, _, err := c.dialWS(context.Background(), &Request{ProxyURL: wsProxyURL(t, proxy.server.URL, "private-password")})
@@ -176,8 +172,8 @@ func TestWSHTTPSProxyStillVerifiesTargetCertificate(t *testing.T) {
 
 func TestWSHTTPSProxyPoolFingerprintIsolation(t *testing.T) {
 	target, handshakes, _, _ := newWSProxyTarget(t, true)
-	proxyA := newWSProxyFixture(t, true, "")
-	proxyB := newWSProxyFixture(t, true, "")
+	proxyA := newWSProxyFixture(t, true, target.Listener.Addr().String(), "")
+	proxyB := newWSProxyFixture(t, true, target.Listener.Addr().String(), "")
 	roots := x509.NewCertPool()
 	roots.AddCert(target.Certificate())
 	roots.AddCert(proxyA.server.Certificate())
@@ -237,7 +233,7 @@ func runWSProxyRoundTripAndAuthenticationIsolationCase(t *testing.T, capturedSch
 	var proxy *wsProxyFixture
 	rawProxy := ""
 	if (*capturedScheme) != "direct" {
-		proxy = newWSProxyFixture(t, (*capturedScheme) == "https", "")
+		proxy = newWSProxyFixture(t, (*capturedScheme) == "https", target.Listener.Addr().String(), "")
 		rawProxy = wsProxyURL(t, proxy.server.URL, "p@ss:word")
 		if (*capturedScheme) == "https" {
 			roots.AddCert(proxy.server.Certificate())
@@ -297,7 +293,11 @@ func runWSHTTPSProxyHandshakeDeadlineAndCancellationCase(t *testing.T, capturedP
 	func() {
 		verifyWSHTTPSProxyHandshakeDeadlineAndCancellation(&t, &capturedPhase, &started, &closed, &roots, &targetURL)
 	}()
-	proxy := newWSProxyFixture(t, true, "")
+	target, err := url.Parse(targetURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := newWSProxyFixture(t, true, target.Host, "")
 	roots.AddCert(proxy.server.Certificate())
 	handshakeTimeout := 3 * time.Second
 	ctx, cancel := context.WithCancel(context.Background())
@@ -396,9 +396,10 @@ func verifyWSHTTPSProxyHandshakeDeadlineAndCancellation(capturedT **testing.T, c
 }
 
 // Rejected destinations must never reach the fixture's TCP forwarding path.
-func TestWSProxyFixtureRejectsNonLoopbackTargets(t *testing.T) {
-	fixture := newWSProxyFixture(t, false, "")
-	for _, target := range []string{"192.0.2.1:80", "example.invalid:80", "[2001:db8::1]:80", "localhost:80", "invalid-address"} {
+func TestWSProxyFixtureRejectsUnconfiguredTargets(t *testing.T) {
+	targetServer, _, _, _ := newWSProxyTarget(t, false)
+	fixture := newWSProxyFixture(t, false, targetServer.Listener.Addr().String(), "")
+	for _, target := range []string{"192.0.2.1:80", "example.invalid:80", "[2001:db8::1]:80", "localhost:80", "invalid-address", "127.0.0.1:1", "[::1]:1"} {
 		t.Run(target, func(t *testing.T) {
 			req, err := http.NewRequestWithContext(t.Context(), http.MethodConnect, fixture.server.URL, nil)
 			if err != nil {
@@ -414,9 +415,22 @@ func TestWSProxyFixtureRejectsNonLoopbackTargets(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if response.StatusCode != http.StatusForbidden || !strings.Contains(string(body), "only loopback test targets are allowed") {
+			if response.StatusCode != http.StatusForbidden || !strings.Contains(string(body), "only the configured test target is allowed") {
 				t.Fatalf("unsafe CONNECT target %q: status=%d body=%s", target, response.StatusCode, body)
 			}
 		})
 	}
+}
+
+// wsProxyFixtureAuthority validates the sole network destination at fixture setup.
+func wsProxyFixtureAuthority(t *testing.T, forwardAddr, authority string) string {
+	t.Helper()
+	targetAddr, err := netip.ParseAddrPort(forwardAddr)
+	if err != nil || !targetAddr.Addr().IsLoopback() || targetAddr.Port() == 0 {
+		t.Fatal("proxy fixture requires a configured loopback test listener")
+	}
+	if authority == "" {
+		authority = forwardAddr
+	}
+	return authority
 }

@@ -11,7 +11,7 @@ const search = ref('')
 function capabilityLabel(id: string) {
   if (id === 'rule') { return t('rules.canvas.rule') }
   if (id === 'context') { return t('rules.context') }
-  return ruleLabel(['condition', 'action', 'expression'].find(group => ruleLabels[group]?.[id]) ?? 'action', id, locale.value)
+  return ruleLabel(['condition', 'action', 'expression'].find(group => ruleLabels[group]?.has(id)) ?? 'action', id, locale.value)
 }
 function fieldSearchText(field: RuleSchema['rule_fields'][number]) {
   return `${field.name} ${localHelp(field.description, locale.value)} ${field.enum?.join(' ')}`

@@ -1,28 +1,10 @@
+import {loadTestModule} from './test-module-loader.mjs'
 import assert from 'node:assert/strict'
-import {readFileSync} from 'node:fs'
-import ts from 'typescript'
 import * as vue from 'vue'
-import {compileScript, parse} from '@vue/compiler-sfc'
 import {renderToString} from '@vue/server-renderer'
 import {build} from 'esbuild'
 import {fileURLToPath} from 'node:url'
 
-const read = path => readFileSync(new URL(path, import.meta.url), 'utf8')
-
-function load(source, imports) {
-    const compiled = ts.transpileModule(source, {
-        compilerOptions: {
-            module: ts.ModuleKind.CommonJS,
-            target: ts.ScriptTarget.ES2022
-        }
-    })
-    const exports = {}
-    new Function('exports', 'require', compiled.outputText)(exports, name => {
-        assert.ok(Object.hasOwn(imports, name), `Unexpected import: ${name}`)
-        return imports[name]
-    })
-    return exports
-}
 
 const bundle = await build({
     entryPoints: [fileURLToPath(new URL('./src/i18n/messages.ts', import.meta.url))],
@@ -41,16 +23,14 @@ const i18n = {
     useI18n: () => ({t}),
     formatDateTime: value => `time:${value}`
 }
-const ui = load(read('./src/stores/ui.ts'), {
+const ui = await loadTestModule('./src/stores/ui.ts', {
     pinia: {
         defineStore: () => {
         }
     }, vue, '../i18n': i18n
 })
-const money = load(read('./src/api/stats-format.ts'), {'../i18n': i18n})
-const {descriptor} = parse(read('./src/components/QuotaCostSummary.vue'))
-const compiled = compileScript(descriptor, {id: 'quota-cost-check', inlineTemplate: true}).content
-const component = load(compiled, {vue, '../api/stats-format': money, '../i18n': i18n, '../stores/ui': ui}).default
+const money = await loadTestModule('./src/api/stats-format.ts', {'../i18n': i18n})
+const component = (await loadTestModule('./src/components/QuotaCostSummary.vue', {vue, '../api/stats-format': money, '../i18n': i18n, '../stores/ui': ui})).default
 const render = props => renderToString(vue.createSSRApp({render: () => vue.h(component, props)}))
 const usage = {cost_micros: 10000000, priced_requests: 2, unpriced_requests: 0}
 const windowCost = {

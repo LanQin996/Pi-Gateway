@@ -144,7 +144,7 @@ func TestOpenMigratesLegacyAccountsColumnsIdempotently(t *testing.T) {
 		delete(want, name)
 	}
 	requireDataNoError(t, rows.Err())
-	requireDataTruef(t, !(len(want) != 0), "missing migrated columns: %v", want)
+	requireDataTruef(t, len(want) == 0, "missing migrated columns: %v", want)
 }
 
 // verifyOpenMigratesLegacyAccountsColumnsIdempotently exercises one isolated test phase with the original shared state.

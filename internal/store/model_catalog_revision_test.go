@@ -33,7 +33,7 @@ func exerciseCatalogRevisions(t *testing.T, first, second *Store) {
 		requireDataTruef(t, !(err != nil || parsed.Version() != 4 || seen[next]), "reused/non-random revision %q: %v", next, err)
 		{
 			got := catalogRevisionForTest(t, second)
-			requireDataTruef(t, !(got != next), "cross-Store stale epoch: %q != %q", got, next)
+			requireDataTruef(t, got == next, "cross-Store stale epoch: %q != %q", got, next)
 		}
 		seen[next] = true
 		previous = next
@@ -43,7 +43,7 @@ func exerciseCatalogRevisions(t *testing.T, first, second *Store) {
 		for _, s := range []*Store{first, second} {
 			{
 				next := catalogRevisionForTest(t, s)
-				requireDataTruef(t, !(next != previous), "unexpected revision change %q => %q", previous, next)
+				requireDataTruef(t, next == previous, "unexpected revision change %q => %q", previous, next)
 			}
 		}
 	}
@@ -91,7 +91,7 @@ func exerciseCatalogRevisions(t *testing.T, first, second *Store) {
 	// A failed group validation rolls back the preceding supplemental write.
 	{
 		err := first.PatchAccountManagementFields(ctx, a.ID, AccountManagementPatch{SupplementalModels: []string{"rollback"}, GroupIDs: []int64{-99999}})
-		requireDataTrue(t, !(err == nil), "invalid group accepted")
+		requireDataTrue(t, err != nil, "invalid group accepted")
 	}
 	assertUnchanged()
 	{
@@ -100,14 +100,14 @@ func exerciseCatalogRevisions(t *testing.T, first, second *Store) {
 	}
 	{
 		err := first.CreateAccount(ctx, &Account{Name: "failed-create", GroupIDs: []int64{-99999}})
-		requireDataTrue(t, !(err == nil), "invalid create accepted")
+		requireDataTrue(t, err != nil, "invalid create accepted")
 	}
 	assertUnchanged()
 	for _, invalid := range []*ModelCatalog{nil, {}, {FetchedAt: 1, Models: []CatalogModel{{ID: "invalid", Metadata: map[string]json.RawMessage{"bad": json.RawMessage(`not-json`)}}}}} {
 		// Nil, absent timestamp and invalid raw metadata cannot change revision.
 		{
 			err := first.SaveAccountModelCatalog(ctx, a.ID, invalid)
-			requireDataTrue(t, !(err == nil), "invalid catalog accepted")
+			requireDataTrue(t, err != nil, "invalid catalog accepted")
 		}
 		assertUnchanged()
 	}
@@ -117,7 +117,7 @@ func exerciseCatalogRevisions(t *testing.T, first, second *Store) {
 	requireDataNoError(t, err)
 	defer tx.Rollback()
 	requireDataNoError(t, changeCatalogRevision(ctx, tx))
-	requireDataCondition(t, !(catalogRevisionForTest(t, second) != previous), "uncommitted revision escaped transaction")
+	requireDataCondition(t, catalogRevisionForTest(t, second) == previous, "uncommitted revision escaped transaction")
 	requireDataNoError(t, tx.Rollback())
 	assertUnchanged()
 	requireDataNoError(t, second.DeleteAccount(ctx, a.ID))
@@ -149,7 +149,7 @@ func TestCatalogRevisionCrossStoreAndRestart(t *testing.T) {
 	for _, s := range []*Store{first, second} {
 		{
 			got := catalogRevisionForTest(t, s)
-			requireDataTruef(t, !(got != "0"), "initial epoch=%q", got)
+			requireDataTruef(t, got == "0", "initial epoch=%q", got)
 		}
 	}
 	exerciseCatalogRevisions(t, first, second)
@@ -159,7 +159,7 @@ func TestCatalogRevisionCrossStoreAndRestart(t *testing.T) {
 	reopened, err := Open(path)
 	requireDataNoError(t, err)
 	defer reopened.Close()
-	requireDataCondition(t, !(catalogRevisionForTest(t, reopened) != before), "revision lost across restart")
+	requireDataCondition(t, catalogRevisionForTest(t, reopened) == before, "revision lost across restart")
 	requireDataNoError(t, reopened.CreateAccount(context.Background(), &Account{Name: "after-restart"}))
 	{
 		after := catalogRevisionForTest(t, reopened)
@@ -180,7 +180,7 @@ func TestCatalogRevisionWriteFailureRollsBackEveryMutation(t *testing.T) {
 	{
 		_, err := s.ExecContext(ctx, `CREATE TRIGGER reject_catalog_revision BEFORE UPDATE ON settings
 		WHEN NEW.key='`+catalogRevisionSetting+`' BEGIN SELECT RAISE(ABORT,'injected epoch write failure'); END`)
-		requireDataTrue(t, !(err != nil), err)
+		requireDataTrue(t, err == nil, err)
 	}
 	for _, mutation := range []struct {
 		name string
@@ -201,20 +201,20 @@ func TestCatalogRevisionWriteFailureRollsBackEveryMutation(t *testing.T) {
 	}
 	{
 		_, err := s.ExecContext(ctx, `DROP TRIGGER reject_catalog_revision`)
-		requireDataTrue(t, !(err != nil), err)
+		requireDataTrue(t, err == nil, err)
 	}
 	// Failure in a later delete statement also rolls back the earlier account
 	// deletion, rather than merely clearing an in-process cache.
 	{
 		_, err := s.ExecContext(ctx, `CREATE TRIGGER reject_catalog_delete BEFORE DELETE ON account_model_catalog
 		BEGIN SELECT RAISE(ABORT,'injected catalog delete failure'); END`)
-		requireDataTrue(t, !(err != nil), err)
+		requireDataTrue(t, err == nil, err)
 	}
 	{
 		err := s.DeleteAccount(ctx, a.ID)
-		requireDataTrue(t, !(err == nil), "partial delete failure ignored")
+		requireDataTrue(t, err != nil, "partial delete failure ignored")
 	}
-	requireDataCondition(t, !(catalogRevisionForTest(t, s) != beforeRevision), "partial delete changed epoch")
+	requireDataCondition(t, catalogRevisionForTest(t, s) == beforeRevision, "partial delete changed epoch")
 	{
 		got, err := s.GetAccountModelCatalog(ctx, a.ID)
 		requireDataTrue(t, !(err != nil || !reflect.DeepEqual(got, beforeCatalog)), "partial delete escaped rollback")
@@ -227,13 +227,13 @@ func TestCatalogRevisionInitialWriteFailureAndCancellation(t *testing.T) {
 	{
 		_, err := s.ExecContext(ctx, `CREATE TRIGGER reject_initial_revision BEFORE INSERT ON settings
 		WHEN NEW.key='`+catalogRevisionSetting+`' BEGIN SELECT RAISE(ABORT,'injected initial epoch failure'); END`)
-		requireDataTrue(t, !(err != nil), err)
+		requireDataTrue(t, err == nil, err)
 	}
 	{
 		err := s.CreateAccount(ctx, &Account{Name: "rollback"})
-		requireDataTrue(t, !(err == nil), "initial epoch error ignored")
+		requireDataTrue(t, err != nil, "initial epoch error ignored")
 	}
-	requireDataCondition(t, !(catalogRevisionForTest(t, s) != "0"), "failed first mutation persisted epoch")
+	requireDataCondition(t, catalogRevisionForTest(t, s) == "0", "failed first mutation persisted epoch")
 	var count int
 	{
 		err := s.QueryRowContext(ctx, `SELECT COUNT(*) FROM accounts`).Scan(&count)
@@ -260,7 +260,7 @@ func testCatalogRevisionDialectContractCase1(t *testing.T, ctx context.Context, 
 	s.driver = dialect
 	{
 		got := catalogRevisionForTest(t, s)
-		requireDataTruef(t, !(got != "0"), "initial revision=%q", got)
+		requireDataTruef(t, got == "0", "initial revision=%q", got)
 	}
 	// The revision upsert is portable and executes with native ?/$n
 	// binding; no fake SQL results are used by this offline contract.
@@ -273,7 +273,7 @@ func testCatalogRevisionDialectContractCase1(t *testing.T, ctx context.Context, 
 	revision := catalogRevisionForTest(t, s)
 	{
 		_, err := uuid.Parse(revision)
-		requireDataTrue(t, !(err != nil), err)
+		requireDataTrue(t, err == nil, err)
 	}
 	reads := observer.snapshot()
 	requireDataTruef(t, !(len(reads) != 1 || len(reads[0].args) != 1 || reads[0].args[0].Value != catalogRevisionSetting), "revision is not one authoritative read: %+v", reads)
@@ -291,9 +291,9 @@ func testCatalogRevisionWriteFailureRollsBackEveryMutationCase2(t *testing.T, a 
 }, s *Store) {
 	{
 		err := mutation.run()
-		requireDataTrue(t, !(err == nil), "mutation ignored failed epoch persistence")
+		requireDataTrue(t, err != nil, "mutation ignored failed epoch persistence")
 	}
-	requireDataCondition(t, !(catalogRevisionForTest(t, s) != beforeRevision), "failed mutation changed revision")
+	requireDataCondition(t, catalogRevisionForTest(t, s) == beforeRevision, "failed mutation changed revision")
 	got, err := s.GetAccountModelCatalog(ctx, a.ID)
 	requireDataTruef(t, !(err != nil || !reflect.DeepEqual(got, beforeCatalog)), "failed mutation leaked data: %+v %v", got, err)
 	var count int

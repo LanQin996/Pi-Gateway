@@ -382,7 +382,7 @@ func TestModelCatalogRefreshDecodesCompressedJSON(t *testing.T) {
 			if compressor != nil {
 				{
 					_, err := io.WriteString(compressor, tc.body)
-					requireDataTrue(t, !(err != nil), err)
+					requireDataTrue(t, err == nil, err)
 				}
 				requireDataNoError(t, compressor.Close())
 			}
@@ -472,7 +472,7 @@ func checkCanceledCatalogSourcesPreserveSnapshots(t *testing.T, mode string) {
 	}
 	{
 		_, err := st.SaveAccountModelCatalogRefresh(base, a.ID, seed, initial)
-		requireDataTrue(t, !(err != nil), err)
+		requireDataTrue(t, err == nil, err)
 	}
 	before, err := st.GetAccountModelCatalog(base, a.ID)
 	requireDataTruef(t, !(err != nil || before == nil || len(before.Models) != 2), "seed catalog: %+v %v", before, err)
@@ -509,7 +509,7 @@ func checkCanceledCatalogSourcesPreserveSnapshots(t *testing.T, mode string) {
 		t.Fatalf("canceled sources sent %d network requests", networkCalls.Load())
 	})
 	applied, err := st.SaveAccountModelCatalogRefresh(base, a.ID, attempt, results)
-	requireDataTruef(t, !(err != nil), "cancellation damaged the store before the detached save: %v", err)
+	requireDataTruef(t, err == nil, "cancellation damaged the store before the detached save: %v", err)
 	for _, source := range sources {
 		requireDataTruef(t, !(!applied[source]), "%s cancellation status was not persisted", source)
 	}

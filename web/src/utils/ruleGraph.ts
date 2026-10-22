@@ -1,3 +1,4 @@
+import {cloneJson} from './cloneJson'
 import type {Rule, RuleAction, RuleCondition, RuleFieldError, RuleSchema, JsonValue} from '../api/rules'
 import {editorId} from './editorId'
 import {newAction, ruleSchema} from './ruleSchema'
@@ -223,7 +224,7 @@ export interface RuleGraphLayout {
     }[]
 }
 
-const copy = <T>(value: T): T => JSON.parse(JSON.stringify(value))
+const copy = cloneJson
 const layoutStoragePrefix = 'pi-rule-layout:'
 // Leave room for inline value/reference editors; saved or explicitly placed positions stay exact.
 const defaultRowSpacing = 680
@@ -445,7 +446,8 @@ export const graphEdge = (source: string, target: string, targetHandle: string, 
 
 // A selected flow owner owns its branch bodies and predicates, never its next sibling.
 export function graphNodeClosure(graph: RuleGraph, ids: string[]): Set<string> {
-    const included = new Set(ids.filter(id => graph.nodes.some(node => node.id === id && node.kind !== 'rule')))
+    const roots = ids.filter(id => graph.nodes.some(node => node.id === id && node.kind !== 'rule'))
+    const included = new Set(roots)
     const visited = new Set<string>()
     const collect = (id: string, body = false) => {
         const key = `${id}:${body}`
@@ -460,8 +462,8 @@ export function graphNodeClosure(graph: RuleGraph, ids: string[]): Set<string> {
             collect(child, childFlow)
         }
     }
-    // Snapshot initial roots: descendants collected in body mode must not be revisited as roots.
-    for (const id of [...included]) collect(id)
+    // Descendants collected in body mode must not be revisited as roots.
+    for (const id of roots) collect(id)
     return included
 }
 
@@ -639,8 +641,9 @@ export function ruleToGraph(rule: Rule, previous?: RuleGraph): RuleGraph {
     function addValueDependencies() {
         // Reserve separate rows for dependency trees, so fresh graphs never overlap.
         let valueRow = Math.max(defaultRowSpacing, ...graph.nodes.map(node => node.position.y + defaultRowSpacing))
-        // Value dependencies append nodes; traverse only the pre-existing owners.
-        for (const owner of [...graph.nodes]) for (const input of graphValueInputs(owner)) {
+        // Value dependencies append nodes. Only initial owners may create dependencies.
+        const owners = graph.nodes.filter(node => graphValueInputs(node).length > 0)
+        for (const owner of owners) for (const input of graphValueInputs(owner)) {
             let mode = graphValueMode(input.value)
             if (!mode && owner.kind === 'action') mode = 'literal'
             if (!graphValueMode(input.value) && input.label === 'values') mode = 'values'

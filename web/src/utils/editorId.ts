@@ -1,7 +1,20 @@
 // Editor-only identity, never use for credentials or server-managed rule IDs.
 let counter = 0
-// Non-security fallback salt prevents collisions between independent editor realms.
-const session = Math.random().toString(36).slice(2) || 'session'
+// Prefer secure entropy for the per-realm namespace as well as individual IDs.
+// Legacy contexts without crypto still need local editor IDs; their fallback
+// namespace keeps a non-security random salt across realms with coarsened clocks.
+const session = editorSession()
+
+function editorSession(): string {
+    try {
+        const bytes = globalThis.crypto.getRandomValues(new Uint32Array(4))
+        return Array.from(bytes, value => value.toString(36)).join('-')
+    } catch {
+        const origin = globalThis.performance?.timeOrigin ?? Date.now()
+        const salt = Math.random().toString(36).slice(2) || 'session'
+        return `${salt}-${origin.toString(36)}-${(globalThis.performance?.now() ?? 0).toString(36)}`
+    }
+}
 
 export function editorId(): string {
     const crypto = globalThis.crypto

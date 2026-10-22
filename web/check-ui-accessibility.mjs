@@ -17,10 +17,10 @@ function prop(node, name) {
     const binding = node.props.find(item => item.type === 7 && item.name === 'bind' && item.arg?.content === name)
     return binding?.exp?.content
 }
-for (const directory of ['components', 'views']) {
+await Promise.all(['components', 'views'].map(async directory => {
     const base = join(root, 'src', directory)
-    for (const file of await readdir(base, {recursive: true})) {
-        if (!file.endsWith('.vue')) { continue }
+    const files = (await readdir(base, {recursive: true})).filter(file => file.endsWith('.vue'))
+    await Promise.all(files.map(async file => {
         const {descriptor} = parse(await readFile(join(base, file), 'utf8'))
         const nodes = elements(parseTemplate(descriptor.template.content))
         templates.set(`${directory}/${file}`, nodes)
@@ -28,8 +28,9 @@ for (const directory of ['components', 'views']) {
         for (const output of nodes.filter(node => node.tag === 'output')) {
             assert(!elements(output).slice(1).some(node => ['div', 'p', 'section', 'fieldset'].includes(node.tag)), `${file}: output contains non-phrasing content`)
         }
-    }
-}
+    }))
+}))
+
 function nodes(file) {
     const result = templates.get(file)
     assert(result, file)

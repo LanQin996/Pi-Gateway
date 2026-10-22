@@ -1155,6 +1155,7 @@
     }
 }
 
+/* Accessibility override must also win over component-scoped, utility and inline motion styles. */
 @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {
         animation-duration: .01ms !important;

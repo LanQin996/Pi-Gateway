@@ -73,7 +73,7 @@ func exerciseRulePublication(t *testing.T, first, second *Store) {
 	requireDataTruef(t, !(!errors.Is(err, ErrRuleConflict)), "non-atomic batch: %v", err)
 	{
 		row, _ := first.GetRule(ctx, "a")
-		requireDataTrue(t, !(row == nil), "first batch deletion committed before conflict")
+		requireDataTrue(t, row != nil, "first batch deletion committed before conflict")
 	}
 	snapshot, err = first.PublishRules(ctx, nil, []RuleChange{{Kind: "duplicate", ID: "a", NewID: "copy", ExpectedRevision: 2}}, acceptRuleSet)
 	requireDataTruef(t, !(err != nil || snapshot.Version != 3 || len(snapshot.Rules) != 3), "duplicate=%+v %v", snapshot, err)
@@ -111,7 +111,7 @@ func exerciseRuleSnapshotMarker(t *testing.T, first, second *Store) {
 	requireDataTruef(t, !(err != nil || !installed), "publication did not persist installation marker: installed=%t err=%v", installed, err)
 	{
 		_, err := first.ExecContext(ctx, `DELETE FROM settings WHERE key='rules.language.v2'`)
-		requireDataTrue(t, !(err != nil), err)
+		requireDataTrue(t, err == nil, err)
 	}
 	// Mimic an earlier V2 installation that has the rule but no durable setting.
 	loaded, err := second.LoadRuleSet(ctx)

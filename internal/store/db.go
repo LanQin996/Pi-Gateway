@@ -504,7 +504,7 @@ func ensureColumns(ctx context.Context, conn *sql.Conn, table string, want map[s
 	if err := validateMigrationColumns(table, want); err != nil {
 		return err
 	}
-	rows, err := conn.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	rows, err := conn.QueryContext(ctx, `SELECT cid, name, type, "notnull", dflt_value, pk FROM pragma_table_info(?)`, table)
 	if err != nil {
 		return fmt.Errorf("store: inspect %s: %w", table, err)
 	}

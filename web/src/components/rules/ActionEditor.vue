@@ -23,7 +23,7 @@ function remove(index: number) { set(props.modelValue.filter((_, i) => i !== ind
     <div v-for="(action, index) in modelValue" :key="action.id" class="rule-action-card rounded-lg border border-[color:var(--color-line)] p-3" :class="{'is-compact': compact}" :data-rule-path="actionPath(index)">
       <div class="flex flex-wrap items-start gap-2">
         <span class="rounded bg-[color:var(--color-surface-2)] px-2 py-1 font-mono text-xs">{{ index + 1 }}</span>
-        <label class="sr-only" :for="`${formId}-${action.id}-type`">{{ t('rules.actionType') }}</label><select :id="`${formId}-${action.id}-type`" class="input min-w-0 flex-1" :value="action.type" @change="changeType(index, ($event.target as HTMLSelectElement).value)"><option v-for="cap in available" :key="cap.id" :value="cap.id">{{ (() => { if (ruleLabels.action?.[cap.id]) { return ruleLabel('action',cap.id,locale); } return cap.label?.split(' / ')[locale==='zh-CN'?0:1] ?? cap.id; })() }}</option></select>
+        <label class="sr-only" :for="`${formId}-${action.id}-type`">{{ t('rules.actionType') }}</label><select :id="`${formId}-${action.id}-type`" class="input min-w-0 flex-1" :value="action.type" @change="changeType(index, ($event.target as HTMLSelectElement).value)"><option v-for="cap in available" :key="cap.id" :value="cap.id">{{ (() => { if (ruleLabels.action?.has(cap.id)) { return ruleLabel('action',cap.id,locale); } return cap.label?.split(' / ')[locale==='zh-CN'?0:1] ?? cap.id; })() }}</option></select>
         <button class="btn btn-ghost !px-2" type="button" :disabled="index === 0" :title="t('rules.up')" @click="set(moveItem(modelValue, index, -1))">↑</button>
         <button class="btn btn-ghost !px-2" type="button" :disabled="index === modelValue.length - 1" :title="t('rules.down')" @click="set(moveItem(modelValue, index, 1))">↓</button>
         <button class="btn btn-ghost !px-2" type="button" :title="t('rules.remove')" @click="remove(index)">×</button>
@@ -36,7 +36,7 @@ function remove(index: number) { set(props.modelValue.filter((_, i) => i !== ind
       </div>
     </div>
     <div class="flex flex-wrap gap-2">
-      <select :id="`add-rule-action${basePath ? `-${basePath}` : ''}`" class="input max-w-xs" @change="add(($event.target as HTMLSelectElement).value); ($event.target as HTMLSelectElement).value = ''"><option value="">{{ t('rules.addAction') }}</option><option v-for="cap in available" :key="cap.id" :value="cap.id">{{ (() => { if (ruleLabels.action?.[cap.id]) { return ruleLabel('action',cap.id,locale); } return cap.label?.split(' / ')[locale==='zh-CN'?0:1] ?? cap.id; })() }}</option></select>
+      <select :id="`add-rule-action${basePath ? `-${basePath}` : ''}`" class="input max-w-xs" @change="add(($event.target as HTMLSelectElement).value); ($event.target as HTMLSelectElement).value = ''"><option value="">{{ t('rules.addAction') }}</option><option v-for="cap in available" :key="cap.id" :value="cap.id">{{ (() => { if (ruleLabels.action?.has(cap.id)) { return ruleLabel('action',cap.id,locale); } return cap.label?.split(' / ')[locale==='zh-CN'?0:1] ?? cap.id; })() }}</option></select>
       <span v-if="!modelValue.length" class="text-xs text-[color:var(--color-ink-muted)]">{{ t('rules.noActions') }}</span>
     </div>
   </div>

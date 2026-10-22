@@ -14,7 +14,8 @@
     "check:rules": "node check-rules.mjs",
     "check:simulation": "node check-rule-simulation.mjs",
     "test:e2e": "playwright test",
-    "check:ui-accessibility": "node check-ui-accessibility.mjs"
+    "check:ui-accessibility": "node check-ui-accessibility.mjs",
+    "check:sonar-regressions": "node check-sonar-regressions.mjs"
   },
   "dependencies": {
     "@vue-flow/core": "^1.48.2",

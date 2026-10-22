@@ -55,14 +55,14 @@ func TestAccountGroupsAndKeyCRUD(t *testing.T) {
 	requireDataTruef(t, !(err != nil || !reflect.DeepEqual(got.AccountIDs, []int64{b.ID})), "replaced members=%+v %v", got, err)
 	{
 		err := s.SetAccountGroupAccounts(ctx, g.ID, []int64{a.ID, 9999})
-		requireDataTrue(t, !(err == nil), "nonexistent account accepted")
+		requireDataTrue(t, err != nil, "nonexistent account accepted")
 	}
 	got, err = s.GetAccountGroup(ctx, g.ID)
 	requireDataTruef(t, !(err != nil || !reflect.DeepEqual(got.AccountIDs, []int64{b.ID})), "failed replacement not rolled back: %+v %v", got, err)
 	requireDataNoError(t, s.SetKeyGroups(ctx, k.ID, []int64{other.ID}))
 	{
 		err := s.SetKeyGroups(ctx, k.ID, []int64{g.ID, 9999})
-		requireDataTrue(t, !(err == nil), "nonexistent group accepted")
+		requireDataTrue(t, err != nil, "nonexistent group accepted")
 	}
 	ids, err := s.ListKeyGroupIDs(ctx, k.ID)
 	requireDataTruef(t, !(err != nil || !reflect.DeepEqual(ids, []int64{other.ID})), "key bindings not rolled back: %v %v", ids, err)

@@ -560,6 +560,7 @@ defineExpose({focus, fit})
                 <h3>{{ t('rules.addAction') }}</h3>
                 <button v-for="cap in actions" :key="cap.id" type="button" class="module-item" :data-testid="`add-action-${cap.id}`" :title="localHelp(cap.description, locale)" @click="libraryAdd('action', cap.id)">{{ ruleLabel('action', cap.id, locale) }}</button>
             </aside>
+            <!-- Focus target for Escape restoration and canvas Space/undo/duplicate shortcuts. -->
             <div ref="canvasElement" class="rule-flow" data-testid="rule-canvas" role="application" :aria-label="t('rules.graphical')" tabindex="0" @dblclick="canvasDoubleClick">
                 <VueFlow :id="flowId" :nodes="nodes" :edges="edges" :apply-default="false" :default-viewport="modelValue.viewport" :min-zoom="0.15" :max-zoom="2.5" :zoom-on-double-click="false" :is-valid-connection="validConnection" :delete-key-code="['Backspace', 'Delete']" :fit-view-on-init="false" @nodes-initialized="initializeLayout" @nodes-change="changes" @edges-change="edgeChanges" @connect="connect" @connect-start="startConnection" @connect-end="endConnection" @pane-context-menu="canvasContextMenu" @node-click="select($event.node.id,$event.event.shiftKey||$event.event.ctrlKey||$event.event.metaKey)" @move-end="publish({...modelValue, viewport: $event.flowTransform})">
                     <template #node-rule-module="nodeProps">

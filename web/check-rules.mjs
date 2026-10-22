@@ -1,3 +1,4 @@
+import {resolveGoBinary} from './go-toolchain.mjs'
 import assert from 'node:assert/strict'
 import {spawnSync} from 'node:child_process'
 import {build} from 'esbuild'
@@ -8,9 +9,10 @@ import {checkRuleApi} from './check-rule-api.mjs'
 import {checkRuleGraph} from './check-rule-graph.mjs'
 
 await import('./check-editor-id.mjs')
+await import('./check-sonar-regressions.mjs')
 
 const projectRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
-const exported = spawnSync('go', ['test', './internal/rules', '-run', 'TestExportCatalog', '-v'], {
+const exported = spawnSync(resolveGoBinary(), ['test', './internal/rules', '-run', 'TestExportCatalog', '-v'], {
     cwd: projectRoot, encoding: 'utf8', env: {...process.env, RULES_EXPORT_CATALOG: '1'},
 })
 if (exported.status !== 0) {

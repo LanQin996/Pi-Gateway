@@ -1,8 +1,9 @@
+import {cloneJson} from './cloneJson'
 import type {JsonValue, Rule, RuleCondition, RuleField, RuleFieldError} from '../api/rules'
 import {defaultForField, ruleSchema} from './ruleSchema'
 import {graphSignature, restoreGraphLayout, type RuleGraph, ruleToGraph} from './ruleGraph'
 
-export const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
+export const clone = cloneJson
 
 export interface RuleDraft {
     rule: Rule;

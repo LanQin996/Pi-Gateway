@@ -31,6 +31,7 @@ jobs:
       - run: npm run check:i18n
       - run: npm run check:capture
       - run: npm run check:rules
+      - run: npm run check:sonar-regressions
       - run: npm run build
       - name: Install Chromium for real-browser regression
         run: ./node_modules/.bin/playwright install --with-deps chromium

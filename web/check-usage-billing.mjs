@@ -1,28 +1,10 @@
+import {loadTestModule} from './test-module-loader.mjs'
 import assert from 'node:assert/strict'
-import {readFileSync} from 'node:fs'
 import {fileURLToPath} from 'node:url'
 import {build} from 'esbuild'
-import ts from 'typescript'
 import * as vue from 'vue'
-import {compileScript, parse} from '@vue/compiler-sfc'
 import {renderToString} from '@vue/server-renderer'
 
-const read = path => readFileSync(new URL(path, import.meta.url), 'utf8')
-
-function load(source, imports) {
-    const compiled = ts.transpileModule(source, {
-        compilerOptions: {
-            module: ts.ModuleKind.CommonJS,
-            target: ts.ScriptTarget.ES2022
-        }
-    })
-    const exports = {}
-    new Function('exports', 'require', compiled.outputText)(exports, name => {
-        assert.ok(Object.hasOwn(imports, name), `Unexpected import: ${name}`)
-        return imports[name]
-    })
-    return exports
-}
 
 const bundle = await build({
     entryPoints: [fileURLToPath(new URL('./src/i18n/messages.ts', import.meta.url))],
@@ -36,18 +18,10 @@ const messages = await import(`data:text/javascript;base64,${Buffer.from(bundle.
 let locale = 'en'
 const t = (key, params) => messages.translate(locale, key, params)
 const i18n = {currentLocale: () => locale, useI18n: () => ({t})}
-const money = load(read('./src/api/stats-format.ts'), {'../i18n': i18n})
+const money = await loadTestModule('./src/api/stats-format.ts', {'../i18n': i18n})
 
-function component(path, imports) {
-    const {descriptor} = parse(read(path))
-    return load(compileScript(descriptor, {id: path, inlineTemplate: true}).content, {
-        vue,
-        '../../i18n': i18n, ...imports
-    }).default
-}
-
-const badges = component('./src/components/usage/UsageRequestBadges.vue', {})
-const billing = component('./src/components/usage/UsageBillingDetails.vue', {'../../api/stats-format': money})
+const badges = (await loadTestModule('./src/components/usage/UsageRequestBadges.vue', {vue, '../../i18n': i18n})).default
+const billing = (await loadTestModule('./src/components/usage/UsageBillingDetails.vue', {vue, '../../i18n': i18n, '../../api/stats-format': money})).default
 const render = (component, record) => renderToString(vue.createSSRApp({render: () => vue.h(component, {record})}))
 const row = {
     reasoning_effort: 'xhigh', requested_service_tier: 'priority', service_tier: 'priority', cost_usd: 2.1,

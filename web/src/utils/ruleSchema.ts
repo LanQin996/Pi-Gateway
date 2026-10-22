@@ -1,3 +1,4 @@
+import {cloneJson} from './cloneJson'
 import {editorId} from './editorId'
 import type {LocalizedHelp, Rule, RuleCapability, RuleField, RulePhase, RuleRenderer, RuleSchema} from '../api/rules'
 
@@ -176,7 +177,7 @@ export function localHelp(value: LocalizedHelp | string | undefined, locale: str
 
 export function defaultForField(f: RuleField): unknown {
     // Catalog values can be Vue proxies when rendered inside reactive drafts.
-    const copy = (value: unknown) => JSON.parse(JSON.stringify(value))
+    const copy = cloneJson
     if (f.non_empty && (f.default === undefined || f.default === '') && f.examples?.length) return copy(f.examples[0])
     if (f.default !== undefined) return copy(f.default)
     switch (f.type) {

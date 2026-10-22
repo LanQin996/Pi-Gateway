@@ -345,10 +345,16 @@ func TestResolveCodexClientVersionNeverDowngrades(t *testing.T) {
 
 // Observing Done proves a waiter reached the pending-request select, without sleeps.
 // The resolver only calls Err before that point; no HTTP request is created for it.
+// The adapter deliberately retains its test-scoped parent to preserve the full
+// context contract; hiding the parent in method values would not change lifetime.
 type codexVersionTestWaitContext struct {
 	context.Context
 	waiting chan struct{}
 	once    sync.Once
+}
+
+func newCodexVersionTestWaitContext(ctx context.Context) *codexVersionTestWaitContext {
+	return &codexVersionTestWaitContext{Context: ctx, waiting: make(chan struct{})}
 }
 
 func (c *codexVersionTestWaitContext) Done() <-chan struct{} {
@@ -403,7 +409,7 @@ func TestResolveCodexClientVersionConcurrentRequestsCoalesce(t *testing.T) {
 	results := []<-chan codexVersionTestResult{startCodexVersionTestResolve(manager, ctx)}
 	receiveCodexVersionTest(t, started)
 	for range 16 {
-		waiter := &codexVersionTestWaitContext{Context: ctx, waiting: make(chan struct{})}
+		waiter := newCodexVersionTestWaitContext(ctx)
 		results = append(results, startCodexVersionTestResolve(manager, waiter))
 		receiveCodexVersionTest(t, waiter.waiting)
 	}
@@ -444,7 +450,7 @@ func TestResolveCodexClientVersionCanceledWaiterDoesNotCancelLeader(t *testing.T
 	receiveCodexVersionTest(t, started)
 	waiterCtx, cancelWaiter := context.WithCancel(context.Background())
 	defer cancelWaiter()
-	waiter := &codexVersionTestWaitContext{Context: waiterCtx, waiting: make(chan struct{})}
+	waiter := newCodexVersionTestWaitContext(waiterCtx)
 	result := startCodexVersionTestResolve(manager, waiter)
 	receiveCodexVersionTest(t, waiter.waiting)
 	cancelWaiter()
@@ -690,7 +696,7 @@ func testFetchLatestCodexClientVersionResponsesPhase1(t *testing.T, capturedLimi
 		}
 		{
 			_, err := io.WriteString(writer, (*capturedTc).body)
-			requireDataTrue(t, !(err != nil), err)
+			requireDataTrue(t, err == nil, err)
 		}
 		requireDataNoError(t, writer.Close())
 		wire = compressed.Bytes()
@@ -760,7 +766,7 @@ func testResolveCodexClientVersionCanceledLeaderAllowsWaiterRetryPhase1(t *testi
 	receiveCodexVersionTest(t, started)
 	waiterCtx, cancelWaiter := context.WithCancel(context.Background())
 	defer cancelWaiter()
-	waiter := &codexVersionTestWaitContext{Context: waiterCtx, waiting: make(chan struct{})}
+	waiter := newCodexVersionTestWaitContext(waiterCtx)
 	result := startCodexVersionTestResolve(manager, waiter)
 	receiveCodexVersionTest(t, waiter.waiting)
 	cancelLeader()
@@ -818,7 +824,7 @@ func testResolveCodexClientVersionBodyCancellationAllowsWaiterRetryPhase1(t *tes
 	firstBodyCtx := receiveCodexVersionTest(t, bodyStarted)
 	waiterCtx, cancelWaiter := context.WithCancel(context.Background())
 	t.Cleanup(cancelWaiter)
-	waiter := &codexVersionTestWaitContext{Context: waiterCtx, waiting: make(chan struct{})}
+	waiter := newCodexVersionTestWaitContext(waiterCtx)
 	result := startCodexVersionTestResolve(manager, waiter)
 	receiveCodexVersionTest(t, waiter.waiting)
 	cancelLeader()
@@ -954,4 +960,33 @@ func testResolveCodexClientVersionFailureLogsAreSanitizedPhase1(t *testing.T, ca
 	reportTestFailure(t, calls.Load() != wantCalls, func() {
 		t.Fatalf("calls=%d, want %d", calls.Load(), wantCalls)
 	})
+}
+
+func TestCodexVersionWaitContextDelegatesWithoutEarlySignal(t *testing.T) {
+	type testKey struct{}
+	deadline := time.Now().Add(time.Minute)
+	parent, cancel := context.WithDeadline(context.WithValue(context.Background(), testKey{}, "value"), deadline)
+	defer cancel()
+	waiter := newCodexVersionTestWaitContext(parent)
+	gotDeadline, ok := waiter.Deadline()
+	if !ok || !gotDeadline.Equal(deadline) || waiter.Value(testKey{}) != "value" || waiter.Err() != nil {
+		t.Fatal("wait adapter changed parent context operations")
+	}
+	select {
+	case <-waiter.waiting:
+		t.Fatal("non-Done operation signaled waiter readiness")
+	default:
+	}
+	if waiter.Done() != parent.Done() {
+		t.Fatal("wait adapter replaced parent cancellation channel")
+	}
+	receiveCodexVersionTest(t, waiter.waiting)
+	if waiter.Done() != parent.Done() {
+		t.Fatal("repeated Done changed cancellation channel")
+	}
+	cancel()
+	receiveCodexVersionTest(t, waiter.Done())
+	if !errors.Is(waiter.Err(), context.Canceled) {
+		t.Fatal("wait adapter lost parent cancellation")
+	}
 }

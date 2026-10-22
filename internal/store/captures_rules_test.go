@@ -54,7 +54,7 @@ func TestCaptureUnassignedRetentionFilterAndSafeClear(t *testing.T) {
 	rows, total, err := s.ListCaptures(ctx, CaptureFilter{Unassigned: true})
 	requireDataTruef(t, !(err != nil || total != 2 || len(rows) != 2 || rows[0].ID != last.ID), "unassigned filter failed: %+v %d %v", rows, total, err)
 	for _, c := range rows {
-		requireDataCondition(t, !(c.AccountID != 0), "assigned row escaped unassigned scope")
+		requireDataCondition(t, c.AccountID == 0, "assigned row escaped unassigned scope")
 	}
 	// Explicit unassigned scope must never fall through to all rows.
 	_, total, err = s.ListCaptures(ctx, CaptureFilter{Unassigned: true, AccountID: 7})
@@ -67,7 +67,7 @@ func TestCaptureUnassignedRetentionFilterAndSafeClear(t *testing.T) {
 	}
 	rows, total, err = s.ListCaptures(ctx, CaptureFilter{})
 	requireDataTruef(t, !(err != nil || total != 1 || len(rows) != 1), "remaining capture count = %d %v", total, err)
-	requireDataCondition(t, !(rows[0].RuleTraces == nil), "empty historical trace must serialize to [], not null")
+	requireDataCondition(t, rows[0].RuleTraces != nil, "empty historical trace must serialize to [], not null")
 	deleted, err = s.ClearCaptures(ctx, 0)
 	requireDataTruef(t, !(err != nil || deleted != 1), "historical clear-all behavior changed: %d %v", deleted, err)
 }

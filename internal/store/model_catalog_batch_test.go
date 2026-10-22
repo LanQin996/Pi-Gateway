@@ -99,7 +99,7 @@ func TestAccountModelBatchReadCountAndDialectContract(t *testing.T) {
 	for id := 1; id <= count; id++ {
 		{
 			_, err := tx.ExecContext(ctx, `INSERT INTO accounts(id,name,created_at,updated_at) VALUES(?,?,0,0)`, id, "fixture")
-			requireDataTrue(t, !(err != nil), err)
+			requireDataTrue(t, err == nil, err)
 		}
 	}
 	requireDataNoError(t, tx.Commit())
@@ -122,7 +122,7 @@ func TestAccountModelBatchReadCountAndDialectContract(t *testing.T) {
 	// A corrupt policy/catalog in batch three must discard both good batches.
 	{
 		_, err := s.ExecContext(ctx, `UPDATE accounts SET disabled_models='null', supplemental_models='null' WHERE id=?`, count)
-		requireDataTrue(t, !(err != nil), err)
+		requireDataTrue(t, err == nil, err)
 	}
 	{
 		out, err := s.GetAccountModelCatalogs(ctx, allIDs)
@@ -134,7 +134,7 @@ func TestAccountModelBatchReadCountAndDialectContract(t *testing.T) {
 	}
 	{
 		_, err := s.ExecContext(ctx, `DELETE FROM accounts WHERE id=?`, count)
-		requireDataTrue(t, !(err != nil), err)
+		requireDataTrue(t, err == nil, err)
 	}
 	{
 		out, err := s.DisabledModelsForAccounts(ctx, allIDs, nil)
@@ -191,7 +191,7 @@ func exerciseAccountModelBatches(t *testing.T, s *Store) {
 	requireDataNoError(t, s.SetKeyGroups(ctx, key.ID, []int64{keyGroup.ID, disabled.ID}))
 	{
 		_, err := s.ExecContext(ctx, `UPDATE account_groups SET disabled_models='not-json' WHERE id=?`, disabled.ID)
-		requireDataTrue(t, !(err != nil), err)
+		requireDataTrue(t, err == nil, err)
 	}
 	assertRestrictions := func(k *APIKey, wantA, wantB []string) {
 		verifyExerciseAccountModelBatches(&ctx, k, wantA, wantB, verifyExerciseAccountModelBatchesState{capturedT: &t, capturedS: &s, capturedA: &a, capturedB: &b})
@@ -224,7 +224,7 @@ func exerciseAccountModelBatches(t *testing.T, s *Store) {
 		query := "UPDATE " + field.table + " SET " + field.column + "=? WHERE " + field.idColumn + "=?"
 		{
 			_, err := s.ExecContext(ctx, query, "not-json", a.ID)
-			requireDataTrue(t, !(err != nil), err)
+			requireDataTrue(t, err == nil, err)
 		}
 		{
 			out, err := s.GetAccountModelCatalogs(ctx, []int64{a.ID, b.ID})
@@ -232,7 +232,7 @@ func exerciseAccountModelBatches(t *testing.T, s *Store) {
 		}
 		{
 			_, err := s.ExecContext(ctx, query, "[]", a.ID)
-			requireDataTrue(t, !(err != nil), err)
+			requireDataTrue(t, err == nil, err)
 		}
 	}
 }
@@ -340,7 +340,7 @@ func verifyAccountModelBatchReadCountAndDialectContract(capturedT **testing.T, c
 		}
 		{
 			got := len((*capturedObserver).snapshot())
-			requireDataTruef((*capturedT), !(got != 100), "individual SQL baseline=%d want 100", got)
+			requireDataTruef((*capturedT), got == 100, "individual SQL baseline=%d want 100", got)
 		}
 	}
 }
@@ -365,7 +365,7 @@ func verifyExerciseAccountModelBatches2(capturedCtx *context.Context, state veri
 			query := "UPDATE " + source.table + " SET disabled_models=? WHERE id=?"
 			{
 				_, err := (*state.capturedS).ExecContext((*capturedCtx), query, malformed, source.id)
-				requireDataTrue((*state.capturedT), !(err != nil), err)
+				requireDataTrue((*state.capturedT), err == nil, err)
 			}
 			{
 				out, err := (*state.capturedS).DisabledModelsForAccounts((*capturedCtx), []int64{(*state.capturedA).ID, (*state.capturedB).ID}, (*state.capturedKey))
@@ -375,7 +375,7 @@ func verifyExerciseAccountModelBatches2(capturedCtx *context.Context, state veri
 			}
 			{
 				_, err := (*state.capturedS).ExecContext((*capturedCtx), query, `[]`, source.id)
-				requireDataTrue((*state.capturedT), !(err != nil), err)
+				requireDataTrue((*state.capturedT), err == nil, err)
 			}
 		}
 	}

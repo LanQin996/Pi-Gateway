@@ -67,11 +67,11 @@ func TestModelCatalogPersistsFailureAndConcurrentAttemptOrdering(t *testing.T) {
 		got := get().SourceCatalogs[ModelSourceChatGPT]
 		requireDataTruef(t, !(got.Models[0].ID != "model-new" || got.FetchedAt != 105 || got.AttemptedAt != 110 || got.Error != "HTTP 403"), "out-of-order success diverged from source snapshot: %+v", got)
 	}
-	requireDataCondition(t, !(catalogRevisionForTest(t, s) == before), "out-of-order successful snapshot did not invalidate revision")
+	requireDataCondition(t, catalogRevisionForTest(t, s) != before, "out-of-order successful snapshot did not invalidate revision")
 	save(&ModelCatalog{Models: []CatalogModel{{ID: "stale"}}, FetchedAt: 99, AttemptedAt: 80})
 	{
 		got := get()
-		requireDataTrue(t, !(got.Models[0].ID != "model-new"), "stale success rolled catalog back")
+		requireDataTrue(t, got.Models[0].ID == "model-new", "stale success rolled catalog back")
 	}
 	requireDataNoError(t, s.Close())
 	s, err = Open(path)
@@ -277,7 +277,7 @@ func TestModelCatalogLegacyWritesPreserveSourcesAndRefreshFences(t *testing.T) {
 	// with a larger timestamp.
 	{
 		_, err := s.BeginAccountModelCatalogRefresh(ctx, a.ID)
-		requireDataTrue(t, !(err != nil), err)
+		requireDataTrue(t, err == nil, err)
 	}
 	before = get()
 	revision = catalogRevisionForTest(t, s)
@@ -343,7 +343,7 @@ func TestModelCatalogMetadataPersistenceAndLegacyJSON(t *testing.T) {
 	const legacy = `[{"id":"legacy","name":"Legacy","description":"old cache"}]`
 	{
 		_, err := s.ExecContext(ctx, `INSERT INTO account_model_catalog(account_id,models_json,fetched_at,attempted_at,error) VALUES(?,?,?,?,?)`, a.ID, legacy, 10, 10, "")
-		requireDataTrue(t, !(err != nil), err)
+		requireDataTrue(t, err == nil, err)
 	}
 	old, err := s.GetAccountModelCatalog(ctx, a.ID)
 	requireDataTruef(t, !(err != nil || old == nil || len(old.Models) != 3 || old.Models[0].ID != "legacy" || old.Models[0].Metadata != nil), "legacy cache incompatible: %+v err=%v", old, err)
@@ -391,7 +391,7 @@ func testModelCatalogInvalidMetadataRejectedBeforeNoOpCase1(t *testing.T, a *Acc
 	if tc.name == "active-refresh" {
 		{
 			_, err := s.BeginAccountModelCatalogRefresh(ctx, a.ID)
-			requireDataTrue(t, !(err != nil), err)
+			requireDataTrue(t, err == nil, err)
 		}
 	}
 	if len(tc.catalog.Models) == 0 {
@@ -401,9 +401,9 @@ func testModelCatalogInvalidMetadataRejectedBeforeNoOpCase1(t *testing.T, a *Acc
 	tc.catalog.Models[0].Metadata = map[string]json.RawMessage{"bad": json.RawMessage(`not-json`)}
 	{
 		err := s.SaveAccountModelCatalog(ctx, tc.id, &tc.catalog)
-		requireDataTrue(t, !(err == nil), "invalid metadata bypassed validation")
+		requireDataTrue(t, err != nil, "invalid metadata bypassed validation")
 	}
-	requireDataCondition(t, !(catalogRevisionForTest(t, s) != revision), "invalid metadata changed catalog revision")
+	requireDataCondition(t, catalogRevisionForTest(t, s) == revision, "invalid metadata changed catalog revision")
 	{
 		got, err := s.GetAccountModelCatalog(ctx, a.ID)
 		requireDataTruef(t, !(err != nil || !reflect.DeepEqual(got, before)), "invalid metadata changed source snapshots: %+v err=%v", got, err)

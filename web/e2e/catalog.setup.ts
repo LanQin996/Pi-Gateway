@@ -1,3 +1,4 @@
+import {resolveGoBinary} from '../go-toolchain.mjs'
 import {spawnSync} from 'node:child_process'
 import {mkdtempSync, rmSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
@@ -5,7 +6,7 @@ import {join} from 'node:path'
 import {fileURLToPath} from 'node:url'
 
 export default function setup() {
-    const exported = spawnSync('go', ['test', './internal/rules', '-run', '^TestExportCatalog$', '-count=1', '-v'], {
+    const exported = spawnSync(resolveGoBinary(), ['test', './internal/rules', '-run', '^TestExportCatalog$', '-count=1', '-v'], {
         cwd: fileURLToPath(new URL('../../', import.meta.url)),
         encoding: 'utf8',
         timeout: 120_000,
