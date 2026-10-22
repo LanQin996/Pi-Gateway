@@ -2,6 +2,7 @@
 
 from contextlib import contextmanager
 from copy import deepcopy
+from io import StringIO
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import os
@@ -17,7 +18,7 @@ from urllib.error import URLError
 
 from compose_smoke import Probe, state_path, entity_path, KEYS_PATH, ACCOUNT_GROUPS_PATH, NoRedirects, request_path
 from unittest.mock import patch, Mock
-from validate_compose_tls import validate
+from validate_compose_tls import validate, main as validate_main
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -156,8 +157,9 @@ class ProbeBoundaryTest(TLSFixture):
         with self.running_tls_server(HealthServer) as server:
             url = f"https://127.0.0.1:{server.server_port}"
             for authority in (None, other / "ca.crt"):
+                probe = Probe(url, "unused", authority)
                 with self.subTest(authority=authority), self.assertRaises(URLError) as raised:
-                    Probe(url, "unused", authority).request("GET", "/healthz", token="disposable")
+                    probe.request("GET", "/healthz", token="disposable")
                 self.assertIsInstance(raised.exception.reason, ssl.SSLCertVerificationError)
             self.assertEqual(server.received, [])
             self.assertEqual(Probe(url, "unused", self.ca_file).request("GET", "/healthz"), {})
@@ -297,8 +299,25 @@ class ComposeTLSConfigTest(unittest.TestCase):
             with self.subTest(version=version):
                 self.assertTrue(validate(version, self.configuration(), "1001", "1001"))
         for version in ("2.24.3", "1.29.2", "", "unknown"):
+            config = self.configuration()
             with self.subTest(version=version), self.assertRaises(ValueError):
-                validate(version, self.configuration(), "1001", "1001")
+                validate(version, config, "1001", "1001")
+
+    def test_cli_consumes_json_without_a_filename(self):
+        arguments = ["validate_compose_tls.py", "--version", "2.24.4", "--uid", "1001", "--gid", "1001"]
+        source = StringIO(json.dumps(self.configuration()))
+        with patch("sys.argv", arguments), patch("sys.stdin", source), patch("sys.stdout", new_callable=StringIO) as output:
+            validate_main()
+        self.assertIn("Verified shared TLS namespace", output.getvalue())
+
+    def test_cli_rejects_filename_arguments(self):
+        arguments = ["validate_compose_tls.py", "--version", "2.24.4", "--uid", "1001", "--gid", "1001",
+                     "--config", "caller-supplied.json"]
+        with patch("sys.argv", arguments), patch("sys.stderr", new_callable=StringIO) as output:
+            with self.assertRaises(SystemExit) as raised:
+                validate_main()
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("unrecognized arguments: --config", output.getvalue())
 
     def test_cleartext_or_external_ports_rejected(self):
         base = self.configuration()

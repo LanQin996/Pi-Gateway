@@ -54,7 +54,7 @@
 - **保持測試內容**：四種 SQLite／PostgreSQL × memory／Redis 組合仍執行 seed→移除 containers→重建→verify→清理，Redis 的跨重建資料斷言不變。backend 的真實 gateway 測試也經同一個 TLS fixture，而不是使用僅為測試建立的不同代理實作。
 - **新增成本／限制**：CI 多一個輕量 sidecar、一次靜態 fixture build、每組一次憑證產生及 TLS 握手；不宣稱整體效能提升。fixture 僅供目前 Linux amd64 Compose runtime matrix；正式 image 的 amd64／arm64 build 仍照舊驗證。這不是擴大為正式環境憑證管理功能。
 
-本地最終 17 項 Python 測試通過：保留原 10 項，新增未信任／錯誤 CA、錯誤 IP SAN、ambient proxy、Compose 版本／port／namespace／owner／mount guard。錯誤 CA／SAN 會在發出 bearer request 前被拒絕。Go fixture `go vet` 與 6 項 `-race` 測試通過，另涵蓋憑證過期、0600／拒絕覆寫、明文送往 TLS port 被拒絕、轉送方法／路徑／body／認證保持，以及 healthcheck 不接受錯誤 CA 或 redirect。新增 Go 函式的本地 gocognit 均不超過 10，仍非 Sonar 計分保證。
+本地最終 19 項 Python 測試通過：保留原 10 項，另驗證 guard 僅讀 stdin 並拒絕檔案參數，新增未信任／錯誤 CA、錯誤 IP SAN、ambient proxy、Compose 版本／port／namespace／owner／mount guard。錯誤 CA／SAN 會在發出 bearer request 前被拒絕。Go fixture `go vet` 與 6 項 `-race` 測試通過，另涵蓋憑證過期、0600／拒絕覆寫、明文送往 TLS port 被拒絕、轉送方法／路徑／body／認證保持，以及 healthcheck 不接受錯誤 CA 或 redirect。新增 Go 函式的本地 gocognit 均不超過 10，仍非 Sonar 計分保證。
 
 本地沒有 Docker daemon，YAML parse 與合併 guard 單元測試不冒充 Docker runtime；四組真實 Compose 與新提交 Sonar 結果由遠端 CI 確認。沒有在服務端標記 Safe／Accepted／False Positive，**新提交完成分析前仍不宣稱全 A 或 Quality Gate 已通過。**
 
@@ -63,3 +63,8 @@
 `38e9f61d294054171feb1f8bd32343bb89c27660` 於 06:04 UTC 的 Sonar Code Analysis，GitHub checks 實際頁面列出 3 個 annotations：原有 2 個安全問題，以及新固定路徑清單令 `/api/auth/logout` 達到三次重複的字面值問題（issue `AaFiNgeASWJBroeFAkbt`）。該次 annotations 已不再列出原六項維護性問題；這是 PR check 的證據，不是主分支全部問題清單。
 
 後續將 logout 路徑抽為 `AUTH_LOGOUT_PATH`，清單與兩次 logout request 共用同一常數；不改路徑值、請求方法或次數，再次跑完整 10 項 probe 測試。該次 logout 常數補修沒有改變兩項安全契約；後續 S2245 的批准與變更另見上節。每個新提交仍需以自己的 CI／Sonar 結果判定。
+
+
+`e987f3812bbb9e9250e0048b35d2af9d4f35e96d` 的 Sonar check `119709596984` 已不再列出原 S5332，但新增三項：guard 的 `--config` 任意檔案讀取被判 path traversal（`AaFioBA2FXb5HNqAAPJp`），以及兩處 exception test 同時呼叫 constructor／fixture 與受測函式（`AaFioA-LFXb5HNqAAPJn`、`AaFioA-LFXb5HNqAAPJo`）。當次新程式碼 Security C，沒有將它當作 TLS 已達全 A 的證據。
+
+後續直接移除 guard 的檔案路徑介面：Compose JSON 經 stdin 管線傳入，validator 不再根據 CLI 或 JSON 的路徑開檔；保留 pipefail 與所有隔離檢查，補成功 stdin／拒絕舊檔案參數回歸。兩個 exception test 將準備動作移到 `assertRaises` 之外，只保留真正受測的單一呼叫；未改弱失敗條件。最終 19 項 Python 與原 6 項 Go race 通過，新提交仍須重新分析。

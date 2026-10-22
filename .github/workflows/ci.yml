@@ -263,9 +263,9 @@ jobs:
           "$PI_GATEWAY_TLS_BINARY" certs --dir "$PI_GATEWAY_TLS_CERTS"
           compose_version=$(docker compose version --short)
           python3 .github/validate_compose_tls.py --version "$compose_version" --version-only
-          "${compose[@]}" config --format json > "$tls_root/compose.json"
-          python3 .github/validate_compose_tls.py --version "$compose_version" \
-            --config "$tls_root/compose.json" --uid "$PI_GATEWAY_TLS_UID" --gid "$PI_GATEWAY_TLS_GID"
+          "${compose[@]}" config --format json |
+            python3 .github/validate_compose_tls.py --version "$compose_version" \
+              --uid "$PI_GATEWAY_TLS_UID" --gid "$PI_GATEWAY_TLS_GID"
           "${compose[@]}" up -d --no-build --wait --wait-timeout 180
           python3 .github/compose_smoke.py seed --state "$state_file" --ca-file "$PI_GATEWAY_TLS_CERTS/ca.crt"
           if [[ "$USE_REDIS" == true ]]; then

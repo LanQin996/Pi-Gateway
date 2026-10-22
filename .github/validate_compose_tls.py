@@ -2,6 +2,7 @@
 import argparse
 import json
 import re
+import sys
 
 
 def validate(version, config, uid, gid):
@@ -46,17 +47,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", required=True)
     parser.add_argument("--version-only", action="store_true")
-    parser.add_argument("--config")
     parser.add_argument("--uid")
     parser.add_argument("--gid")
     args = parser.parse_args()
     validate_version(args.version)
     if args.version_only:
         return
-    if not all((args.config, args.uid, args.gid)):
-        parser.error("--config, --uid and --gid are required for configuration validation")
-    with open(args.config, encoding="utf-8") as source:
-        config = json.load(source)
+    if not all((args.uid, args.gid)):
+        parser.error("--uid and --gid are required for configuration validation")
+    # Consume the Compose pipeline directly; this validator never opens a path
+    # supplied by a caller or by the serialized configuration.
+    config = json.load(sys.stdin)
     validate(args.version, config, args.uid, args.gid)
     print("Verified shared TLS namespace, private upstream and TLS-only host port.")
 

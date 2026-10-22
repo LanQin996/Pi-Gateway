@@ -71,7 +71,7 @@
 
 ## 驗證狀態
 
-本節保留第二輪初次交付時的本地證據與限制；後續 `7919367` 的兩組遠端 CI 均已通過（57 項 Chromium、21 個 Go race 套件、9 項必跑整合無 skip、雙架構 image 與四組 Compose）。最新 TLS fixture 的 17 項 Python／6 項 Go race 本地證據與待驗證項目見 [後續記錄](pr2-followup.md)。不同提交的結果不能相互代替。
+本節保留第二輪初次交付時的本地證據與限制；後續 `7919367` 的兩組遠端 CI 均已通過（57 項 Chromium、21 個 Go race 套件、9 項必跑整合無 skip、雙架構 image 與四組 Compose）。最新 TLS fixture 的 19 項 Python／6 項 Go race 本地證據與待驗證項目見 [後續記錄](pr2-followup.md)。不同提交的結果不能相互代替。
 
 **第二輪完整 Go vet／race 及最後 accounts race 均通過。** 使用 Go 1.26.0；完整 `go vet ./...` 與 `go test -race -json -count=1 -timeout=30m ./...` 通過 21 個測試套件（API 603.809 秒）。PostgreSQL 17.11／Redis 7.4.11 實機環境的 9 個必跑整合項目全部通過且無 skip，包含四種 backend 組合。
 
