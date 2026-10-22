@@ -55,50 +55,58 @@ export async function checkRuleGraph(schema, backend) {
         }]
     }
     fixtures.push(special)
-    for (const cap of schema.conditions) {
-        const when = m.defaultCondition(cap.id, schema)
-        if (cap.id === 'regex' || cap.id === 'not_regex') when.value = 'test'
-        fixtures.push({...m.newRule(), name: cap.id, when})
-    }
-    for (const cap of schema.actions) {
-        const action = m.newAction(cap.id, schema)
-        if (cap.id === 'rewrite_model') action.params.model = 'test'
-        if (cap.id === 'text_replace') action.params.pattern = 'test'
-        if (cap.id === 'json_merge') action.params.value = {a: null}
-        if (cap.id === 'scope') action.params.functions = {}
-        if (cap.id === 'call') continue // A call requires its enclosing scope; tested below through nested fixtures
-        fixtures.push({...m.newRule(), name: cap.id, phase: cap.phases[0], actions: [action]})
-    }
-    fixtures.push({
-        ...m.newRule(), name: 'nested-fragment', phase: 'upstream_headers', actions: [{
-            id: 'scope',
-            type: 'scope',
-            params: {
-                functions: {
-                    metadata: [{
-                        id: 'agent',
-                        type: 'json_set',
-                        params: {path: '/user-agent', value: ['example']}
-                    }]
-                }, steps: [{id: 'invoke', type: 'call', params: {name: 'metadata'}}]
+    checkFixtures()
+
+    function checkFixtures() {
+        for (const cap of schema.conditions) {
+            const when = m.defaultCondition(cap.id, schema)
+            if (cap.id === 'regex' || cap.id === 'not_regex') when.value = 'test'
+            fixtures.push({...m.newRule(), name: cap.id, when})
+        }
+        for (const cap of schema.actions) {
+            const action = m.newAction(cap.id, schema)
+            if (cap.id === 'rewrite_model') action.params.model = 'test'
+            if (cap.id === 'text_replace') action.params.pattern = 'test'
+            if (cap.id === 'json_merge') action.params.value = {a: null}
+            if (cap.id === 'scope') action.params.functions = {}
+            if (cap.id === 'call') continue // A call requires its enclosing scope; tested below through nested fixtures
+            fixtures.push({...m.newRule(), name: cap.id, phase: cap.phases[0], actions: [action]})
+        }
+        fixtures.push({
+            ...m.newRule(), name: 'nested-fragment', phase: 'upstream_headers', actions: [{
+                id: 'scope',
+                type: 'scope',
+                params: {
+                    functions: {
+                        metadata: [{
+                            id: 'agent',
+                            type: 'json_set',
+                            params: {path: '/user-agent', value: ['example']}
+                        }]
+                    }, steps: [{id: 'invoke', type: 'call', params: {name: 'metadata'}}]
+                }
+            }]
+        })
+        checkFixtureRoundtrips()
+
+        function checkFixtureRoundtrips() {
+            for (const rule of fixtures) {
+                const graph = m.ruleToGraph(rule)
+                assert.deepEqual(m.graphToRule(graph, schema), rule, `${rule.name}: graph changed wire AST`)
+                const again = m.ruleToGraph(rule, graph)
+                assert.deepEqual(again.nodes.map(n => n.id), graph.nodes.map(n => n.id), 'stable editor identities')
+                for (let i = 0; i < graph.nodes.length; i++) for (const other of graph.nodes.slice(i + 1)) assert.ok(Math.abs(graph.nodes[i].position.x - other.position.x) >= 360 || Math.abs(graph.nodes[i].position.y - other.position.y) >= 300, 'fresh layout must leave room for full-size cards')
+                const manual = structuredClone(graph);
+                manual.nodes.forEach((node, index) => node.position = {x: index * 17, y: index * -23})
+                assert.deepEqual(m.ruleToGraph(rule, manual).nodes.map(node => node.position), manual.nodes.map(node => node.position), 'new defaults never move a previous layout')
+                assert.ok(!JSON.stringify(m.graphToRule(graph, schema)).includes('viewport'))
+                const draft = m.createDraft(rule)
+                draft.graph.nodes[0].position = {x: 99, y: 88};
+                draft.graph.viewport = {x: 12, y: 34, zoom: .5};
+                draft.graph.selected = [draft.graph.nodes[0].id]
+                assert.equal(m.draftDirty(draft), false, 'layout does not change persistence')
             }
-        }]
-    })
-    for (const rule of fixtures) {
-        const graph = m.ruleToGraph(rule)
-        assert.deepEqual(m.graphToRule(graph, schema), rule, `${rule.name}: graph changed wire AST`)
-        const again = m.ruleToGraph(rule, graph)
-        assert.deepEqual(again.nodes.map(n => n.id), graph.nodes.map(n => n.id), 'stable editor identities')
-        for (let i = 0; i < graph.nodes.length; i++) for (const other of graph.nodes.slice(i + 1)) assert.ok(Math.abs(graph.nodes[i].position.x - other.position.x) >= 360 || Math.abs(graph.nodes[i].position.y - other.position.y) >= 300, 'fresh layout must leave room for full-size cards')
-        const manual = structuredClone(graph);
-        manual.nodes.forEach((node, index) => node.position = {x: index * 17, y: index * -23})
-        assert.deepEqual(m.ruleToGraph(rule, manual).nodes.map(node => node.position), manual.nodes.map(node => node.position), 'new defaults never move a previous layout')
-        assert.ok(!JSON.stringify(m.graphToRule(graph, schema)).includes('viewport'))
-        const draft = m.createDraft(rule)
-        draft.graph.nodes[0].position = {x: 99, y: 88};
-        draft.graph.viewport = {x: 12, y: 34, zoom: .5};
-        draft.graph.selected = [draft.graph.nodes[0].id]
-        assert.equal(m.draftDirty(draft), false, 'layout does not change persistence')
+        }
     }
     // Black boxes preserve execution AST and map typed boundary ports back to real nodes.
     const groupingRule = {
@@ -314,6 +322,11 @@ export async function checkRuleGraph(schema, backend) {
         }, locale), m.ruleLabel('action', 'reject_request', locale))
     }
     console.log('PASS: bounded sample pointers/current-source gating; coordinate-only cache/restoration/shape mismatch/memory fallback; migration names preserve custom input')
+    const labels = checkCatalogLabels(m, schema, backend)
+    console.log(`PASS: ${fixtures.length} lossless graph roundtrips, graph invariants/orphans/cycles/ports/phases/order/IDs/dirty state, ${labels} catalog bilingual labels`)
+}
+
+function checkCatalogLabels(m, schema, backend) {
     // Coverage is against the authoritative backend catalog, not equality of locale key counts.
     let labels = 0
     const label = (group, value) => {
@@ -322,14 +335,18 @@ export async function checkRuleGraph(schema, backend) {
         labels++
     }
     for (const field of [...backend.rule_fields, ...backend.context_fields]) label('field', field.name)
-    for (const [section, group] of [['conditions', 'condition'], ['actions', 'action'], ['value_expressions', 'expression']]) for (const cap of backend[section]) {
-        label(group, cap.id)
-        for (const field of cap.fields) {
-            label('field', field.name);
-            for (const value of field.enum ?? []) {
-                const found = ['option', 'phase', 'source', 'condition'].find(group => m.ruleLabels[group]?.[value]);
-                assert.ok(found, `missing enum label ${cap.id}.${field.name}:${value}`);
-                label(found, value)
+    checkCapabilityLabels()
+
+    function checkCapabilityLabels() {
+        for (const [section, group] of [['conditions', 'condition'], ['actions', 'action'], ['value_expressions', 'expression']]) for (const cap of backend[section]) {
+            label(group, cap.id)
+            for (const field of cap.fields) {
+                label('field', field.name);
+                for (const value of field.enum ?? []) {
+                    const found = ['option', 'phase', 'source', 'condition'].find(group => m.ruleLabels[group]?.[value]);
+                    assert.ok(found, `missing enum label ${cap.id}.${field.name}:${value}`);
+                    label(found, value)
+                }
             }
         }
     }
@@ -341,7 +358,7 @@ export async function checkRuleGraph(schema, backend) {
     for (const phase of backend.phases) label('phase', phase)
     for (const source of schema.sources) label('source', source)
     for (const status of Object.keys(m.ruleLabels.status)) label('status', status)
-    console.log(`PASS: ${fixtures.length} lossless graph roundtrips, graph invariants/orphans/cycles/ports/phases/order/IDs/dirty state, ${labels} catalog bilingual labels`)
+    return labels
 }
 
 function checkNestedWorkflow(m, schema) {
@@ -509,10 +526,10 @@ function checkQuickAdd(m, schema) {
         }
     }
     const rejected = (graph, options, code) => assert.throws(() => add(graph, options), error => error instanceof m.RuleInputError && (!code || error.errors.some(error => error.code === code)))
-    const make = (when = {op: 'always'}, actions = [], extra = {}) => m.ruleToGraph({
+    const make = (when, actions = [], extra = {}) => m.ruleToGraph({
         ...m.newRule(),
         name: 'quick add',
-        when,
+        when: when ?? {op: 'always'},
         actions, ...extra
     })
     const rootOf = graph => graph.nodes.find(node => node.kind === 'rule')
@@ -595,14 +612,18 @@ function checkQuickAdd(m, schema) {
     assert.ok(combined.nodes.some(node => node.id === rootCondition(nonAlways).id))
     assert.equal(selected(combined).data.op, 'eq', 'selection is the requested condition, not the implicit all')
     const crowded = make(subtree, oldActions)
-    for (const options of [{kind: 'condition', type: 'not'}, {
-        kind: 'condition',
-        type: 'any',
-        targetId: rootCondition(crowded).id
-    }, {kind: 'action', type: 'array_filter', targetId: rootOf(crowded).id}]) {
-        const placed = add(crowded, options)
-        for (const node of placed.nodes.filter(node => !crowded.nodes.some(old => old.id === node.id))) for (const other of placed.nodes.filter(other => other.id !== node.id)) assert.ok(Math.abs(node.position.x - other.position.x) >= 360 || Math.abs(node.position.y - other.position.y) >= 240, 'auto-added main nodes and predicate/group descendants avoid existing cards')
-        for (const old of crowded.nodes) assert.deepEqual(placed.nodes.find(node => node.id === old.id).position, old.position, 'quick-add never moves existing cards')
+    checkCrowdedPlacement()
+
+    function checkCrowdedPlacement() {
+        for (const options of [{kind: 'condition', type: 'not'}, {
+            kind: 'condition',
+            type: 'any',
+            targetId: rootCondition(crowded).id
+        }, {kind: 'action', type: 'array_filter', targetId: rootOf(crowded).id}]) {
+            const placed = add(crowded, options)
+            for (const node of placed.nodes.filter(node => !crowded.nodes.some(old => old.id === node.id))) for (const other of placed.nodes.filter(other => other.id !== node.id)) assert.ok(Math.abs(node.position.x - other.position.x) >= 360 || Math.abs(node.position.y - other.position.y) >= 240, 'auto-added main nodes and predicate/group descendants avoid existing cards')
+            for (const old of crowded.nodes) assert.deepEqual(placed.nodes.find(node => node.id === old.id).position, old.position, 'quick-add never moves existing cards')
+        }
     }
     const nestedLeaf = nonAlways.nodes.find(node => node.data.path === '/first')
     const nestedEdge = nonAlways.edges.find(edge => edge.source === nestedLeaf.id)
@@ -634,7 +655,13 @@ function checkQuickAdd(m, schema) {
         conditions: [originalNot, eq]
     }, 'new condition is outside the occupied NOT')
     const trace = []
-    const evaluate = condition => condition.op === 'all' ? condition.conditions.every(evaluate) : condition.op === 'any' ? condition.conditions.some(evaluate) : condition.op === 'not' ? !evaluate(condition.conditions[0]) : (trace.push(condition.path ?? ''), !!condition.value)
+    const evaluate = condition => {
+        if (condition.op === 'all') return condition.conditions.every(evaluate)
+        if (condition.op === 'any') return condition.conditions.some(evaluate)
+        if (condition.op === 'not') return !evaluate(condition.conditions[0])
+        trace.push(condition.path ?? '')
+        return !!condition.value
+    }
     assert.equal(evaluate(ruleOf(besideNot).when), false)
     assert.deepEqual(trace, ['/short-circuit-first', eq.path ?? ''], 'NOT subtree short circuits before evaluating the added sibling')
     for (const op of ['all', 'any']) {
@@ -650,16 +677,20 @@ function checkQuickAdd(m, schema) {
         type: 'eq',
         targetId: rootCondition(emptyNot).id
     })).when, {op: 'not', conditions: [eq]})
-    for (const op of ['all', 'any', 'not']) {
-        const before = make(subtree), target = rootCondition(before),
-            edge = before.edges.find(edge => edge.source === target.id)
-        edge.order = 17
-        const wrapped = add(before, {kind: 'condition', type: op, mode: 'wrap', position: {x: -111, y: 888}})
-        assert.deepEqual(ruleOf(wrapped).when, {op, conditions: [subtree]})
-        assert.equal(wrapped.nodes.length, before.nodes.length + 1, 'wrap must not retain a default always sibling')
-        assert.deepEqual(selected(wrapped).position, {x: -111, y: 888})
-        assert.deepEqual(wrapped.edges.find(next => next.id === edge.id), {...edge, source: selected(wrapped).id})
-        for (const node of before.nodes) assert.deepEqual(wrapped.nodes.find(next => next.id === node.id).data, node.data, 'wrap preserves every subtree node')
+    checkConditionWrapping()
+
+    function checkConditionWrapping() {
+        for (const op of ['all', 'any', 'not']) {
+            const before = make(subtree), target = rootCondition(before),
+                edge = before.edges.find(edge => edge.source === target.id)
+            edge.order = 17
+            const wrapped = add(before, {kind: 'condition', type: op, mode: 'wrap', position: {x: -111, y: 888}})
+            assert.deepEqual(ruleOf(wrapped).when, {op, conditions: [subtree]})
+            assert.equal(wrapped.nodes.length, before.nodes.length + 1, 'wrap must not retain a default always sibling')
+            assert.deepEqual(selected(wrapped).position, {x: -111, y: 888})
+            assert.deepEqual(wrapped.edges.find(next => next.id === edge.id), {...edge, source: selected(wrapped).id})
+            for (const node of before.nodes) assert.deepEqual(wrapped.nodes.find(next => next.id === node.id).data, node.data, 'wrap preserves every subtree node')
+        }
     }
     const wrappedLeaf = add(nonAlways, {kind: 'condition', type: 'not', mode: 'wrap', targetId: nestedLeaf.id})
     assert.deepEqual(ruleOf(wrappedLeaf).when.conditions[0], {op: 'not', conditions: [subtree.conditions[0]]})
@@ -714,20 +745,24 @@ function checkQuickAdd(m, schema) {
         value: true
     }, eq])
 
-    for (const [kind, type, count] of [['condition', 'eq', 1], ['condition', 'not', 2], ['action', 'array_filter', 2]]) {
-        const detached = add(empty, {kind, type, mode: 'detached', targetId: rootOf(empty).id})
-        assert.equal(detached.nodes.length, empty.nodes.length + count)
-        assert.deepEqual(detached.edges.filter(edge => empty.edges.some(old => old.id === edge.id)), empty.edges)
-        assert.ok(m.graphErrors(detached, schema).some(error => error.code === 'graph.orphan'))
-        assert.throws(() => ruleOf(detached), m.RuleInputError, 'orphan modules block serialization/save')
-        rejected(detached, {kind, type, targetId: selected(detached).id}, 'graph.orphan')
-        if (kind === 'action') rejected(detached, {kind: 'action', type: 'json_set'}, 'graph.orphan')
-        else rejected(detached, {
-            kind: 'condition',
-            type: 'not',
-            mode: 'wrap',
-            targetId: selected(detached).id
-        }, 'graph.orphan')
+    checkDetachedModules()
+
+    function checkDetachedModules() {
+        for (const [kind, type, count] of [['condition', 'eq', 1], ['condition', 'not', 2], ['action', 'array_filter', 2]]) {
+            const detached = add(empty, {kind, type, mode: 'detached', targetId: rootOf(empty).id})
+            assert.equal(detached.nodes.length, empty.nodes.length + count)
+            assert.deepEqual(detached.edges.filter(edge => empty.edges.some(old => old.id === edge.id)), empty.edges)
+            assert.ok(m.graphErrors(detached, schema).some(error => error.code === 'graph.orphan'))
+            assert.throws(() => ruleOf(detached), m.RuleInputError, 'orphan modules block serialization/save')
+            rejected(detached, {kind, type, targetId: selected(detached).id}, 'graph.orphan')
+            if (kind === 'action') rejected(detached, {kind: 'action', type: 'json_set'}, 'graph.orphan')
+            else rejected(detached, {
+                kind: 'condition',
+                type: 'not',
+                mode: 'wrap',
+                targetId: selected(detached).id
+            }, 'graph.orphan')
+        }
     }
     rejected(empty, {kind: 'action', type: 'drop_event'}, 'graph.phase')
     rejected(make(undefined, [], {phase: 'response_body'}), {kind: 'action', type: 'reject_request'}, 'graph.phase')
@@ -765,25 +800,29 @@ function checkQuickAdd(m, schema) {
     customSchema.conditions.find(cap => cap.id === 'eq').fields.find(field => field.name === 'value').default = 'custom-default'
     assert.equal(selected(add(empty, {kind: 'condition', type: 'eq'}, customSchema)).data.value, 'custom-default')
 
-    for (const persisted of [false, true]) {
-        const before = make(undefined, [], persisted ? {id: 'saved-rule', revision: 4} : {}),
-            draft = m.createDraft(rootOf(before).data, !persisted)
-        const after = add(before, {kind: 'action', type: 'json_set'})
-        after.nodes.forEach((node, index) => node.position = {x: 4444 + index * 360, y: -9999 + index * 240})
-        after.viewport = {x: 12345, y: 54321, zoom: .7};
-        after.layoutRestored = true
-        draft.graph = after;
-        draft.rule = ruleOf(after)
-        const body = JSON.parse(m.stringifyRule(draft.rule))
-        assert.equal(m.draftDirty(draft), true)
-        assert.deepEqual(Object.keys(body).sort(), Object.keys(rootOf(before).data).sort())
-        for (const key of ['nodes', 'edges', 'position', 'viewport', 'selected', 'layoutRestored', 'graph', 'graphUndo', 'graphRedo']) assert.equal(Object.hasOwn(body, key), false, `${persisted ? 'update' : 'create'} body leaked ${key}`)
-        assert.deepEqual(Object.keys(body.actions[0]).sort(), ['id', 'params', 'type'])
-        assert.ok(!JSON.stringify(body).includes('pi-rule-layout:'))
-        assert.equal(body.id, persisted ? 'saved-rule' : undefined)
-        assert.equal(body.revision, persisted ? 4 : undefined)
-        const again = m.ruleToGraph(body, after)
-        assert.equal(again.nodes.find(node => node.kind === 'action').id, selected(after).id, 'quick-added action retains editor identity on rebuild')
+    checkPersistedLayouts()
+
+    function checkPersistedLayouts() {
+        for (const persisted of [false, true]) {
+            const before = make(undefined, [], persisted ? {id: 'saved-rule', revision: 4} : {}),
+                draft = m.createDraft(rootOf(before).data, !persisted)
+            const after = add(before, {kind: 'action', type: 'json_set'})
+            after.nodes.forEach((node, index) => node.position = {x: 4444 + index * 360, y: -9999 + index * 240})
+            after.viewport = {x: 12345, y: 54321, zoom: .7};
+            after.layoutRestored = true
+            draft.graph = after;
+            draft.rule = ruleOf(after)
+            const body = JSON.parse(m.stringifyRule(draft.rule))
+            assert.equal(m.draftDirty(draft), true)
+            assert.deepEqual(Object.keys(body).sort((a, b) => a.localeCompare(b)), Object.keys(rootOf(before).data).sort((a, b) => a.localeCompare(b)))
+            for (const key of ['nodes', 'edges', 'position', 'viewport', 'selected', 'layoutRestored', 'graph', 'graphUndo', 'graphRedo']) assert.equal(Object.hasOwn(body, key), false, `${persisted ? 'update' : 'create'} body leaked ${key}`)
+            assert.deepEqual(Object.keys(body.actions[0]).sort((a, b) => a.localeCompare(b)), ['id', 'params', 'type'])
+            assert.ok(!JSON.stringify(body).includes('pi-rule-layout:'))
+            assert.equal(body.id, persisted ? 'saved-rule' : undefined)
+            assert.equal(body.revision, persisted ? 4 : undefined)
+            const again = m.ruleToGraph(body, after)
+            assert.equal(again.nodes.find(node => node.kind === 'action').id, selected(after).id, 'quick-added action retains editor identity on rebuild')
+        }
     }
     console.log('PASS: immutable graph quick-add; middle/tail actions and stable IDs; ordered conditions/NOT/wrap/predicates; detached orphans; invalid targets/phases; UI-free create/update AST')
 }

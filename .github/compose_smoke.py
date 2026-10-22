@@ -10,11 +10,15 @@ import os
 from pathlib import Path
 import re
 import sys
+import tempfile
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import Request, build_opener, ProxyHandler
 from uuid import uuid4
 
+ACCOUNT_GROUPS_PATH = "/api/account-groups"
+KEYS_PATH = "/api/keys"
+MODELS_PATH = "/v1/models"
 
 class Probe:
     def __init__(self, base_url, password):
@@ -65,16 +69,16 @@ class Probe:
     def seed(self):
         self.health_and_login()
         marker = "compose-ci-" + uuid4().hex
-        group = self.request("POST", "/api/account-groups", {
+        group = self.request("POST", ACCOUNT_GROUPS_PATH, {
             "name": marker, "notes": "must survive recreation", "disabled_models": ["blocked-ci-model"],
         })["group"]
-        key = self.request("POST", "/api/keys", {
+        key = self.request("POST", KEYS_PATH, {
             "name": marker, "group_ids": [group["id"]], "max_concurrency": 2,
         })["key"]
         # Exercise update as well as insert and ensure it survives restart.
         self.request("PATCH", f'/api/keys/{key["id"]}', {"name": marker + "-updated"})
-        self.request("GET", "/v1/models", token=key["key"])
-        self.request("GET", "/v1/models", token="not-a-valid-client-key", status=401)
+        self.request("GET", MODELS_PATH, token=key["key"])
+        self.request("GET", MODELS_PATH, token="invalid-" + uuid4().hex, status=401)
         self.request("POST", "/api/auth/logout")
         self.token = ""
         return {"marker": marker, "group_id": group["id"], "key_id": key["id"], "client_key": key["key"]}
@@ -83,24 +87,42 @@ class Probe:
         if not re.fullmatch(r"compose-ci-[0-9a-f]{32}", state["marker"]):
             raise AssertionError("not a disposable Compose probe state")
         self.health_and_login()
-        groups = self.request("GET", "/api/account-groups")["groups"]
+        groups = self.request("GET", ACCOUNT_GROUPS_PATH)["groups"]
         group = next((entry for entry in groups if entry["id"] == state["group_id"]), None)
         if group is None or group["name"] != state["marker"] or group["notes"] != "must survive recreation" or group["disabled_models"] != ["blocked-ci-model"]:
             raise AssertionError("group data or model restrictions did not survive container recreation")
-        keys = self.request("GET", "/api/keys")["keys"]
+        keys = self.request("GET", KEYS_PATH)["keys"]
         key = next((entry for entry in keys if entry["id"] == state["key_id"]), None)
         if key is None or key["name"] != state["marker"] + "-updated" or key["group_ids"] != [state["group_id"]] or key["max_concurrency"] != 2:
             raise AssertionError("key data or group binding did not survive container recreation")
-        self.request("GET", "/v1/models", token=state["client_key"])
+        self.request("GET", MODELS_PATH, token=state["client_key"])
         self.request("PATCH", f'/api/keys/{state["key_id"]}', {"enabled": False})
-        self.request("GET", "/v1/models", token=state["client_key"], status=401)
+        self.request("GET", MODELS_PATH, token=state["client_key"], status=401)
         self.request("DELETE", f'/api/keys/{state["key_id"]}')
         self.request("DELETE", f'/api/account-groups/{state["group_id"]}')
-        if any(entry["id"] == state["key_id"] for entry in self.request("GET", "/api/keys")["keys"]):
+        if any(entry["id"] == state["key_id"] for entry in self.request("GET", KEYS_PATH)["keys"]):
             raise AssertionError("deleted probe key still exists")
-        if any(entry["id"] == state["group_id"] for entry in self.request("GET", "/api/account-groups")["groups"]):
+        if any(entry["id"] == state["group_id"] for entry in self.request("GET", ACCOUNT_GROUPS_PATH)["groups"]):
             raise AssertionError("deleted probe group still exists")
         self.request("POST", "/api/auth/logout")
+
+
+def state_path(value):
+    """Confine CLI-selected files to the trusted runner's temporary directory."""
+    root = Path(os.environ.get("RUNNER_TEMP") or tempfile.gettempdir()).resolve(strict=True)
+    path = Path(value)
+    if path.parent.resolve(strict=True) != root or not re.fullmatch(r"pi-gateway-ci-[A-Za-z0-9_-]+\.json", path.name):
+        raise ValueError("state must be a pi-gateway-ci-*.json file directly in RUNNER_TEMP (or the system temporary directory)")
+    if path.is_symlink():
+        raise ValueError("state must not be a symbolic link")
+    return root / path.name
+
+
+def read_state(path):
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    with os.fdopen(fd, "r", encoding="utf-8") as source:
+        return json.load(source)
 
 
 def main():
@@ -109,6 +131,7 @@ def main():
     parser.add_argument("--url", default="http://127.0.0.1:8317")
     parser.add_argument("--state", type=Path, required=True)
     args = parser.parse_args()
+    args.state = state_path(args.state)
     password = os.environ.get("PI_GATEWAY_ADMIN_PASSWORD")
     if not password:
         raise ValueError("PI_GATEWAY_ADMIN_PASSWORD is required for the disposable probe")
@@ -121,7 +144,7 @@ def main():
             json.dump(state, output)
         print("Compose health, frontend, authentication, and seed CRUD passed.")
     else:
-        probe.verify(json.loads(args.state.read_text(encoding="utf-8")))
+        probe.verify(read_state(args.state))
         args.state.unlink()
         print("Compose recreation, persisted bindings, live revocation, and cleanup passed.")
 

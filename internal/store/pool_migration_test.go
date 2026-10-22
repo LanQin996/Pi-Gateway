@@ -2,7 +2,7 @@ package store
 
 import (
 	"context"
-	"crypto/sha1"
+	"crypto/sha256"
 	"database/sql"
 	"fmt"
 	"os"
@@ -91,76 +91,54 @@ func makeLegacyPool(t *testing.T, path string) *sql.DB {
 func TestOpenMigratesLegacyKeyGroupsIdempotently(t *testing.T) {
 	path := storeTestPath(t)
 	db := makeLegacyPool(t, path)
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, db.Close())
 	ctx := context.Background()
 	for pass := 0; pass < 2; pass++ {
 		s, err := Open(path)
-		if err != nil {
-			t.Fatalf("pass %d: %v", pass, err)
-		}
+		requireDataTruef(t, !(err != nil), "pass %d: %v", pass, err)
 		t.Cleanup(func() { _ = s.Close() })
 		groups, err := s.ListAccountGroups(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(groups) != 1 {
-			t.Fatalf("groups=%+v", groups)
-		}
+		requireDataNoError(t, err)
+		requireDataTruef(t, !(len(groups) != 1), "groups=%+v", groups)
 		g := groups[0]
-		if g.Name != fmt.Sprintf("migrated:%x", sha1.Sum([]byte("1,2"))) || !reflect.DeepEqual(g.AccountIDs, []int64{1, 2}) || !g.Enabled {
-			t.Fatalf("migrated group=%+v", g)
-		}
+		requireDataTruef(t, !(g.Name != fmt.Sprintf("migrated:%x", sha256.Sum256([]byte("1,2"))) || !reflect.DeepEqual(g.AccountIDs, []int64{1, 2}) || !g.Enabled), "migrated group=%+v", g)
 		for _, id := range []int64{1, 2} {
 			k, err := s.GetKey(ctx, id)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if k == nil || !reflect.DeepEqual(k.GroupIDs, []int64{g.ID}) {
-				t.Fatalf("key %d=%+v", id, k)
-			}
-			if k.Label != "" || k.MaxConcurrency != 0 || k.RequestsPerMinute != 0 || k.DailyLimitUSD != 0 || k.WeeklyLimitUSD != 0 {
-				t.Fatalf("key defaults=%+v", k)
-			}
-			if id == 1 && (k.Strategy != "sticky" || k.Transport != "ws" || k.LastUsedAt != 30 || k.RequestCount != 7 || k.CreatedAt != 10 || k.UpdatedAt != 20) {
-				t.Fatalf("lost legacy data: %+v", k)
-			}
+			requireDataNoError(t, err)
+			requireDataTruef(t, !(k == nil || !reflect.DeepEqual(k.GroupIDs, []int64{g.ID})), "key %d=%+v", id, k)
+			requireDataTruef(t, !(k.Label != "" || k.MaxConcurrency != 0 || k.RequestsPerMinute != 0 || k.DailyLimitUSD != 0 || k.WeeklyLimitUSD != 0), "key defaults=%+v", k)
+			requireDataTruef(t, !(id == 1 && (k.Strategy != "sticky" || k.Transport != "ws" || k.LastUsedAt != 30 || k.RequestCount != 7 || k.CreatedAt != 10 || k.UpdatedAt != 20)), "lost legacy data: %+v", k)
 		}
 		for _, id := range []int64{3, 4} {
 			ids, err := s.ListKeyGroupIDs(ctx, id)
-			if err != nil || len(ids) != 0 {
-				t.Fatalf("unscoped key %d: %v, %v", id, ids, err)
-			}
+			requireDataTruef(t, !(err != nil || len(ids) != 0), "unscoped key %d: %v, %v", id, ids, err)
 		}
 		checkNewPoolColumns(t, s.db)
 		var count int
-		if err := s.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='index' AND tbl_name='api_keys'`).Scan(&count); err != nil || count < 1 {
-			t.Fatalf("key indexes: %d %v", count, err)
+		{
+			err := s.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='index' AND tbl_name='api_keys'`).Scan(&count)
+			requireDataTruef(t, !(err != nil || count < 1), "key indexes: %d %v", count, err)
 		}
-		if _, err := s.db.Exec(`INSERT INTO api_keys(name,key,created_at,updated_at) VALUES ('duplicate','legacy-one',0,0)`); err == nil {
-			t.Fatal("lost unique key constraint")
+		{
+			_, err := s.db.Exec(`INSERT INTO api_keys(name,key,created_at,updated_at) VALUES ('duplicate','legacy-one',0,0)`)
+			requireDataTrue(t, !(err == nil), "lost unique key constraint")
 		}
-		if err := s.Close(); err != nil {
-			t.Fatal(err)
-		}
+		requireDataNoError(t, s.Close())
 	}
 	backups, err := filepath.Glob(path + ".bak-*")
-	if err != nil || len(backups) != 1 {
-		t.Fatalf("backup files=%v err=%v", backups, err)
-	}
+	requireDataTruef(t, !(err != nil || len(backups) != 1), "backup files=%v err=%v", backups, err)
 	backup, err := sql.Open("sqlite", backups[0])
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, err)
 	defer backup.Close()
 	var scope, ids string
-	if err := backup.QueryRow(`SELECT scope,account_ids FROM api_keys WHERE id=1`).Scan(&scope, &ids); err != nil || scope != "list" || ids != "[2,1,2]" {
-		t.Fatalf("backup not pre-migration: %s %s %v", scope, ids, err)
+	{
+		err := backup.QueryRow(`SELECT scope,account_ids FROM api_keys WHERE id=1`).Scan(&scope, &ids)
+		requireDataTruef(t, !(err != nil || scope != "list" || ids != "[2,1,2]"), "backup not pre-migration: %s %s %v", scope, ids, err)
 	}
 	var newTables int
-	if err := backup.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name='account_groups'`).Scan(&newTables); err != nil || newTables != 0 {
-		t.Fatalf("backup contains migrated schema: %d %v", newTables, err)
+	{
+		err := backup.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name='account_groups'`).Scan(&newTables)
+		requireDataTruef(t, !(err != nil || newTables != 0), "backup contains migrated schema: %d %v", newTables, err)
 	}
 }
 
@@ -171,41 +149,35 @@ func checkNewPoolColumns(t *testing.T, db *sql.DB) {
 		"accounts": {"consecutive_failures": "0", "cooldown_until": "0", "cooldown_kind": "''", "last_started_at": "0", "ewma_first_output_ms": "0", "ewma_failure_rate_bp": "0"},
 	} {
 		rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
-		if err != nil {
-			t.Fatal(err)
-		}
+		requireDataNoError(t, err)
 		for rows.Next() {
 			var cid, notNull, pk int
 			var name, typ string
 			var dflt sql.NullString
-			if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
-				t.Fatal(err)
-			}
-			if table == "api_keys" && (name == "scope" || name == "account_ids") {
+			requireDataNoError(t, rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk))
+			reportStoreTestFailure(t, table == "api_keys" && (name == "scope" || name == "account_ids"), func() {
 				t.Errorf("legacy column survived: %s", name)
-			}
+			})
 			if v, ok := want[name]; ok {
-				if notNull != 1 || !dflt.Valid || dflt.String != v {
+				reportStoreTestFailure(t, notNull != 1 || !dflt.Valid || dflt.String != v, func() {
 					t.Errorf("%s.%s default=%v notNull=%d", table, name, dflt, notNull)
-				}
+				})
 				delete(want, name)
 			}
 		}
-		if err := rows.Err(); err != nil {
-			t.Fatal(err)
-		}
+		requireDataNoError(t, rows.Err())
 		rows.Close()
-		if len(want) != 0 {
-			t.Fatalf("missing columns %s: %v", table, want)
-		}
+		requireDataTruef(t, !(len(want) != 0), "missing columns %s: %v", table, want)
 	}
 	var nullable int
-	if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info('usage_records') WHERE name IN ('input_tokens','cached_tokens','cache_write_tokens','output_tokens','reasoning_tokens','total_tokens','cost_micros') AND "notnull"=0`).Scan(&nullable); err != nil || nullable != 7 {
-		t.Fatalf("nullable usage columns=%d err=%v", nullable, err)
+	{
+		err := db.QueryRow(`SELECT count(*) FROM pragma_table_info('usage_records') WHERE name IN ('input_tokens','cached_tokens','cache_write_tokens','output_tokens','reasoning_tokens','total_tokens','cost_micros') AND "notnull"=0`).Scan(&nullable)
+		requireDataTruef(t, !(err != nil || nullable != 7), "nullable usage columns=%d err=%v", nullable, err)
 	}
 	var indexes int
-	if err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('idx_usage_started','idx_usage_model','idx_usage_key','idx_usage_account','idx_usage_outcome')`).Scan(&indexes); err != nil || indexes != 5 {
-		t.Fatalf("usage indexes=%d %v", indexes, err)
+	{
+		err := db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('idx_usage_started','idx_usage_model','idx_usage_key','idx_usage_account','idx_usage_outcome')`).Scan(&indexes)
+		requireDataTruef(t, !(err != nil || indexes != 5), "usage indexes=%d %v", indexes, err)
 	}
 }
 

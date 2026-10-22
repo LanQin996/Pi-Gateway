@@ -1,7 +1,7 @@
 package rules
 
 import (
-	_ "embed"
+	_ "embed" // Registers go:embed support for the built-in protocol profile.
 	"encoding/json"
 )
 

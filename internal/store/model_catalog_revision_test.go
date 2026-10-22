@@ -30,11 +30,10 @@ func exerciseCatalogRevisions(t *testing.T, first, second *Store) {
 		t.Helper()
 		next := catalogRevisionForTest(t, first)
 		parsed, err := uuid.Parse(next)
-		if err != nil || parsed.Version() != 4 || seen[next] {
-			t.Fatalf("reused/non-random revision %q: %v", next, err)
-		}
-		if got := catalogRevisionForTest(t, second); got != next {
-			t.Fatalf("cross-Store stale epoch: %q != %q", got, next)
+		requireDataTruef(t, !(err != nil || parsed.Version() != 4 || seen[next]), "reused/non-random revision %q: %v", next, err)
+		{
+			got := catalogRevisionForTest(t, second)
+			requireDataTruef(t, !(got != next), "cross-Store stale epoch: %q != %q", got, next)
 		}
 		seen[next] = true
 		previous = next
@@ -42,204 +41,129 @@ func exerciseCatalogRevisions(t *testing.T, first, second *Store) {
 	assertUnchanged := func() {
 		t.Helper()
 		for _, s := range []*Store{first, second} {
-			if next := catalogRevisionForTest(t, s); next != previous {
-				t.Fatalf("unexpected revision change %q => %q", previous, next)
+			{
+				next := catalogRevisionForTest(t, s)
+				requireDataTruef(t, !(next != previous), "unexpected revision change %q => %q", previous, next)
 			}
 		}
 	}
 	a := &Account{Name: "revision-account", Enabled: true, SupplementalModels: []string{"manual"}}
-	if err := first.CreateAccount(ctx, a); err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, first.CreateAccount(ctx, a))
 	assertChanged()
 	// Identical writes with identical millisecond timestamps must still get
 	// unique epochs. Epoch generation does not derive from fetched/attempted time.
 	catalog := &ModelCatalog{Models: []CatalogModel{{ID: "upstream"}}, FetchedAt: 100, AttemptedAt: 100}
 	for i := 0; i < 20; i++ {
-		if err := first.SaveAccountModelCatalog(ctx, a.ID, catalog); err != nil {
-			t.Fatal(err)
-		}
+		requireDataNoError(t, first.SaveAccountModelCatalog(ctx, a.ID, catalog))
 		assertChanged()
 	}
-	if err := second.SaveAccountModelCatalog(ctx, a.ID, &ModelCatalog{Error: "refresh failed", AttemptedAt: 110}); err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, second.SaveAccountModelCatalog(ctx, a.ID, &ModelCatalog{Error: "refresh failed", AttemptedAt: 110}))
 	assertChanged()
-	if got, err := first.GetAccountModelCatalog(ctx, a.ID); err != nil || got.FetchedAt != 100 || got.Error != "refresh failed" || len(got.Models) != 2 {
-		t.Fatalf("failed refresh lost metadata: %+v err=%v", got, err)
+	{
+		got, err := first.GetAccountModelCatalog(ctx, a.ID)
+		requireDataTruef(t, !(err != nil || got.FetchedAt != 100 || got.Error != "refresh failed" || len(got.Models) != 2), "failed refresh lost metadata: %+v err=%v", got, err)
 	}
 	for _, supplemental := range [][]string{{"new-manual"}, {"new-manual"}, {}} {
-		if err := first.PatchAccountManagementFields(ctx, a.ID, AccountManagementPatch{SupplementalModels: supplemental}); err != nil {
-			t.Fatal(err)
-		}
+		requireDataNoError(t, first.PatchAccountManagementFields(ctx, a.ID, AccountManagementPatch{SupplementalModels: supplemental}))
 		assertChanged()
 		got, err := second.GetAccountModelCatalog(ctx, a.ID)
-		if err != nil || len(got.Models) != 1+len(supplemental) {
-			t.Fatalf("cross-Store stale manual list: %+v %v", got, err)
-		}
+		requireDataTruef(t, !(err != nil || len(got.Models) != 1+len(supplemental)), "cross-Store stale manual list: %+v %v", got, err)
 	}
 	// Metadata, eligibility and credentials are read live by callers and do not
 	// belong to the cache epoch. UpdateAccount historically excludes model lists.
 	a.SupplementalModels = []string{"must-not-overwrite"}
 	a.AccessToken = "rotated-test-token"
 	a.Enabled = false
-	if err := first.UpdateAccount(ctx, a); err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, first.UpdateAccount(ctx, a))
 	assertUnchanged()
-	if got, err := second.GetAccountModelCatalog(ctx, a.ID); err != nil || len(got.Models) != 1 {
-		t.Fatal("UpdateAccount changed supplemental-model semantics")
+	{
+		got, err := second.GetAccountModelCatalog(ctx, a.ID)
+		requireDataTrue(t, !(err != nil || len(got.Models) != 1), "UpdateAccount changed supplemental-model semantics")
 	}
 	name := "revision-renamed"
-	if err := first.PatchAccountManagementFields(ctx, a.ID, AccountManagementPatch{Name: &name, DisabledModels: []string{"blocked"}}); err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, first.PatchAccountManagementFields(ctx, a.ID, AccountManagementPatch{Name: &name, DisabledModels: []string{"blocked"}}))
 	assertUnchanged()
-	if err := first.UpdateAccountManagementFields(ctx, a.ID, name, true, 1, 3, "", ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := first.UpdateAccountCredentials(ctx, a.ID, "next-access", "next-refresh", 500, AccountStatusReady, ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := first.MarkAccountUsed(ctx, a.ID, true); err != nil {
-		t.Fatal(err)
-	}
-	if err := first.SetAccountStatus(ctx, a.ID, AccountStatusReady, ""); err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, first.UpdateAccountManagementFields(ctx, a.ID, AccountManagementFields{Name: name, Enabled: true, Weight: 1, Concurrency: 3}))
+	requireDataNoError(t, first.UpdateAccountCredentials(ctx, a.ID, "next-access", "next-refresh", 500, AccountStatusReady, ""))
+	requireDataNoError(t, first.MarkAccountUsed(ctx, a.ID, true))
+	requireDataNoError(t, first.SetAccountStatus(ctx, a.ID, AccountStatusReady, ""))
 	assertUnchanged()
 	// A failed group validation rolls back the preceding supplemental write.
-	if err := first.PatchAccountManagementFields(ctx, a.ID, AccountManagementPatch{SupplementalModels: []string{"rollback"}, GroupIDs: []int64{-99999}}); err == nil {
-		t.Fatal("invalid group accepted")
+	{
+		err := first.PatchAccountManagementFields(ctx, a.ID, AccountManagementPatch{SupplementalModels: []string{"rollback"}, GroupIDs: []int64{-99999}})
+		requireDataTrue(t, !(err == nil), "invalid group accepted")
 	}
 	assertUnchanged()
-	if got, err := second.GetAccountModelCatalog(ctx, a.ID); err != nil || len(got.Models) != 1 {
-		t.Fatal("failed transaction leaked manual-model mutation")
+	{
+		got, err := second.GetAccountModelCatalog(ctx, a.ID)
+		requireDataTrue(t, !(err != nil || len(got.Models) != 1), "failed transaction leaked manual-model mutation")
 	}
-	if err := first.CreateAccount(ctx, &Account{Name: "failed-create", GroupIDs: []int64{-99999}}); err == nil {
-		t.Fatal("invalid create accepted")
+	{
+		err := first.CreateAccount(ctx, &Account{Name: "failed-create", GroupIDs: []int64{-99999}})
+		requireDataTrue(t, !(err == nil), "invalid create accepted")
 	}
 	assertUnchanged()
 	for _, invalid := range []*ModelCatalog{nil, {}, {FetchedAt: 1, Models: []CatalogModel{{ID: "invalid", Metadata: map[string]json.RawMessage{"bad": json.RawMessage(`not-json`)}}}}} {
 		// Nil, absent timestamp and invalid raw metadata cannot change revision.
-		if err := first.SaveAccountModelCatalog(ctx, a.ID, invalid); err == nil {
-			t.Fatal("invalid catalog accepted")
+		{
+			err := first.SaveAccountModelCatalog(ctx, a.ID, invalid)
+			requireDataTrue(t, !(err == nil), "invalid catalog accepted")
 		}
 		assertUnchanged()
 	}
 	// A revision written within an uncommitted transaction is not yet visible,
 	// and rolling that transaction back leaves the authoritative epoch unchanged.
 	tx, err := first.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, err)
 	defer tx.Rollback()
-	if err := changeCatalogRevision(ctx, tx); err != nil {
-		t.Fatal(err)
-	}
-	if got := catalogRevisionForTest(t, second); got != previous {
-		t.Fatal("uncommitted revision escaped transaction")
-	}
-	if err := tx.Rollback(); err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, changeCatalogRevision(ctx, tx))
+	requireDataCondition(t, !(catalogRevisionForTest(t, second) != previous), "uncommitted revision escaped transaction")
+	requireDataNoError(t, tx.Rollback())
 	assertUnchanged()
-	if err := second.DeleteAccount(ctx, a.ID); err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, second.DeleteAccount(ctx, a.ID))
 	assertChanged()
-	if got, err := first.GetAccountModelCatalog(ctx, a.ID); err != nil || got != nil {
-		t.Fatal("deleted catalog still readable")
+	{
+		got, err := first.GetAccountModelCatalog(ctx, a.ID)
+		requireDataTrue(t, !(err != nil || got != nil), "deleted catalog still readable")
 	}
-	if err := first.DeleteAccount(ctx, a.ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := first.SaveAccountModelCatalog(ctx, a.ID, catalog); err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, first.DeleteAccount(ctx, a.ID))
+	requireDataNoError(t, first.SaveAccountModelCatalog(ctx, a.ID, catalog))
 	assertUnchanged()
 }
 
 func TestCatalogRevisionDialectContract(t *testing.T) {
 	ctx := context.Background()
 	for _, dialect := range []string{"sqlite", "postgres"} {
-		t.Run(dialect, func(t *testing.T) {
-			s, observer := observedCatalogStore(t)
-			s.driver = dialect
-			if got := catalogRevisionForTest(t, s); got != "0" {
-				t.Fatalf("initial revision=%q", got)
-			}
-			// The revision upsert is portable and executes with native ?/$n
-			// binding; no fake SQL results are used by this offline contract.
-			tx, err := s.BeginTx(ctx, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer tx.Rollback()
-			if err := changeCatalogRevision(ctx, tx); err != nil {
-				t.Fatal(err)
-			}
-			if err := tx.Commit(); err != nil {
-				t.Fatal(err)
-			}
-			observer.reset()
-			revision := catalogRevisionForTest(t, s)
-			if _, err := uuid.Parse(revision); err != nil {
-				t.Fatal(err)
-			}
-			reads := observer.snapshot()
-			if len(reads) != 1 || len(reads[0].args) != 1 || reads[0].args[0].Value != catalogRevisionSetting {
-				t.Fatalf("revision is not one authoritative read: %+v", reads)
-			}
-			want := "SELECT value FROM settings WHERE key=?"
-			if dialect == "postgres" {
-				want = "SELECT value FROM settings WHERE key=$1"
-			}
-			if reads[0].sql != want {
-				t.Fatalf("revision dialect SQL=%q want %q", reads[0].sql, want)
-			}
-		})
+		t.Run(dialect, func(t *testing.T) { testCatalogRevisionDialectContractCase1(t, ctx, dialect) })
 	}
 }
 
 func TestCatalogRevisionCrossStoreAndRestart(t *testing.T) {
 	path := storeTestPath(t)
 	first, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, err)
 	t.Cleanup(func() { _ = first.Close() })
 	second, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, err)
 	t.Cleanup(func() { _ = second.Close() })
 	for _, s := range []*Store{first, second} {
-		if got := catalogRevisionForTest(t, s); got != "0" {
-			t.Fatalf("initial epoch=%q", got)
+		{
+			got := catalogRevisionForTest(t, s)
+			requireDataTruef(t, !(got != "0"), "initial epoch=%q", got)
 		}
 	}
 	exerciseCatalogRevisions(t, first, second)
 	before := catalogRevisionForTest(t, second)
-	if err := first.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := second.Close(); err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, first.Close())
+	requireDataNoError(t, second.Close())
 	reopened, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, err)
 	defer reopened.Close()
-	if after := catalogRevisionForTest(t, reopened); after != before {
-		t.Fatal("revision lost across restart")
-	}
-	if err := reopened.CreateAccount(context.Background(), &Account{Name: "after-restart"}); err != nil {
-		t.Fatal(err)
-	}
-	if after := catalogRevisionForTest(t, reopened); after == before || after == "0" {
-		t.Fatal("restart reused old cache revision")
+	requireDataCondition(t, !(catalogRevisionForTest(t, reopened) != before), "revision lost across restart")
+	requireDataNoError(t, reopened.CreateAccount(context.Background(), &Account{Name: "after-restart"}))
+	{
+		after := catalogRevisionForTest(t, reopened)
+		requireDataTrue(t, !(after == before || after == "0"), "restart reused old cache revision")
 	}
 }
 
@@ -247,21 +171,16 @@ func TestCatalogRevisionWriteFailureRollsBackEveryMutation(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	a := &Account{Name: "before", SupplementalModels: []string{"manual"}}
-	if err := s.CreateAccount(ctx, a); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.SaveAccountModelCatalog(ctx, a.ID, &ModelCatalog{Models: []CatalogModel{{ID: "old"}}, FetchedAt: 1}); err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, s.CreateAccount(ctx, a))
+	requireDataNoError(t, s.SaveAccountModelCatalog(ctx, a.ID, &ModelCatalog{Models: []CatalogModel{{ID: "old"}}, FetchedAt: 1}))
 	beforeRevision := catalogRevisionForTest(t, s)
 	beforeCatalog, err := s.GetAccountModelCatalog(ctx, a.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, err)
 	// Fail the epoch write after the catalog/account SQL has already succeeded.
-	if _, err := s.ExecContext(ctx, `CREATE TRIGGER reject_catalog_revision BEFORE UPDATE ON settings
-		WHEN NEW.key='`+catalogRevisionSetting+`' BEGIN SELECT RAISE(ABORT,'injected epoch write failure'); END`); err != nil {
-		t.Fatal(err)
+	{
+		_, err := s.ExecContext(ctx, `CREATE TRIGGER reject_catalog_revision BEFORE UPDATE ON settings
+		WHEN NEW.key='`+catalogRevisionSetting+`' BEGIN SELECT RAISE(ABORT,'injected epoch write failure'); END`)
+		requireDataTrue(t, !(err != nil), err)
 	}
 	for _, mutation := range []struct {
 		name string
@@ -277,68 +196,109 @@ func TestCatalogRevisionWriteFailureRollsBackEveryMutation(t *testing.T) {
 		{"delete", func() error { return s.DeleteAccount(ctx, a.ID) }},
 	} {
 		t.Run(mutation.name, func(t *testing.T) {
-			if err := mutation.run(); err == nil {
-				t.Fatal("mutation ignored failed epoch persistence")
-			}
-			if got := catalogRevisionForTest(t, s); got != beforeRevision {
-				t.Fatal("failed mutation changed revision")
-			}
-			got, err := s.GetAccountModelCatalog(ctx, a.ID)
-			if err != nil || !reflect.DeepEqual(got, beforeCatalog) {
-				t.Fatalf("failed mutation leaked data: %+v %v", got, err)
-			}
-			var count int
-			if err := s.QueryRowContext(ctx, `SELECT COUNT(*) FROM accounts`).Scan(&count); err != nil || count != 1 {
-				t.Fatalf("failed create/delete was not atomic: %d %v", count, err)
-			}
+			testCatalogRevisionWriteFailureRollsBackEveryMutationCase2(t, a, beforeCatalog, beforeRevision, ctx, mutation, s)
 		})
 	}
-	if _, err := s.ExecContext(ctx, `DROP TRIGGER reject_catalog_revision`); err != nil {
-		t.Fatal(err)
+	{
+		_, err := s.ExecContext(ctx, `DROP TRIGGER reject_catalog_revision`)
+		requireDataTrue(t, !(err != nil), err)
 	}
 	// Failure in a later delete statement also rolls back the earlier account
 	// deletion, rather than merely clearing an in-process cache.
-	if _, err := s.ExecContext(ctx, `CREATE TRIGGER reject_catalog_delete BEFORE DELETE ON account_model_catalog
-		BEGIN SELECT RAISE(ABORT,'injected catalog delete failure'); END`); err != nil {
-		t.Fatal(err)
+	{
+		_, err := s.ExecContext(ctx, `CREATE TRIGGER reject_catalog_delete BEFORE DELETE ON account_model_catalog
+		BEGIN SELECT RAISE(ABORT,'injected catalog delete failure'); END`)
+		requireDataTrue(t, !(err != nil), err)
 	}
-	if err := s.DeleteAccount(ctx, a.ID); err == nil {
-		t.Fatal("partial delete failure ignored")
+	{
+		err := s.DeleteAccount(ctx, a.ID)
+		requireDataTrue(t, !(err == nil), "partial delete failure ignored")
 	}
-	if got := catalogRevisionForTest(t, s); got != beforeRevision {
-		t.Fatal("partial delete changed epoch")
-	}
-	if got, err := s.GetAccountModelCatalog(ctx, a.ID); err != nil || !reflect.DeepEqual(got, beforeCatalog) {
-		t.Fatal("partial delete escaped rollback")
+	requireDataCondition(t, !(catalogRevisionForTest(t, s) != beforeRevision), "partial delete changed epoch")
+	{
+		got, err := s.GetAccountModelCatalog(ctx, a.ID)
+		requireDataTrue(t, !(err != nil || !reflect.DeepEqual(got, beforeCatalog)), "partial delete escaped rollback")
 	}
 }
 
 func TestCatalogRevisionInitialWriteFailureAndCancellation(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	if _, err := s.ExecContext(ctx, `CREATE TRIGGER reject_initial_revision BEFORE INSERT ON settings
-		WHEN NEW.key='`+catalogRevisionSetting+`' BEGIN SELECT RAISE(ABORT,'injected initial epoch failure'); END`); err != nil {
-		t.Fatal(err)
+	{
+		_, err := s.ExecContext(ctx, `CREATE TRIGGER reject_initial_revision BEFORE INSERT ON settings
+		WHEN NEW.key='`+catalogRevisionSetting+`' BEGIN SELECT RAISE(ABORT,'injected initial epoch failure'); END`)
+		requireDataTrue(t, !(err != nil), err)
 	}
-	if err := s.CreateAccount(ctx, &Account{Name: "rollback"}); err == nil {
-		t.Fatal("initial epoch error ignored")
+	{
+		err := s.CreateAccount(ctx, &Account{Name: "rollback"})
+		requireDataTrue(t, !(err == nil), "initial epoch error ignored")
 	}
-	if got := catalogRevisionForTest(t, s); got != "0" {
-		t.Fatal("failed first mutation persisted epoch")
-	}
+	requireDataCondition(t, !(catalogRevisionForTest(t, s) != "0"), "failed first mutation persisted epoch")
 	var count int
-	if err := s.QueryRowContext(ctx, `SELECT COUNT(*) FROM accounts`).Scan(&count); err != nil || count != 0 {
-		t.Fatalf("first mutation escaped rollback: %d %v", count, err)
+	{
+		err := s.QueryRowContext(ctx, `SELECT COUNT(*) FROM accounts`).Scan(&count)
+		requireDataTruef(t, !(err != nil || count != 0), "first mutation escaped rollback: %d %v", count, err)
 	}
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	if revision, err := s.CatalogRevision(canceled); !errors.Is(err, context.Canceled) || revision != "" {
-		t.Fatalf("canceled revision read=%q %v", revision, err)
+	{
+		revision, err := s.CatalogRevision(canceled)
+		requireDataTruef(t, !(!errors.Is(err, context.Canceled) || revision != ""), "canceled revision read=%q %v", revision, err)
 	}
-	if out, err := s.GetAccountModelCatalogs(canceled, []int64{1}); !errors.Is(err, context.Canceled) || out != nil {
-		t.Fatalf("canceled catalog read: %v %v", out, err)
+	{
+		out, err := s.GetAccountModelCatalogs(canceled, []int64{1})
+		requireDataTruef(t, !(!errors.Is(err, context.Canceled) || out != nil), "canceled catalog read: %v %v", out, err)
 	}
-	if out, err := s.DisabledModelsForAccounts(canceled, []int64{1}, nil); !errors.Is(err, context.Canceled) || out != nil {
-		t.Fatalf("canceled restriction read: %v %v", out, err)
+	{
+		out, err := s.DisabledModelsForAccounts(canceled, []int64{1}, nil)
+		requireDataTruef(t, !(!errors.Is(err, context.Canceled) || out != nil), "canceled restriction read: %v %v", out, err)
+	}
+}
+
+func testCatalogRevisionDialectContractCase1(t *testing.T, ctx context.Context, dialect string) {
+	s, observer := observedCatalogStore(t)
+	s.driver = dialect
+	{
+		got := catalogRevisionForTest(t, s)
+		requireDataTruef(t, !(got != "0"), "initial revision=%q", got)
+	}
+	// The revision upsert is portable and executes with native ?/$n
+	// binding; no fake SQL results are used by this offline contract.
+	tx, err := s.BeginTx(ctx, nil)
+	requireDataNoError(t, err)
+	defer tx.Rollback()
+	requireDataNoError(t, changeCatalogRevision(ctx, tx))
+	requireDataNoError(t, tx.Commit())
+	observer.reset()
+	revision := catalogRevisionForTest(t, s)
+	{
+		_, err := uuid.Parse(revision)
+		requireDataTrue(t, !(err != nil), err)
+	}
+	reads := observer.snapshot()
+	requireDataTruef(t, !(len(reads) != 1 || len(reads[0].args) != 1 || reads[0].args[0].Value != catalogRevisionSetting), "revision is not one authoritative read: %+v", reads)
+	want := "SELECT value FROM settings WHERE key=?"
+	if dialect == "postgres" {
+		want = "SELECT value FROM settings WHERE key=$1"
+	}
+	reportStoreTestFailure(t, reads[0].sql != want, func() {
+		t.Fatalf("revision dialect SQL=%q want %q", reads[0].sql, want)
+	})
+}
+func testCatalogRevisionWriteFailureRollsBackEveryMutationCase2(t *testing.T, a *Account, beforeCatalog *ModelCatalog, beforeRevision string, ctx context.Context, mutation struct {
+	name string
+	run  func() error
+}, s *Store) {
+	{
+		err := mutation.run()
+		requireDataTrue(t, !(err == nil), "mutation ignored failed epoch persistence")
+	}
+	requireDataCondition(t, !(catalogRevisionForTest(t, s) != beforeRevision), "failed mutation changed revision")
+	got, err := s.GetAccountModelCatalog(ctx, a.ID)
+	requireDataTruef(t, !(err != nil || !reflect.DeepEqual(got, beforeCatalog)), "failed mutation leaked data: %+v %v", got, err)
+	var count int
+	{
+		err := s.QueryRowContext(ctx, `SELECT COUNT(*) FROM accounts`).Scan(&count)
+		requireDataTruef(t, !(err != nil || count != 1), "failed create/delete was not atomic: %d %v", count, err)
 	}
 }

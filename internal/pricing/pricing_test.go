@@ -136,20 +136,20 @@ func TestSol61NoLongContextSurcharge(t *testing.T) {
 			for _, multiplier := range []float64{1, 2} {
 				overrides := map[string]float64{"gpt-6.1-sol": multiplier}
 				r, _, ok := Lookup(" /OPENAI/GPT-6.1-SOL ", tc.tier, overrides)
-				if !ok || r.LongContextThreshold != 0 || r.LongContext != nil || r.UnpricedLongContext {
+				reportTestFailure(t, !ok || r.LongContextThreshold != 0 || r.LongContext != nil || r.UnpricedLongContext, func() {
 					t.Fatalf("long context pricing still enabled: %+v", r)
-				}
+				})
 				for _, input := range []int64{271999, 272000, 272001, 1000000} {
 					// uncached + cached/20 + write*1.25 + output*5, scaled by tier and override.
 					want := (input - 150000 + 5000 + 62500 + 5000) * tc.factor * int64(multiplier)
 					requireCost(t, r, input, 100000, 50000, 1000, want)
 					d := Explain("gpt-6.1-sol", tc.tier, overrides, input, 100000, 50000, 1000)
-					if d.LongContext || d.ContextThreshold != 0 || d.TotalCostMicros == nil || *d.TotalCostMicros != want || d.UnavailableReason != "" {
+					reportTestFailure(t, d.LongContext || d.ContextThreshold != 0 || d.TotalCostMicros == nil || *d.TotalCostMicros != want || d.UnavailableReason != "", func() {
 						t.Fatalf("incorrect bill: %+v, want %d", d, want)
-					}
-					if *d.ContextMultipliers != (Rates{1, 1, 1, 1}) {
+					})
+					reportTestFailure(t, *d.ContextMultipliers != (Rates{1, 1, 1, 1}), func() {
 						t.Fatalf("context surcharge in bill: %+v", d.ContextMultipliers)
-					}
+					})
 				}
 			}
 		})

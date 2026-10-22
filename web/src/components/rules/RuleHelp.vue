@@ -9,15 +9,18 @@ const emit = defineEmits<{ example: [rule: Rule] }>()
 const { t, locale } = useI18n()
 const search = ref('')
 function capabilityLabel(id: string) {
-  if (id === 'rule') return t('rules.canvas.rule')
-  if (id === 'context') return t('rules.context')
+  if (id === 'rule') { return t('rules.canvas.rule') }
+  if (id === 'context') { return t('rules.context') }
   return ruleLabel(['condition', 'action', 'expression'].find(group => ruleLabels[group]?.[id]) ?? 'action', id, locale.value)
+}
+function fieldSearchText(field: RuleSchema['rule_fields'][number]) {
+  return `${field.name} ${localHelp(field.description, locale.value)} ${field.enum?.join(' ')}`
 }
 const entries = computed(() => [
   { id: 'rule', description: {en: 'Rule metadata, policy and execution order.', 'zh-CN': '规则元数据、策略与执行顺序。'}, fields: props.schema.rule_fields },
   ...props.schema.conditions, ...props.schema.actions, ...(props.schema.value_expressions ?? []),
   { id: 'context', description: { en: 'Available context facts. Request rules cannot read response-only fields.', 'zh-CN': '可用上下文事实；请求规则不能引用响应专用字段。' }, fields: props.schema.context_fields ?? [] },
-].filter(c => !search.value || `${c.id} ${localHelp(c.description, locale.value)} ${c.fields.map(f => `${f.name} ${localHelp(f.description, locale.value)} ${f.enum?.join(' ')}`).join(' ')}`.toLowerCase().includes(search.value.toLowerCase())))
+].filter(c => !search.value || `${c.id} ${localHelp(c.description, locale.value)} ${c.fields.map(fieldSearchText).join(' ')}`.toLowerCase().includes(search.value.toLowerCase())))
 </script>
 <template>
   <details class="rounded-lg border border-[color:var(--color-line)] p-3">

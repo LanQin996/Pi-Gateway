@@ -148,15 +148,7 @@ func (p *wsPool) acquired(ctx context.Context, key string) (*wsConn, error) {
 		}
 	}
 	if entry == nil {
-		if len(p.entries)+p.reservations >= p.maxConnections {
-			for candidate, conn := range p.entries {
-				slot := p.slots[candidate]
-				if !conn.busy && (slot == nil || !slot.busy) {
-					p.removeLocked(candidate, conn)
-					break
-				}
-			}
-		}
+		p.evictIdleForReservationLocked()
 		if len(p.entries)+p.reservations >= p.maxConnections {
 			p.mu.Unlock()
 			p.release(key)
@@ -342,4 +334,17 @@ func (p *wsPool) setBaseline(key string, c *wsConn, baseline *wsContinuation, si
 		p.totalBaselineBytes += size
 	}
 	c.record = record
+}
+
+// evictIdleForReservationLocked requires p.mu and never evicts a busy lane.
+func (p *wsPool) evictIdleForReservationLocked() {
+	if len(p.entries)+p.reservations >= p.maxConnections {
+		for candidate, conn := range p.entries {
+			slot := p.slots[candidate]
+			if !conn.busy && (slot == nil || !slot.busy) {
+				p.removeLocked(candidate, conn)
+				break
+			}
+		}
+	}
 }

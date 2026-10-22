@@ -83,54 +83,7 @@ func TestAcquireWaitingKeyRevocation(t *testing.T) {
 		if pinned {
 			name = "pinned"
 		}
-		t.Run(name, func(t *testing.T) {
-			for _, mutation := range []string{"disable", "rotate", "delete"} {
-				t.Run(mutation, func(t *testing.T) {
-					synctest.Test(t, func(t *testing.T) {
-						st := newAccountsTestStore(t)
-						ctx, cancel := context.WithCancel(context.Background())
-						defer cancel()
-						a := routingAccount(t, st, "held", 1)
-						key := routingKey(t, st)
-						m := New(st, nil, nil, Options{})
-						_, release, err := m.Acquire(ctx, key, "model")
-						if err != nil {
-							t.Fatal(err)
-						}
-						defer release()
-						finished := routingQueuedAcquire(t, func() (*store.Account, func(), error) {
-							if pinned {
-								return m.AcquirePinned(ctx, key, a.ID, "model")
-							}
-							return m.Acquire(ctx, key, "model")
-						})
-						// Edit only authoritative state; the authenticated key snapshot
-						// must remain enabled and retain its original token.
-						switch mutation {
-						case "disable":
-							current := *key
-							current.Enabled = false
-							err = st.UpdateKey(ctx, &current)
-						case "rotate":
-							_, err = st.ExecContext(ctx, `UPDATE api_keys SET key=? WHERE id=?`, key.Key+"-rotated", key.ID)
-						case "delete":
-							err = st.DeleteKey(ctx, key.ID)
-						}
-						if err != nil {
-							t.Fatal(err)
-						}
-						if m.Inflight(a.ID) != 1 {
-							t.Fatal("waiter modified the held reservation")
-						}
-						release()
-						routingAssertDenied(t, routingAwaitAcquire(t, finished), ErrNoAccounts)
-						if got := m.Inflight(a.ID); got != 0 {
-							t.Fatalf("revoked acquisition leaked %d slots", got)
-						}
-					})
-				})
-			}
-		})
+		t.Run(name, func(t *testing.T) { testAcquireWaitingKeyRevocationPhase1(t, &pinned) })
 	}
 }
 
@@ -140,72 +93,7 @@ func TestAcquireWaitingCurrentPolicy(t *testing.T) {
 		if pinned {
 			name = "pinned"
 		}
-		t.Run(name, func(t *testing.T) {
-			for _, tc := range []struct {
-				name string
-				want error
-			}{
-				{"key group reassigned", ErrNoAccounts},
-				{"group disabled", ErrNoAccounts},
-				{"account group reassigned", ErrNoAccounts},
-				{"account disabled", ErrNoAccounts},
-				{"account model disabled", ErrModelUnavailable},
-				{"membership group model disabled", ErrModelUnavailable},
-				{"key group model disabled", ErrModelUnavailable},
-			} {
-				t.Run(tc.name, func(t *testing.T) {
-					synctest.Test(t, func(t *testing.T) {
-						st := newAccountsTestStore(t)
-						ctx, cancel := context.WithCancel(context.Background())
-						defer cancel()
-						a := routingAccount(t, st, "held", 1)
-						group := routingGroup(t, st, "membership", a.ID)
-						other := routingGroup(t, st, "other")
-						key := routingKey(t, st, group.ID)
-						m := New(st, nil, nil, Options{})
-						_, release, err := m.Acquire(ctx, key, "model")
-						if err != nil {
-							t.Fatal(err)
-						}
-						defer release()
-						finished := routingQueuedAcquire(t, func() (*store.Account, func(), error) {
-							if pinned {
-								return m.AcquirePinned(ctx, key, a.ID, "model")
-							}
-							return m.Acquire(ctx, key, "model")
-						})
-						no := false
-						switch tc.name {
-						case "key group reassigned":
-							err = st.SetKeyGroups(ctx, key.ID, []int64{other.ID})
-						case "group disabled":
-							err = st.PatchAccountGroup(ctx, group.ID, store.AccountGroupPatch{Enabled: &no})
-						case "account group reassigned":
-							err = st.PatchAccountManagementFields(ctx, a.ID, store.AccountManagementPatch{GroupIDs: []int64{other.ID}})
-						case "account disabled":
-							err = st.PatchAccountManagementFields(ctx, a.ID, store.AccountManagementPatch{Enabled: &no})
-						case "account model disabled":
-							err = st.PatchAccountManagementFields(ctx, a.ID, store.AccountManagementPatch{DisabledModels: []string{"model"}})
-						case "membership group model disabled":
-							err = st.PatchAccountGroup(ctx, group.ID, store.AccountGroupPatch{DisabledModels: []string{"model"}})
-						case "key group model disabled":
-							err = st.PatchAccountGroup(ctx, other.ID, store.AccountGroupPatch{DisabledModels: []string{"model"}})
-							if err == nil {
-								err = st.SetKeyGroups(ctx, key.ID, []int64{group.ID, other.ID})
-							}
-						}
-						if err != nil {
-							t.Fatal(err)
-						}
-						release()
-						routingAssertDenied(t, routingAwaitAcquire(t, finished), tc.want)
-						if got := m.Inflight(a.ID); got != 0 {
-							t.Fatalf("policy denial leaked %d slots", got)
-						}
-					})
-				})
-			}
-		})
+		t.Run(name, func(t *testing.T) { testAcquireWaitingCurrentPolicyPhase1(t, &pinned) })
 	}
 }
 
@@ -307,49 +195,158 @@ func TestAcquireRevalidatesAfterReservation(t *testing.T) {
 		if pinned {
 			name = "pinned"
 		}
-		t.Run(name, func(t *testing.T) {
-			for _, mutation := range []string{"disable-key", "rotate-key", "delete-key", "disable-account"} {
-				t.Run(mutation, func(t *testing.T) {
-					st := newAccountsTestStore(t)
-					ctx := context.Background()
-					a := routingAccount(t, st, "target", 1)
-					key := routingKey(t, st)
-					mutated := false
-					m := New(st, nil, nil, Options{Now: func() time.Time {
-						if !mutated {
-							mutated = true
-							var err error
-							switch mutation {
-							case "disable-key":
-								changed := *key
-								changed.Enabled = false
-								err = st.UpdateKey(ctx, &changed)
-							case "rotate-key":
-								_, err = st.ExecContext(ctx, `UPDATE api_keys SET key=? WHERE id=?`, key.Key+"-new", key.ID)
-							case "delete-key":
-								err = st.DeleteKey(ctx, key.ID)
-							case "disable-account":
-								no := false
-								err = st.PatchAccountManagementFields(ctx, a.ID, store.AccountManagementPatch{Enabled: &no})
-							}
-							if err != nil {
-								t.Fatal(err)
-							}
-						}
-						return time.Now()
-					}})
-					var result routingAcquireResult
-					if pinned {
-						result.account, result.release, result.err = m.AcquirePinned(ctx, key, a.ID, "model")
-					} else {
-						result.account, result.release, result.err = m.Acquire(ctx, key, "model")
+		t.Run(name, func(t *testing.T) { testAcquireRevalidatesAfterReservationPhase1(t, &pinned) })
+	}
+}
+
+// testAcquireWaitingKeyRevocationPhase1 exercises one isolated test phase with the original shared state.
+func testAcquireWaitingKeyRevocationPhase1(t *testing.T, capturedPinned *bool) {
+	for _, mutation := range []string{"disable", "rotate", "delete"} {
+		t.Run(mutation, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				st := newAccountsTestStore(t)
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				a := routingAccount(t, st, "held", 1)
+				key := routingKey(t, st)
+				m := New(st, nil, nil, Options{})
+				_, release, err := m.Acquire(ctx, key, "model")
+				requireDataNoError(t, err)
+				defer release()
+				finished := routingQueuedAcquire(t, func() (*store.Account, func(), error) {
+					if *capturedPinned {
+						return m.AcquirePinned(ctx, key, a.ID, "model")
 					}
-					routingAssertDenied(t, result, ErrNoAccounts)
-					if !mutated || m.Inflight(a.ID) != 0 {
-						t.Fatal("post-reservation revalidation did not run or leaked a slot")
-					}
+					return m.Acquire(ctx, key, "model")
 				})
+				// Edit only authoritative state; the authenticated key snapshot
+				// must remain enabled and retain its original token.
+				switch mutation {
+				case "disable":
+					current := *key
+					current.Enabled = false
+					err = st.UpdateKey(ctx, &current)
+				case "rotate":
+					_, err = st.ExecContext(ctx, `UPDATE api_keys SET key=? WHERE id=?`, key.Key+"-rotated", key.ID)
+				case "delete":
+					err = st.DeleteKey(ctx, key.ID)
+				}
+				requireDataNoError(t, err)
+				requireDataCondition(t, !(m.Inflight(a.ID) != 1), "waiter modified the held reservation")
+				release()
+				routingAssertDenied(t, routingAwaitAcquire(t, finished), ErrNoAccounts)
+				{
+					got := m.Inflight(a.ID)
+					requireDataTruef(t, !(got != 0), "revoked acquisition leaked %d slots", got)
+				}
+			})
+		})
+	}
+}
+
+// testAcquireWaitingCurrentPolicyPhase1 exercises one isolated test phase with the original shared state.
+func testAcquireWaitingCurrentPolicyPhase1(t *testing.T, capturedPinned *bool) {
+	for _, tc := range []struct {
+		name string
+		want error
+	}{
+		{"key group reassigned", ErrNoAccounts},
+		{"group disabled", ErrNoAccounts},
+		{"account group reassigned", ErrNoAccounts},
+		{"account disabled", ErrNoAccounts},
+		{"account model disabled", ErrModelUnavailable},
+		{"membership group model disabled", ErrModelUnavailable},
+		{"key group model disabled", ErrModelUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				st := newAccountsTestStore(t)
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				a := routingAccount(t, st, "held", 1)
+				group := routingGroup(t, st, "membership", a.ID)
+				other := routingGroup(t, st, "other")
+				key := routingKey(t, st, group.ID)
+				m := New(st, nil, nil, Options{})
+				_, release, err := m.Acquire(ctx, key, "model")
+				requireDataNoError(t, err)
+				defer release()
+				finished := routingQueuedAcquire(t, func() (*store.Account, func(), error) {
+					if *capturedPinned {
+						return m.AcquirePinned(ctx, key, a.ID, "model")
+					}
+					return m.Acquire(ctx, key, "model")
+				})
+				no := false
+				switch tc.name {
+				case "key group reassigned":
+					err = st.SetKeyGroups(ctx, key.ID, []int64{other.ID})
+				case "group disabled":
+					err = st.PatchAccountGroup(ctx, group.ID, store.AccountGroupPatch{Enabled: &no})
+				case "account group reassigned":
+					err = st.PatchAccountManagementFields(ctx, a.ID, store.AccountManagementPatch{GroupIDs: []int64{other.ID}})
+				case "account disabled":
+					err = st.PatchAccountManagementFields(ctx, a.ID, store.AccountManagementPatch{Enabled: &no})
+				case "account model disabled":
+					err = st.PatchAccountManagementFields(ctx, a.ID, store.AccountManagementPatch{DisabledModels: []string{"model"}})
+				case "membership group model disabled":
+					err = st.PatchAccountGroup(ctx, group.ID, store.AccountGroupPatch{DisabledModels: []string{"model"}})
+				case "key group model disabled":
+					err = st.PatchAccountGroup(ctx, other.ID, store.AccountGroupPatch{DisabledModels: []string{"model"}})
+					if err == nil {
+						err = st.SetKeyGroups(ctx, key.ID, []int64{group.ID, other.ID})
+					}
+				}
+				requireDataNoError(t, err)
+				release()
+				routingAssertDenied(t, routingAwaitAcquire(t, finished), tc.want)
+				{
+					got := m.Inflight(a.ID)
+					requireDataTruef(t, !(got != 0), "policy denial leaked %d slots", got)
+				}
+			})
+		})
+	}
+}
+
+// testAcquireRevalidatesAfterReservationPhase1 exercises one isolated test phase with the original shared state.
+func testAcquireRevalidatesAfterReservationPhase1(t *testing.T, capturedPinned *bool) {
+	for _, mutation := range []string{"disable-key", "rotate-key", "delete-key", "disable-account"} {
+		t.Run(mutation, func(t *testing.T) {
+			st := newAccountsTestStore(t)
+			ctx := context.Background()
+			a := routingAccount(t, st, "target", 1)
+			key := routingKey(t, st)
+			mutated := false
+			m := New(st, nil, nil, Options{Now: func() time.Time {
+				if !mutated {
+					mutated = true
+					var err error
+					switch mutation {
+					case "disable-key":
+						changed := *key
+						changed.Enabled = false
+						err = st.UpdateKey(ctx, &changed)
+					case "rotate-key":
+						_, err = st.ExecContext(ctx, `UPDATE api_keys SET key=? WHERE id=?`, key.Key+"-new", key.ID)
+					case "delete-key":
+						err = st.DeleteKey(ctx, key.ID)
+					case "disable-account":
+						no := false
+						err = st.PatchAccountManagementFields(ctx, a.ID, store.AccountManagementPatch{Enabled: &no})
+					}
+					requireDataNoError(t, err)
+				}
+				return time.Now()
+			}})
+			var result routingAcquireResult
+			if *capturedPinned {
+				result.account, result.release, result.err = m.AcquirePinned(ctx, key, a.ID, "model")
+			} else {
+				result.account, result.release, result.err = m.Acquire(ctx, key, "model")
 			}
+			routingAssertDenied(t, result, ErrNoAccounts)
+			requireDataCondition(t, !(!mutated || m.Inflight(a.ID) != 0), "post-reservation revalidation did not run or leaked a slot")
 		})
 	}
 }

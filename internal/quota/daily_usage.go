@@ -66,16 +66,8 @@ func (c *Client) FetchDailyUsage(ctx context.Context, account *store.Account, to
 	out := make([]store.OfficialUsageDay, 0, len(response.Data))
 	today := time.Now().UTC().Format(time.DateOnly)
 	for _, d := range response.Data {
-		if _, err := time.Parse(time.DateOnly, d.Date); err != nil || d.Date < start || d.Date > end {
-			return nil, fmt.Errorf("official usage: invalid daily date")
-		}
-		if d.Totals.Credits != nil && (*d.Totals.Credits < 0 || math.IsNaN(*d.Totals.Credits) || math.IsInf(*d.Totals.Credits, 0)) {
-			return nil, fmt.Errorf("official usage: invalid credits")
-		}
-		for _, n := range []*int64{d.Totals.UncachedInputTokens, d.Totals.CachedInputTokens, d.Totals.OutputTokens, d.Totals.TotalTokens} {
-			if n != nil && *n < 0 {
-				return nil, fmt.Errorf("official usage: negative token count")
-			}
+		if err := validateDailyUsage(d, start, end); err != nil {
+			return nil, err
 		}
 		dayRaw, _ := json.Marshal(d)
 		out = append(out, store.OfficialUsageDay{Day: d.Date, Credits: d.Totals.Credits, UncachedInputTokens: d.Totals.UncachedInputTokens,
@@ -83,4 +75,19 @@ func (c *Client) FetchDailyUsage(ctx context.Context, account *store.Account, to
 			Users: d.Totals.Users, Threads: d.Totals.Threads, Turns: d.Totals.Turns, Settled: d.Date < today && d.Totals.TotalTokens != nil, Raw: string(dayRaw)})
 	}
 	return out, nil
+}
+
+func validateDailyUsage(d DailyUsageDay, start, end string) error {
+	if _, err := time.Parse(time.DateOnly, d.Date); err != nil || d.Date < start || d.Date > end {
+		return fmt.Errorf("official usage: invalid daily date")
+	}
+	if d.Totals.Credits != nil && (*d.Totals.Credits < 0 || math.IsNaN(*d.Totals.Credits) || math.IsInf(*d.Totals.Credits, 0)) {
+		return fmt.Errorf("official usage: invalid credits")
+	}
+	for _, n := range []*int64{d.Totals.UncachedInputTokens, d.Totals.CachedInputTokens, d.Totals.OutputTokens, d.Totals.TotalTokens} {
+		if n != nil && *n < 0 {
+			return fmt.Errorf("official usage: negative token count")
+		}
+	}
+	return nil
 }

@@ -77,7 +77,7 @@ const real = {
 }
 await check('manual defaults contain seven levels but no fabricated context/modalities', () => {
     assert.deepEqual(manual.metadata.supported_reasoning_levels.map(x => x.effort), ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
-    assert.deepEqual(Object.keys(manual.metadata).sort(), ['default_reasoning_level', 'default_reasoning_summary', 'supported_reasoning_levels', 'supports_reasoning_summary_parameter'])
+    assert.deepEqual(Object.keys(manual.metadata).sort((a, b) => a.localeCompare(b)), ['default_reasoning_level', 'default_reasoning_summary', 'supported_reasoning_levels', 'supports_reasoning_summary_parameter'])
     assert.equal(manual.metadata.default_reasoning_level, 'medium')
     assert.equal(manual.metadata.default_reasoning_summary, 'auto')
     assert.equal(manual.source, 'manual')
@@ -160,7 +160,7 @@ await check('summary accepts new reasoning values and bounds arrays/strings', ()
     }])
     const long = modelCapabilities({
         default_reasoning_level: 'a'.repeat(10000),
-        supported_reasoning_levels: Array(1000).fill('max')
+        supported_reasoning_levels: new Array(1000).fill('max')
     })
     assert.equal(long[0].value.split(', ').length, 17)
     assert.equal(long[1].value.length, 161)
@@ -190,7 +190,15 @@ const selectorText = read('./src/components/accounts/ModelRestrictionSelector.vu
 const {descriptor} = parse(selectorText)
 const componentSource = compileScript(descriptor, {id: 'catalog-regression', inlineTemplate: true}).content
 let fixtures = []
+const sourceStatusDescriptor = parse(read('./src/components/accounts/ModelCatalogSourceStatus.vue')).descriptor
+const sourceStatus = load(compileScript(sourceStatusDescriptor, {id: 'catalog-source-status-regression', inlineTemplate: true}).content, {
+    vue,
+    '../../stores/ui': {formatTime: String},
+    './accountControlsLocale': translations,
+    './useAccountModelCatalog': catalog,
+})
 const Selector = load(componentSource, {
+    './ModelCatalogSourceStatus.vue': sourceStatus,
     vue,
     'lucide-vue-next': Object.fromEntries(['RefreshCw', 'Search', 'ShieldBan'].map(name => [name, {render: () => vue.h('svg')}])),
     '../../stores/ui': {formatTime: String},

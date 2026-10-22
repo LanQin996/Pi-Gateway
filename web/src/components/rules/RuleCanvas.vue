@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {computed, nextTick, ref, onBeforeUnmount, toRaw} from 'vue'
+import {useId, computed, nextTick, ref, onBeforeUnmount, toRaw} from 'vue'
 import { Plus, Search, ZoomIn, ZoomOut, Maximize, LayoutGrid, Undo2, Redo2, Copy, Trash2 } from 'lucide-vue-next'
 import {VueFlow, useVueFlow, MarkerType, type Connection, type NodeChange, type EdgeChange} from '@vue-flow/core'
 import '@vue-flow/core/dist/style.css'
@@ -9,14 +9,13 @@ import {useI18n} from '../../i18n'
 import {clone, RuleInputError} from '../../utils/ruleEditor'
 import {editorId} from '../../utils/editorId'
 import {localHelp} from '../../utils/ruleSchema'
-import {ruleLabel, ruleDisplayName, ruleOptionLabel} from '../../utils/ruleLabels'
-import {ruleNodeWidth, visibleWorkflow, removeGraphNodes, duplicateGraphNodes, readGraphInput, writeGraphInput, replaceGraphNode, addGraphModule, connectGraph, graphNodeValue, graphPathMap, type RuleGraphValue, type RuleGraph, type RuleGraphNode, type RuleGraphEdge, type RuleGraphAddOptions} from '../../utils/ruleGraph'
+import {ruleLabel, ruleOptionLabel} from '../../utils/ruleLabels'
+import {ruleNodeWidth, visibleWorkflow, removeGraphNodes, duplicateGraphNodes, readGraphInput, writeGraphInput, replaceGraphNode, addGraphModule, connectGraph, graphNodeValue, graphPathMap, type RuleGraphValue, type RuleGraph, type RuleGraphNode, type RuleGraphEdge, type RuleGraphAddOptions, ruleNodeColumnGap, graphValueInputs as importValueInputs, groupGraphNodes, groupedWorkflow, graphGroupPorts, resolveGroupConnection, actionFlowPorts, graphConditionInputs, type RuleGraphGroup} from '../../utils/ruleGraph'
 import RuleCanvasNode from './RuleGraphNode.vue'
-import {ruleNodeColumnGap, graphValueInputs as importValueInputs} from '../../utils/ruleGraph'
-import {groupGraphNodes, groupedWorkflow, graphGroupPorts, resolveGroupConnection, actionFlowPorts, graphConditionInputs, type RuleGraphGroup} from '../../utils/ruleGraph'
 import RuleGroupNode from './RuleGroupNode.vue'
 import RuleNodeSearch from './RuleNodeSearch.vue'
 
+const formId = useId()
 const props = defineProps<{modelValue: RuleGraph; schema: RuleSchema; diagnostics?: Record<string, string>; errors?: RuleFieldError[]; sample?: unknown; canUndo?: boolean; canRedo?: boolean}>()
 const emit = defineEmits<{
     'update:modelValue': [value: RuleGraph]
@@ -47,13 +46,13 @@ const expandedPredicates = ref<string[]>([])
 const expandedValues = ref<string[]>([])
 const hiddenValues = computed(() => {
  const visible=new Set(graphModel.value.nodes.filter(node=>node.kind!=='value').map(node=>node.id))
- const open=(id:string)=>{ if(!expandedValues.value.includes(id))return;for(const edge of graphModel.value.edges.filter(edge=>edge.target===id && edge.sourceHandle==='value-out')){visible.add(edge.source);open(edge.source)} }
+ const open=(id:string)=>{ if(!expandedValues.value.includes(id)){ return; }for(const edge of graphModel.value.edges.filter(edge=>edge.target===id && edge.sourceHandle==='value-out')){visible.add(edge.source);open(edge.source)} }
  graphModel.value.nodes.filter(node=>node.kind!=='value').forEach(node=>open(node.id))
  return new Set(graphModel.value.nodes.filter(node=>node.kind==='value'&&!visible.has(node.id)).map(node=>node.id))
 })
 const hiddenPredicates = computed(() => {
     const hidden = new Set<string>()
-    const collect = (id: string) => { if (hidden.has(id)) return; hidden.add(id); graphModel.value.edges.filter(edge => edge.target === id && ['boolean-out','value-out'].includes(edge.sourceHandle)).forEach(edge => collect(edge.source)) }
+    const collect = (id: string) => { if (hidden.has(id)) { return; } hidden.add(id); graphModel.value.edges.filter(edge => edge.target === id && ['boolean-out','value-out'].includes(edge.sourceHandle)).forEach(edge => collect(edge.source)) }
     graphModel.value.edges.filter(edge => edge.targetHandle.startsWith('predicate:') && (graphModel.value.nodes.find(node=>node.id===edge.target)?.data as RuleAction).type==='array_filter' && !expandedPredicates.value.includes(edge.target)).forEach(edge => collect(edge.source))
     return hidden
 })
@@ -61,7 +60,12 @@ const completeWorkflow = computed(() => visibleWorkflow(graphModel.value))
 const workflow = computed(() => groupedWorkflow(graphModel.value,activeGroup.value))
 function nodeLabel(node: RuleGraphNode) {
  if(node.kind==='value') { const value=node.data as RuleGraphValue;return value.mode==='computed'?ruleOptionLabel((value.value as {$expr:{op:string}}).$expr.op,locale.value):t(`rules.canvas.value.${value.mode}`) }
- return node.kind==='rule'?t('rules.canvas.rule'):ruleLabel(node.kind,node.kind==='action'?(node.data as RuleAction).type:(node.data as RuleCondition).op,locale.value)
+ return (() => {
+    if (node.kind==='rule') {
+        return t('rules.canvas.rule')
+    }
+    return ruleLabel(node.kind,node.kind==='action'?(node.data as RuleAction).type:(node.data as RuleCondition).op,locale.value)
+})()
 }
 const moduleNodes = computed(() => workflow.value.nodes.filter(node => !hiddenPredicates.value.has(node.id) && !hiddenValues.value.has(node.id)).map(node => ({
     id: node.id, type: 'rule-module', position: node.position, dragHandle: '.rule-node-drag-handle',
@@ -72,7 +76,21 @@ const moduleNodes = computed(() => workflow.value.nodes.filter(node => !hiddenPr
 const nodes=computed(()=>[...moduleNodes.value,...workflow.value.groups.map(group=>({id:group.id,type:'rule-group',position:group.position,dragHandle:'.rule-node-drag-handle',data:{group,ports:graphGroupPorts(graphModel.value,group),labels:Object.fromEntries(graphGroupPorts(graphModel.value,group).map(port=>[port.id,portLabel(port)]))},selected:graphModel.value.selected.includes(group.id),deletable:false,ariaLabel:group.name}))])
 function portLabel(port:RuleGraphGroup['ports'][number]) {
  const node=graphModel.value.nodes.find(node=>node.id===port.node)
- const handle=port.handle==='action-in'||port.handle==='action-out'?t('rules.canvas.actionPort'):port.handle==='boolean-out'||port.handle==='boolean-in'?t('rules.canvas.booleanPort'):port.handle==='value-out'||port.handle.startsWith('value:')?t('rules.canvas.valuePort'):port.handle.startsWith('flow:')?t(`rules.canvas.flow.${port.handle.slice(5)}`):port.handle
+ const handle=(() => {
+    if (port.handle==='action-in'||port.handle==='action-out') {
+        return t('rules.canvas.actionPort')
+    }
+    if (port.handle==='boolean-out'||port.handle==='boolean-in') {
+        return t('rules.canvas.booleanPort')
+    }
+    if (port.handle==='value-out'||port.handle.startsWith('value:')) {
+        return t('rules.canvas.valuePort')
+    }
+    if (port.handle.startsWith('flow:')) {
+        return t(`rules.canvas.flow.${port.handle.slice(5)}`)
+    }
+    return port.handle
+})()
  return `${node?nodeLabel(node):''} · ${handle}`
 }
 function updateGroup(id:string,update:(group:RuleGraphGroup)=>void) {const graph=clone(graphModel.value),group=graph.groups?.find(group=>group.id===id);if(group){update(group);publish(graph)}}
@@ -80,59 +98,91 @@ async function settleView() {await nextTick();await new Promise<void>(resolve=>r
 async function enterGroup(id:string) {activeGroup.value=id;await settleView()}
 async function leaveGroup() {activeGroup.value=undefined;await settleView()}
 async function createGroup() {try{const next=groupGraphNodes(graphModel.value,graphModel.value.selected,locale.value==='zh-CN'?'新组':'New group');next.selected=[];publish(next);await nextTick();await nextTick();await new Promise<void>(resolve=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve())));separateOverlaps();await fit()}catch(error){reportConnectionError(error)}}
-function ungroup(id:string) {publish({...graphModel.value,groups:graphModel.value.groups?.filter(group=>group.id!==id)});if(activeGroup.value===id)activeGroup.value=undefined}
+function ungroup(id:string) {publish({...graphModel.value,groups:graphModel.value.groups?.filter(group=>group.id!==id)});if(activeGroup.value===id){ activeGroup.value=undefined }}
 const managedGroup=computed(()=>graphModel.value.groups?.find(group=>group.id===portManager.value))
 const managedPorts=computed(()=>managedGroup.value?graphGroupPorts(graphModel.value,managedGroup.value):[])
 const portCandidate=ref('')
-const portCandidates=computed(()=>managedGroup.value?graphModel.value.nodes.filter(node=>managedGroup.value!.nodes.includes(node.id)).flatMap(node=>{
+const portCandidates=computed(()=>(() => {
+    if (managedGroup.value) {
+        return graphModel.value.nodes.filter(node=>managedGroup.value!.nodes.includes(node.id)).flatMap(node=>{
  const candidates:{node:string;handle:string;direction:'input'|'output';name:string}[]=[]
- if(node.kind==='action')candidates.push({node:node.id,handle:'action-in',direction:'input',name:nodeLabel(node)},{node:node.id,handle:'action-out',direction:'output',name:nodeLabel(node)})
- if(node.kind==='action')for(const port of actionFlowPorts(node.data as RuleAction))candidates.push({node:node.id,handle:`flow:${port}`,direction:'output',name:nodeLabel(node)})
- if(node.kind==='condition'&&['all','any','not'].includes((node.data as RuleCondition).op))candidates.push({node:node.id,handle:'boolean-in',direction:'input',name:nodeLabel(node)})
- if(node.kind==='action')for(const port of graphConditionInputs(node.data as RuleAction))candidates.push({node:node.id,handle:`predicate:${port}`,direction:'input',name:nodeLabel(node)})
- if(node.kind==='condition')candidates.push({node:node.id,handle:'boolean-out',direction:'output',name:nodeLabel(node)})
- if(node.kind==='value')candidates.push({node:node.id,handle:'value-out',direction:'output',name:nodeLabel(node)})
+ if(node.kind==='action'){ candidates.push({node:node.id,handle:'action-in',direction:'input',name:nodeLabel(node)},{node:node.id,handle:'action-out',direction:'output',name:nodeLabel(node)}) }
+ if(node.kind==='action'){ for(const port of actionFlowPorts(node.data as RuleAction))candidates.push({node:node.id,handle:`flow:${port}`,direction:'output',name:nodeLabel(node)}) }
+ if(node.kind==='condition'&&['all','any','not'].includes((node.data as RuleCondition).op)){ candidates.push({node:node.id,handle:'boolean-in',direction:'input',name:nodeLabel(node)}) }
+ if(node.kind==='action'){ for(const port of graphConditionInputs(node.data as RuleAction))candidates.push({node:node.id,handle:`predicate:${port}`,direction:'input',name:nodeLabel(node)}) }
+ if(node.kind==='condition'){ candidates.push({node:node.id,handle:'boolean-out',direction:'output',name:nodeLabel(node)}) }
+ if(node.kind==='value'){ candidates.push({node:node.id,handle:'value-out',direction:'output',name:nodeLabel(node)}) }
  for(const input of importValueInputs(node))candidates.push({node:node.id,handle:`value:${input.path}`,direction:'input',name:`${nodeLabel(node)} · ${input.index===undefined?input.label:input.index+1}`})
  return candidates
-}).filter(candidate=>!managedPorts.value.some(port=>port.node===candidate.node&&port.handle===candidate.handle&&port.direction===candidate.direction)):[])
-function registerPort() {const candidate=portCandidates.value[Number(portCandidate.value)];if(portCandidate.value===''||!candidate||!managedGroup.value)return;updateGroup(managedGroup.value.id,group=>{if(!group.ports.some(port=>port.node===candidate.node&&port.handle===candidate.handle&&port.direction===candidate.direction))group.ports.push({...candidate,id:editorId()})});portCandidate.value=''}
-function renamePort(id:string,portId:string,name:string) {const group=graphModel.value.groups?.find(group=>group.id===id),port=group&&graphGroupPorts(graphModel.value,group).find(port=>port.id===portId);if(port)updateGroup(id,group=>{group.ports=group.ports.filter(item=>item.id!==portId);group.ports.push({...port,name})})}
-const edges = computed(() => workflow.value.edges.filter(edge => !hiddenPredicates.value.has(edge.source) && !hiddenPredicates.value.has(edge.target) && !hiddenValues.value.has(edge.source) && !hiddenValues.value.has(edge.target)).map(edge => ({...edge, markerEnd: MarkerType.ArrowClosed, style: {stroke: edge.sourceHandle === 'value-out' ? '#22a68c' : edge.sourceHandle === 'boolean-out' ? 'var(--color-accent)' : '#d97706', strokeWidth: 2}, label: edge.sourceHandle === 'boolean-out' ? String(edge.order + 1) : edge.sourceHandle.startsWith('flow:functions/') ? edge.sourceHandle.slice(15).replace(/~1/g, '/').replace(/~0/g, '~') : edge.sourceHandle.startsWith('flow:') ? t(`rules.canvas.flow.${edge.sourceHandle.slice(5)}`) : undefined})))
+}).filter(candidate=>!managedPorts.value.some(port=>port.node===candidate.node&&port.handle===candidate.handle&&port.direction===candidate.direction))
+    }
+    return []
+})())
+function registerPort() {const candidate=portCandidates.value[Number(portCandidate.value)];if(portCandidate.value===''||!candidate||!managedGroup.value){ return; }updateGroup(managedGroup.value.id,group=>{if(!group.ports.some(port=>port.node===candidate.node&&port.handle===candidate.handle&&port.direction===candidate.direction)){ group.ports.push({...candidate,id:editorId()}) }});portCandidate.value=''}
+function renamePort(id:string,portId:string,name:string) {const group=graphModel.value.groups?.find(group=>group.id===id),port=group&&graphGroupPorts(graphModel.value,group).find(port=>port.id===portId);if(port){ updateGroup(id,group=>{group.ports=group.ports.filter(item=>item.id!==portId);group.ports.push({...port,name})}) }}
+const edges = computed(() => workflow.value.edges.filter(edge => !hiddenPredicates.value.has(edge.source) && !hiddenPredicates.value.has(edge.target) && !hiddenValues.value.has(edge.source) && !hiddenValues.value.has(edge.target)).map(edge => ({...edge, markerEnd: MarkerType.ArrowClosed, style: {stroke: (() => {
+    if (edge.sourceHandle === 'value-out') {
+        return '#22a68c'
+    }
+    if (edge.sourceHandle === 'boolean-out') {
+        return 'var(--color-accent)'
+    }
+    return '#d97706'
+})(), strokeWidth: 2}, label: (() => {
+    if (edge.sourceHandle === 'boolean-out') {
+        return String(edge.order + 1)
+    }
+    if (edge.sourceHandle.startsWith('flow:functions/')) {
+        return edge.sourceHandle.slice(15).replaceAll('~1', '/').replaceAll('~0', '~')
+    }
+    if (edge.sourceHandle.startsWith('flow:')) {
+        return t(`rules.canvas.flow.${edge.sourceHandle.slice(5)}`)
+    }
+    return undefined
+})()})))
 function publish(graph: RuleGraph) {
     if (activeGroup.value) {
         const group=graph.groups?.find(group=>group.id===activeGroup.value)
         const added=graph.nodes.filter(node=>node.kind!=='rule'&&!graphModel.value.nodes.some(old=>old.id===node.id))
-        if(group&&added.length)group.nodes=[...new Set([...group.nodes,...added.map(node=>node.id)])]
+        if(group&&added.length){ group.nodes=[...new Set([...group.nodes,...added.map(node=>node.id)])] }
     }
     emit('update:modelValue', graph)
 }
 function select(id: string, additive=false) { publish({...graphModel.value, selected: additive ? [...new Set([...graphModel.value.selected,id])] : [id]}); emit('select', id) }
+function applyGraphChange(graph: RuleGraph, change: NodeChange): RuleGraph {
+    if (change.type === 'position' && change.position) {
+        const position = change.position
+        return {...graph, nodes: graph.nodes.map(node => node.id === change.id ? {...node, position} : node),
+            groups: graph.groups?.map(group => group.id === change.id ? {...group, position} : group)}
+    }
+    if (change.type === 'select') {
+        const selected = change.selected ? [...new Set([...graph.selected, change.id])] : graph.selected.filter(id => id !== change.id)
+        return {...graph, selected}
+    }
+    if (change.type === 'remove' && graph.nodes.find(node => node.id === change.id)?.kind !== 'rule') {
+        return removeGraphNodes(graph, [change.id])
+    }
+    return graph
+}
 function changes(changes: NodeChange[]) {
     flow.applyNodeChanges(changes)
-    let graph = graphModel.value
-    let changed = false
-    for (const change of changes) {
-        if (change.type === 'position' && change.position) { graph = {...graph, nodes: graph.nodes.map(n => n.id === change.id ? {...n, position: change.position!} : n)}; changed = true }
-        if (change.type === 'position' && change.position && graph.groups?.some(group=>group.id===change.id)) {graph={...graph,groups:graph.groups.map(group=>group.id===change.id?{...group,position:change.position!}:group)};changed=true}
-        if (change.type === 'select') { graph = {...graph, selected: change.selected ? [...new Set([...graph.selected, change.id])] : graph.selected.filter(id => id !== change.id)}; changed = true }
-        if (change.type === 'remove' && graph.nodes.find(n => n.id === change.id)?.kind !== 'rule') { graph = removeGraphNodes(graph, [change.id]); changed = true }
-    }
-    if (changed) publish(graph)
-    if (changes.some(change => change.type === 'dimensions')) scheduleSeparation()
+    const graph = changes.reduce(applyGraphChange, graphModel.value)
+    if (graph !== graphModel.value) { publish(graph) }
+    if (changes.some(change => change.type === 'dimensions')) { scheduleSeparation() }
 }
 function edgeChanges(changes: EdgeChange[]) {
     flow.applyEdgeChanges(changes)
     const removed = changes.filter(c => c.type === 'remove').map(c => c.id)
-    if (removed.length) publish({...graphModel.value, edges: graphModel.value.edges.filter(e => !removed.includes(e.id))})
+    if (removed.length) { publish({...graphModel.value, edges: graphModel.value.edges.filter(e => !removed.includes(e.id))}) }
 }
 function connection(value: Connection): Omit<RuleGraphEdge, 'id'|'order'> {
     return resolveGroupConnection(graphModel.value,value)
 }
 function validConnection(value: Connection): boolean {
-    if (workflow.value.edges.some(edge => edge.source === value.source && edge.target === value.target && edge.sourceHandle === value.sourceHandle && edge.targetHandle === value.targetHandle)) return true
+    if (workflow.value.edges.some(edge => edge.source === value.source && edge.target === value.target && edge.sourceHandle === value.sourceHandle && edge.targetHandle === value.targetHandle)) { return true }
     try {
         const resolved=connection(value)
-        if(completeWorkflow.value.edges.some(edge=>edge.source===resolved.source&&edge.target===resolved.target&&edge.sourceHandle===resolved.sourceHandle&&edge.targetHandle===resolved.targetHandle))return true
+        if(completeWorkflow.value.edges.some(edge=>edge.source===resolved.source&&edge.target===resolved.target&&edge.sourceHandle===resolved.sourceHandle&&edge.targetHandle===resolved.targetHandle)){ return true }
         connectGraph(graphModel.value, resolved, props.schema); return true
     } catch { return false }
 }
@@ -150,13 +200,29 @@ type QuickRequest = {kind: 'condition' | 'action'; mode?: 'auto' | 'wrap'; sourc
 type QuickState = {screen: {x: number; y: number}; position?: {x: number; y: number}; targetId?: string; kind?: 'condition' | 'action' | 'value'; mode?: 'auto' | 'wrap'; sourceHandle?: RuleGraphEdge['sourceHandle']; inputPath?:string}
 const quick = ref<QuickState | null>(null)
 const quickContext = computed(() => {
-    if (!quick.value?.targetId) return t('rules.canvas.addContextDefault')
+    if (!quick.value?.targetId) { return t('rules.canvas.addContextDefault') }
     const node = graphModel.value.nodes.find(node => node.id === quick.value!.targetId)
-    if (!node) return t('rules.canvas.addContextDefault')
+    if (!node) { return t('rules.canvas.addContextDefault') }
     const name = nodeLabel(node)
-    if(quick.value.kind==='value')return t('rules.canvas.valueHelp')
-    if (!quick.value.kind) return t(node.kind === 'action' ? 'rules.canvas.addMixedActionContext' : node.kind === 'condition' ? 'rules.canvas.addMixedConditionContext' : 'rules.canvas.addMixedRootContext', {name})
-    return t(quick.value.mode === 'wrap' ? 'rules.canvas.wrapContext' : quick.value.kind === 'action' ? 'rules.canvas.addAfterContext' : 'rules.canvas.addConditionContext', {name})
+    if(quick.value.kind==='value'){ return t('rules.canvas.valueHelp') }
+    if (!quick.value.kind) { return t((() => {
+    if (node.kind === 'action') {
+        return 'rules.canvas.addMixedActionContext'
+    }
+    if (node.kind === 'condition') {
+        return 'rules.canvas.addMixedConditionContext'
+    }
+    return 'rules.canvas.addMixedRootContext'
+})(), {name}) }
+    return t((() => {
+    if (quick.value.mode === 'wrap') {
+        return 'rules.canvas.wrapContext'
+    }
+    if (quick.value.kind === 'action') {
+        return 'rules.canvas.addAfterContext'
+    }
+    return 'rules.canvas.addConditionContext'
+})(), {name})
 })
 function centerPoint() {
     const bounds = canvasElement.value?.getBoundingClientRect()
@@ -170,7 +236,7 @@ function isCanvasBackground(target: EventTarget | null) {
     return target instanceof Element && !!canvasElement.value?.contains(target) && !target.closest('.vue-flow__node, .vue-flow__edge, .vue-flow__handle, button, input, textarea, select')
 }
 function canvasDoubleClick(event: MouseEvent) {
-    if (!isCanvasBackground(event.target)) return
+    if (!isCanvasBackground(event.target)) { return }
     event.preventDefault()
     openSearch({x: event.clientX, y: event.clientY})
 }
@@ -195,7 +261,7 @@ async function createModule(options: RuleGraphAddOptions) {
             if ((options.mode === undefined || options.mode === 'auto') && (code === 'graph.target' || code === 'graph.orphan')) {
                 next = addGraphModule(graphModel.value, {...options, targetId: undefined, mode: 'detached'}, props.schema)
                 detached = true
-            } else throw error
+            } else { throw error }
         }
         publish(next)
         connectionError.value = detached ? t('rules.graph.orphan') : ''
@@ -210,12 +276,28 @@ async function createModule(options: RuleGraphAddOptions) {
     } catch (error) { reportConnectionError(error) }
 }
 async function insertCombination(type: 'tool' | 'tools' | 'field' | 'model') {
- const actionType = type === 'tool' ? 'array_filter' : type === 'model' ? 'json_set' : 'json_remove'
+ const actionType = (() => {
+    if (type === 'tool') {
+        return 'array_filter'
+    }
+    if (type === 'model') {
+        return 'json_set'
+    }
+    return 'json_remove'
+})()
  const target = quick.value?.targetId ? graphModel.value.nodes.find(node => node.id === quick.value?.targetId) : selected.value
  const next = addGraphModule(graphModel.value, {kind: 'action', type: actionType, targetId: target && ['action', 'rule'].includes(target.kind) ? target.id : undefined, position: quick.value?.position, sourceHandle:quick.value?.sourceHandle}, props.schema)
  const id = next.selected[0]!
  const action = graphNodeValue(next, id) as RuleAction
- const params = type === 'tool' ? {path: '/tools', predicate: {op: 'eq', source: 'item', path: '/name', value: ''}} : type === 'model' ? {path: '/model', value: '', create_parents: true} : {paths: type === 'tools' ? ['/tools', '/tool_choice'] : ['']}
+ const params = (() => {
+    if (type === 'tool') {
+        return {path: '/tools', predicate: {op: 'eq', source: 'item', path: '/name', value: ''}}
+    }
+    if (type === 'model') {
+        return {path: '/model', value: '', create_parents: true}
+    }
+    return {paths: type === 'tools' ? ['/tools', '/tool_choice'] : ['']}
+})()
  const configured = replaceGraphNode(next, id, {...action, params})
  publish(configured)
  libraryOpen.value = false
@@ -227,10 +309,10 @@ function focusPredicate(id: string) {
  if (expandedPredicates.value.includes(id)) { expandedPredicates.value = expandedPredicates.value.filter(value => value !== id); return }
  expandedPredicates.value.push(id)
  const predicate = graphModel.value.edges.find(edge => edge.target === id && edge.targetHandle === 'predicate:predicate')
- if (predicate) void nextTick(() => focus(predicate.source))
+ if (predicate) { void nextTick(() => focus(predicate.source)) }
 }
 function chooseQuick(value: {kind: 'condition' | 'action' | 'value'; type: string}) {
-    if (!quick.value) return
+    if (!quick.value) { return }
     const node = graphModel.value.nodes.find(node => node.id === quick.value!.targetId)
     const targetId = value.kind === 'action' && node?.kind === 'condition' || value.kind === 'condition' && node?.kind === 'action' && !quick.value.kind ? undefined : quick.value.targetId
     void createModule({...value, targetId, position: quick.value.position, mode: quick.value.mode ?? 'auto', sourceHandle:quick.value.sourceHandle, inputPath:quick.value.inputPath})
@@ -240,14 +322,25 @@ function moveArgument(id:string,path:string,direction:number) {
  const data=graphNodeValue(graphModel.value,id) as RuleGraphValue
  const listPath=path.slice(0,path.lastIndexOf('/')), index=Number(path.slice(path.lastIndexOf('/')+1))
  const list=[...readGraphInput(data,listPath) as unknown[]]
- if(direction===0)list.splice(index,1)
- else if(index+direction>=0&&index+direction<list.length)[list[index],list[index+direction]]=[list[index+direction],list[index]]
+ if(direction===0){ list.splice(index,1) }
+ else if(index+direction>=0&&index+direction<list.length){ [list[index],list[index+direction]]=[list[index+direction],list[index]] }
  writeGraphInput(data,listPath,list)
  emit('edit',id,data)
 }
 function libraryAdd(kind: 'condition' | 'action', type: string) {
     const wrap = kind === 'condition' && ['all', 'any', 'not'].includes(type)
-    const targetId = kind === 'action' ? selected.value?.kind === 'action' || selected.value?.kind === 'rule' ? selected.value.id : undefined : selected.value?.kind === 'condition' ? selected.value.id : undefined
+    const targetId = (() => {
+    if (kind === 'action') {
+        if (selected.value?.kind === 'action' || selected.value?.kind === 'rule') {
+            return selected.value.id
+        }
+        return undefined
+    }
+    if (selected.value?.kind === 'condition') {
+        return selected.value.id
+    }
+    return undefined
+})()
     void createModule({kind, type, targetId, mode: wrap ? 'wrap' : 'auto'})
 }
 let connecting: {nodeId: string | null; handleId: string | null; handleType: string | null} | undefined
@@ -256,31 +349,34 @@ function startConnection(value: {nodeId?: string | null; handleId?: string | nul
     connecting = {nodeId: value.nodeId ?? null, handleId: value.handleId ?? null, handleType: value.handleType ?? null}
     connectionCompleted = false
 }
+function resolvePendingConnection(pending: typeof connecting) {
+    if (!pending?.nodeId || !pending.handleId?.startsWith('group:')) { return pending }
+    const group = graphModel.value.groups?.find(group => group.id === pending.nodeId)
+    const port = group && graphGroupPorts(graphModel.value, group).find(port => `group:${port.id}` === pending.handleId)
+    if (!port) { return pending }
+    return {...pending, nodeId: port.node, handleId: port.handle}
+}
 function endConnection(event?: MouseEvent | TouchEvent) {
-    let pending = connecting
+    const pending = resolvePendingConnection(connecting)
     connecting = undefined
-    if(pending?.nodeId&&pending.handleId?.startsWith('group:')) {
-        const group=graphModel.value.groups?.find(group=>group.id===pending!.nodeId),port=group&&graphGroupPorts(graphModel.value,group).find(port=>`group:${port.id}`===pending!.handleId)
-        if(port)pending={...pending,nodeId:port.node,handleId:port.handle}
-    }
-    if (!pending?.nodeId || !event || connectionCompleted || !isCanvasBackground(event.target)) return
+    if (!pending?.nodeId || !event || connectionCompleted || !isCanvasBackground(event.target)) { return }
     const point = 'changedTouches' in event ? event.changedTouches[0] : event
-    if (!point) return
+    if (!point) { return }
     if(pending.handleId?.startsWith('value:')) {
         quick.value={kind:'value',targetId:pending.nodeId,inputPath:pending.handleId.slice(6),screen:{x:point.clientX,y:point.clientY},position:flow.screenToFlowCoordinate({x:point.clientX,y:point.clientY})}
         return
     }
     let targetId = pending.nodeId
     let request: QuickRequest
-    if (pending.handleId === 'action-out' || pending.handleId?.startsWith('flow:')) request = {kind: 'action', sourceHandle:pending.handleId as RuleGraphEdge['sourceHandle']}
+    if (pending.handleId === 'action-out' || pending.handleId?.startsWith('flow:')) { request = {kind: 'action', sourceHandle:pending.handleId as RuleGraphEdge['sourceHandle']} }
     else if (pending.handleId === 'action-in') {
         const prior = graphModel.value.edges.find(edge => edge.target === targetId && edge.targetHandle === 'action-in')
-        if (!prior) return
+        if (!prior) { return }
         targetId = prior.source
         request = {kind: 'action'}
-    } else if (pending.handleId === 'boolean-out') request = {kind: 'condition', mode: 'wrap'}
-    else if (pending.handleId === 'boolean-in' || pending.handleId === 'predicate:predicate') request = {kind: 'condition'}
-    else return
+    } else if (pending.handleId === 'boolean-out') { request = {kind: 'condition', mode: 'wrap'} }
+    else if (pending.handleId === 'boolean-in' || pending.handleId === 'predicate:predicate') { request = {kind: 'condition'} }
+    else { return }
     const screen = {x: point.clientX, y: point.clientY}
     quick.value = {...request, targetId, screen, position: flow.screenToFlowCoordinate(screen)}
 }
@@ -293,15 +389,15 @@ function duplicate() {
 // Programmatic viewport changes do not always emit Vue Flow's move-end event.
 async function persistViewport() { await nextTick(); publish({...graphModel.value, layoutRestored: true, viewport: {...flow.getViewport()}}) }
 async function fit() { await nextTick(); await flow.fitView({nodes:nodes.value.map(node=>node.id),padding: 0.12, maxZoom: 1}); await persistViewport() }
-async function zoom(direction: 'in' | 'out') { if (direction === 'in') await flow.zoomIn(); else await flow.zoomOut(); await persistViewport() }
+async function zoom(direction: 'in' | 'out') { if (direction === 'in') { await flow.zoomIn(); } else { await flow.zoomOut(); } await persistViewport() }
 async function revealAdded(id: string) {
     const node = flow.findNode(id)
     const bounds = canvasElement.value?.getBoundingClientRect()
-    if (!node || !bounds) return
+    if (!node || !bounds) { return }
     const point = flow.flowToScreenCoordinate(node.position)
     const viewport = flow.getViewport()
     const width = node.dimensions.width || ruleNodeWidth, height = node.dimensions.height || 240
-    if (point.x >= bounds.left + 12 && point.y >= bounds.top + 12 && point.x + width * viewport.zoom <= bounds.right - 12 && point.y + height * viewport.zoom <= bounds.bottom - 12) return
+    if (point.x >= bounds.left + 12 && point.y >= bounds.top + 12 && point.x + width * viewport.zoom <= bounds.right - 12 && point.y + height * viewport.zoom <= bounds.bottom - 12) { return }
     await flow.setCenter(node.position.x + width / 2, node.position.y + height / 2, {zoom: viewport.zoom})
     await persistViewport()
 }
@@ -312,8 +408,8 @@ function layout() {
     const layoutNodes=[...graph.nodes,...(graph.groups??[])].filter(node=>displayed.has(node.id))
     const cache = new Map<string, number>()
     const depth = (id: string, seen = new Set<string>()): number => {
-        if (seen.has(id) || seen.size > 128) return 0
-        if (cache.has(id)) return cache.get(id)!
+        if (seen.has(id) || seen.size > 128) { return 0 }
+        if (cache.has(id)) { return cache.get(id)! }
         seen.add(id)
         const value = Math.max(0, ...rendered.edges.filter(edge => edge.target === id && displayed.has(edge.source)).map(edge => 1 + depth(edge.source, new Set(seen))))
         cache.set(id, value)
@@ -351,22 +447,23 @@ function separateOverlaps() {
     let changed = false
     for (const node of [...graph.nodes,...(graph.groups??[])].filter(node=>nodes.value.some(rendered=>rendered.id===node.id))) {
         const measured = flow.findNode(node.id)?.dimensions
-        if (!measured?.height || !measured.width) continue
+        if (!measured?.height || !measured.width) { continue }
         let y = node.position.y
         const x = node.position.x, width = measured.width, height = measured.height
-        for (let attempt = 0; attempt < graph.nodes.length; attempt++) {
+        let attemptsRemaining = graph.nodes.length
+        while (attemptsRemaining-- > 0) {
             const conflicts = placed.filter(other => x < other.x + other.width + 30 && x + width + 30 > other.x && y < other.y + other.height + 40 && y + height + 40 > other.y)
-            if (!conflicts.length) break
+            if (!conflicts.length) { break }
             y = Math.max(...conflicts.map(other => other.y + other.height + 40))
         }
         if (y !== node.position.y) { node.position.y = y; changed = true }
         placed.push({x, y, width, height})
     }
-    if (changed) publish(graph)
+    if (changed) { publish(graph) }
 }
 let initialized = false
 async function initializeLayout() {
-    if (initialized) return
+    if (initialized) { return }
     initialized = true
     await nextTick()
     separateOverlaps()
@@ -377,36 +474,36 @@ async function initializeLayout() {
             const first = workflow.value.edges.find(edge => edge.source === root.value.id && edge.sourceHandle === 'action-out')?.target
             await flow.fitView({nodes: moduleNodes.value.filter(node => node.id === root.value.id || node.data.path === '/when' || node.id === first).map(node => node.id), padding: 0.15, maxZoom: 1})
             await persistViewport()
-        } else await fit()
+        } else { await fit() }
     }
 }
 onBeforeUnmount(() => cancelAnimationFrame(separationFrame))
 async function focus(id: string) {
     const owner=graphModel.value.groups?.find(group=>group.nodes.includes(id))
-    if(owner)activeGroup.value=owner.id
-    else if(activeGroup.value)activeGroup.value=undefined
+    if(owner){ activeGroup.value=owner.id }
+    else if(activeGroup.value){ activeGroup.value=undefined }
     const before=new Set(nodes.value.map(node=>node.id))
     const expose=(id:string,seen=new Set<string>())=>{
-        if(seen.has(id))return;seen.add(id)
-        for(const edge of graphModel.value.edges.filter(edge=>edge.source===id&&edge.sourceHandle==='value-out')) {if(!expandedValues.value.includes(edge.target))expandedValues.value.push(edge.target);expose(edge.target,seen)}
+        if(seen.has(id)){ return; }seen.add(id)
+        for(const edge of graphModel.value.edges.filter(edge=>edge.source===id&&edge.sourceHandle==='value-out')) {if(!expandedValues.value.includes(edge.target)){ expandedValues.value.push(edge.target); }expose(edge.target,seen)}
     }
     expose(id)
-    if(graphModel.value.nodes.find(node=>node.id===id)?.kind==='value'&&!expandedValues.value.includes(id))expandedValues.value.push(id)
+    if(graphModel.value.nodes.find(node=>node.id===id)?.kind==='value'&&!expandedValues.value.includes(id)){ expandedValues.value.push(id) }
     const parent = graphModel.value.edges.find(edge => edge.source === id && edge.targetHandle.startsWith('predicate:'))
-    if (parent && !expandedPredicates.value.includes(parent.target)) expandedPredicates.value.push(parent.target)
+    if (parent && !expandedPredicates.value.includes(parent.target)) { expandedPredicates.value.push(parent.target) }
     select(id)
     await nextTick()
     const graph=clone(graphModel.value)
     const arranged=new Set<string>()
     const arrange=(owner:string)=>{
-        if(arranged.has(owner))return;arranged.add(owner)
+        if(arranged.has(owner)){ return; }arranged.add(owner)
         const node=graph.nodes.find(node=>node.id===owner)!
         let row=node.position.y
         for(const edge of graph.edges.filter(edge=>edge.target===owner&&edge.sourceHandle==='value-out')) {
             const source=graph.nodes.find(node=>node.id===edge.source)!
-            if(!hiddenValues.value.has(source.id)&&!before.has(source.id))source.position={x:node.position.x-ruleNodeColumnGap,y:row}
+            if(!hiddenValues.value.has(source.id)&&!before.has(source.id)){ source.position={x:node.position.x-ruleNodeColumnGap,y:row} }
             row+=420
-            if(!hiddenValues.value.has(source.id))arrange(source.id)
+            if(!hiddenValues.value.has(source.id)){ arrange(source.id) }
         }
     }
     graph.nodes.filter(node=>node.kind!=='value').forEach(node=>arrange(node.id))
@@ -417,9 +514,9 @@ async function focus(id: string) {
     await persistViewport()
 }
 function keyboard(event: KeyboardEvent) {
-    if (event.isComposing || (event.target as HTMLElement).closest?.('input,textarea,select,button,a,[contenteditable=true]')) return
+    if (event.isComposing || (event.target as HTMLElement).closest?.('input,textarea,select,button,a,[contenteditable=true]')) { return }
     if (event.key === ' ' && !event.ctrlKey && !event.metaKey && !event.altKey) { event.preventDefault(); openSearch(); return }
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); if (event.shiftKey) emit('redo'); else emit('undo') }
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); if (event.shiftKey) { emit('redo'); } else { emit('undo') } }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'd') { event.preventDefault(); duplicate() }
 }
 defineExpose({focus, fit})
@@ -463,7 +560,7 @@ defineExpose({focus, fit})
                 <h3>{{ t('rules.addAction') }}</h3>
                 <button v-for="cap in actions" :key="cap.id" type="button" class="module-item" :data-testid="`add-action-${cap.id}`" :title="localHelp(cap.description, locale)" @click="libraryAdd('action', cap.id)">{{ ruleLabel('action', cap.id, locale) }}</button>
             </aside>
-            <div ref="canvasElement" class="rule-flow" data-testid="rule-canvas" tabindex="0" @dblclick="canvasDoubleClick">
+            <div ref="canvasElement" class="rule-flow" data-testid="rule-canvas" role="application" :aria-label="t('rules.graphical')" tabindex="0" @dblclick="canvasDoubleClick">
                 <VueFlow :id="flowId" :nodes="nodes" :edges="edges" :apply-default="false" :default-viewport="modelValue.viewport" :min-zoom="0.15" :max-zoom="2.5" :zoom-on-double-click="false" :is-valid-connection="validConnection" :delete-key-code="['Backspace', 'Delete']" :fit-view-on-init="false" @nodes-initialized="initializeLayout" @nodes-change="changes" @edges-change="edgeChanges" @connect="connect" @connect-start="startConnection" @connect-end="endConnection" @pane-context-menu="canvasContextMenu" @node-click="select($event.node.id,$event.event.shiftKey||$event.event.ctrlKey||$event.event.metaKey)" @move-end="publish({...modelValue, viewport: $event.flowTransform})">
                     <template #node-rule-module="nodeProps">
                         <RuleCanvasNode v-bind="nodeProps" @update:data="emit('edit', nodeProps.id, $event)" @value-input="openValueInput(nodeProps.id,$event)" @focus-value="focus($event)" @move-argument="(path,direction)=>moveArgument(nodeProps.id,path,direction)" @quick-add="openNodeQuickAdd(nodeProps.id, $event)" @focus-predicate="focusPredicate(nodeProps.id)" @edit-start="emit('edit-start', nodeProps.id)" @edit-end="emit('edit-end', nodeProps.id)" />
@@ -475,7 +572,7 @@ defineExpose({focus, fit})
         <p v-if="connectionError" role="alert" class="text-xs text-red-500">{{ connectionError }}</p>
         <div v-if="managedGroup" class="group-port-manager">
          <strong>{{managedGroup.name}} · {{locale==='zh-CN'?'输入／输出端口':'Input / output ports'}}</strong>
-         <div v-for="port in managedPorts" :key="port.id" class="port-manager-row"><span>{{port.direction==='input'?'↳':'↗'}}</span><input class="input" :value="port.name||portLabel(port)" @change="renamePort(managedGroup.id,port.id,($event.target as HTMLInputElement).value)" /><button type="button" class="btn" :disabled="!managedGroup.ports.some(item=>item.id===port.id)" @click="updateGroup(managedGroup.id,group=>group.ports=group.ports.filter(item=>item.id!==port.id))">×</button></div>
+         <div v-for="port in managedPorts" :key="port.id" class="port-manager-row"><span>{{port.direction==='input'?'↳':'↗'}}</span><label class="sr-only" :for="`${formId}-${port.id}`">{{ portLabel(port) }}</label><input :id="`${formId}-${port.id}`" class="input" :value="port.name||portLabel(port)" @change="renamePort(managedGroup.id,port.id,($event.target as HTMLInputElement).value)" /><button type="button" class="btn" :disabled="!managedGroup.ports.some(item=>item.id===port.id)" @click="updateGroup(managedGroup.id,group=>group.ports=group.ports.filter(item=>item.id!==port.id))">×</button></div>
          <div class="port-manager-row"><select v-model="portCandidate" class="input" :aria-label="locale==='zh-CN'?'注册组端口':'Register group port'"><option value="" disabled>{{locale==='zh-CN'?'选择组内节点端口':'Select internal port'}}</option><option v-for="(port,index) in portCandidates" :key="index" :value="String(index)">{{port.direction==='input'?'↳':'↗'}} {{port.name}} · {{port.handle}}</option></select><button type="button" class="btn" @click="registerPort">+</button><button type="button" class="btn" @click="portManager=undefined">{{t('common.close')}}</button></div>
         </div>
         <RuleNodeSearch :open="!!quick" :position="quick?.screen ?? {x: 0, y: 0}" :schema="schema" :phase="phase" :kind="quick?.kind" :wrap="quick?.mode === 'wrap'" :context="quickContext" @select="chooseQuick" @combination="insertCombination" @close="closeSearch" />

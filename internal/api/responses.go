@@ -141,66 +141,17 @@ func (s *Server) serveSSE(w http.ResponseWriter, ctx context.Context, p *prepare
 		return store.OutcomeError, err
 	}
 
-	wroteHeaders := false
-	commit := func() {
-		if wroteHeaders {
-			return
-		}
-		wroteHeaders = true
-		copyResponseHeaders(w, p.ResponseHeaders)
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache, no-transform")
-		w.Header().Set("Connection", "keep-alive")
-		// Ask intermediary proxies not to buffer, so tokens arrive immediately.
-		w.Header().Set("X-Accel-Buffering", "no")
-		setResponseWriteDeadline(w)
-		w.WriteHeader(http.StatusOK)
-		if p.Recorder != nil {
-			p.Recorder.OnClientResponseHeaders(http.StatusOK, w.Header())
-		}
-	}
-
-	first := true
-	upstreamErrorForwarded := false
-	_, err := s.streamWith429Retry(ctx, p, req, func(event *upstream.Event) error {
-		if first {
-			first = false
-			if p.Recorder != nil {
-				p.Recorder.NoteTTFB()
-			}
-		}
-		event, transformErr := p.transformResponseEvent(ctx, event)
-		if transformErr != nil {
-			return transformErr
-		}
-		if event == nil {
-			return nil
-		}
-		commit()
-		setResponseWriteDeadline(w)
-		if _, werr := w.Write(formatSSEFrame(event.Raw)); werr != nil {
-			return werr
-		}
-		if upstreamEventContainsError(event) {
-			upstreamErrorForwarded = true
-		}
-		if p.Recorder != nil {
-			// The client hop: exactly the bytes handed to the client.
-			p.Recorder.OnFrame(capture.DirClientOut, "sse_event", event.Type, event.Raw, event.Data)
-		}
-		flusher.Flush()
-		return nil
-	})
-
+	delivery := &sseDelivery{writer: w, prepared: p, flusher: flusher, first: true}
+	_, err := s.streamWith429Retry(ctx, p, req, func(event *upstream.Event) error { return delivery.onEvent(ctx, event) })
 	if err != nil {
 		outcome := outcomeFor(err, ctx)
-		if !wroteHeaders {
+		if !delivery.wroteHeaders {
 			writeError(captureJSONResponse(w, p.Recorder, "error"), errorFromUpstream(err, p.ResponseHeaders))
 			return outcome, err
 		}
 		// HTTP headers are already committed; include retry metadata in the
 		// structured error frame as well, without duplicating upstream errors.
-		if upstreamErrorForwarded {
+		if delivery.errorForwarded {
 			return outcome, err
 		}
 		frame, _ := json.Marshal(streamErrorPayload(err, p.ResponseHeaders))
@@ -214,7 +165,7 @@ func (s *Server) serveSSE(w http.ResponseWriter, ctx context.Context, p *prepare
 		return outcome, err
 	}
 
-	commit()
+	delivery.commit()
 	setResponseWriteDeadline(w)
 	flusher.Flush()
 	return store.OutcomeOK, nil
@@ -389,4 +340,58 @@ func previousResponseID(body map[string]any) string {
 		return v
 	}
 	return ""
+}
+
+type sseDelivery struct {
+	writer                              http.ResponseWriter
+	prepared                            *prepared
+	flusher                             http.Flusher
+	wroteHeaders, first, errorForwarded bool
+}
+
+func (delivery *sseDelivery) commit() {
+	if delivery.wroteHeaders {
+		return
+	}
+	delivery.wroteHeaders = true
+	copyResponseHeaders(delivery.writer, delivery.prepared.ResponseHeaders)
+	delivery.writer.Header().Set("Content-Type", "text/event-stream")
+	delivery.writer.Header().Set("Cache-Control", "no-cache, no-transform")
+	delivery.writer.Header().Set("Connection", "keep-alive")
+	// Ask intermediary proxies not to buffer, so tokens arrive immediately.
+	delivery.writer.Header().Set("X-Accel-Buffering", "no")
+	setResponseWriteDeadline(delivery.writer)
+	delivery.writer.WriteHeader(http.StatusOK)
+	if delivery.prepared.Recorder != nil {
+		delivery.prepared.Recorder.OnClientResponseHeaders(http.StatusOK, delivery.writer.Header())
+	}
+}
+func (delivery *sseDelivery) onEvent(ctx context.Context, event *upstream.Event) error {
+	if delivery.first {
+		delivery.first = false
+		if delivery.prepared.Recorder != nil {
+			delivery.prepared.Recorder.NoteTTFB()
+		}
+	}
+	event, transformErr := delivery.prepared.transformResponseEvent(ctx, event)
+	if transformErr != nil {
+		return transformErr
+	}
+	if event == nil {
+		return nil
+	}
+	delivery.commit()
+	setResponseWriteDeadline(delivery.writer)
+	if _, werr := delivery.writer.Write(formatSSEFrame(event.Raw)); werr != nil {
+		return werr
+	}
+	if upstreamEventContainsError(event) {
+		delivery.errorForwarded = true
+	}
+	if delivery.prepared.Recorder != nil {
+		// The client hop: exactly the bytes handed to the client.
+		delivery.prepared.Recorder.OnFrame(capture.DirClientOut, "sse_event", event.Type, event.Raw, event.Data)
+	}
+	delivery.flusher.Flush()
+	return nil
 }

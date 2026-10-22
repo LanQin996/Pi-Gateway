@@ -28,7 +28,7 @@ const summary = computed(() => m('summary', {
 function setBusy(value: boolean) { busy.value = value; emit('busy', value) }
 function showImport() { error.value = ''; files.value = []; pasted.value = ''; targetId.value = ''; importOpen.value = true }
 async function batch(action: 'enable' | 'disable' | 'recover' | 'add_groups') {
-    if (busy.value || !props.selectedIds.length) return
+    if (busy.value || !props.selectedIds.length) { return }
     setBusy(true); error.value = ''
     try {
         results.value = (await api.batchAccounts([...props.selectedIds], action, [...groupIds.value])).results
@@ -37,7 +37,7 @@ async function batch(action: 'enable' | 'disable' | 'recover' | 'add_groups') {
     finally { setBusy(false) }
 }
 async function exportFile(all: boolean) {
-    if (busy.value) return
+    if (busy.value) { return }
     setBusy(true); error.value = ''
     try {
         const data = await api.exportAccounts(all ? props.accounts.map(a => a.id) : [...props.selectedIds])
@@ -47,28 +47,32 @@ async function exportFile(all: boolean) {
     } catch (err) { error.value = err instanceof Error ? err.message : m('failed') }
     finally { setBusy(false) }
 }
+async function importDocument(doc: {name: string; read: () => Promise<string>}) {
+    try {
+        const text = await doc.read()
+        if (new Blob([text]).size > 16 * 1024 * 1024) { throw new Error(m('tooLarge')) }
+        let data: unknown
+        try { data = JSON.parse(text) } catch { throw new Error(m('invalidJSON')) }
+        const response = await api.importAccounts(format.value, data, targetId.value ? Number(targetId.value) : undefined)
+        results.value.push(...response.results.map(result => ({...result, file: doc.name})))
+    } catch (err) {
+        results.value.push({index: 0, status: 'failed', file: doc.name, error: err instanceof Error ? err.message : m('fileFailed')})
+    }
+}
 async function importData() {
-    if (busy.value) return
+    if (busy.value) { return }
     error.value = ''
     if (!files.value.length && !pasted.value.trim()) { error.value = m('chooseData'); return }
     if (targetId.value && files.value.length + (pasted.value.trim() ? 1 : 0) > 1) { error.value = m('multipleTarget'); return }
     setBusy(true); results.value = []
     try {
         const docs: Array<{name: string; read: () => Promise<string>}> = files.value.map(file => ({name: file.name, read: async () => {
-            if (file.size > 16 * 1024 * 1024) throw new Error(m('tooLarge'))
+            if (file.size > 16 * 1024 * 1024) { throw new Error(m('tooLarge')) }
             return file.text()
         }}))
-        if (pasted.value.trim()) docs.push({name: m('paste'), read: async () => pasted.value})
-        for (const doc of docs) {
-            try {
-                let data: unknown
-                const text = await doc.read()
-                if (new Blob([text]).size > 16 * 1024 * 1024) throw new Error(m('tooLarge'))
-                try { data = JSON.parse(text) } catch { throw new Error(m('invalidJSON')) }
-                const response = await api.importAccounts(format.value, data, targetId.value ? Number(targetId.value) : undefined)
-                results.value.push(...response.results.map(result => ({...result, file: doc.name})))
-            } catch (err) { results.value.push({index: 0, status: 'failed', file: doc.name, error: err instanceof Error ? err.message : m('fileFailed')}) }
-        }
+        if (pasted.value.trim()) { docs.push({name: m('paste'), read: async () => pasted.value}) }
+        // Imports may target the same account, so preserve file order rather than race mutations.
+        await docs.reduce((previous, doc) => previous.then(() => importDocument(doc)), Promise.resolve())
         files.value = []; pasted.value = ''; importOpen.value = false; resultsOpen.value = true; emit('changed')
     } finally { setBusy(false) }
 }
@@ -111,8 +115,8 @@ async function importData() {
             <template #footer><button class="btn btn-primary" :disabled="busy" @click="importData">{{ m(busy ? 'importing' : 'import') }}</button></template>
         </Modal>
         <Modal :open="resultsOpen" :title="m('results')" width="max-w-2xl" @close="resultsOpen = false">
-            <p class="result-summary" role="status">{{ summary }}</p>
-            <ul class="operation-results"><li v-for="(result, i) in results" :key="i"><div><strong>{{ result.name || m('row', {index: result.index + 1}) }}</strong><small v-if="result.file">{{ result.file }}</small><p v-if="result.error" class="text-danger">{{ result.error }}</p></div><Badge :tone="result.status === 'failed' ? 'danger' : result.status === 'skipped' ? 'neutral' : 'success'">{{ m(result.status) }}</Badge></li></ul>
+            <output class="result-summary" >{{ summary }}</output>
+            <ul class="operation-results"><li v-for="(result, i) in results" :key="i"><div><strong>{{ result.name || m('row', {index: result.index + 1}) }}</strong><small v-if="result.file">{{ result.file }}</small><p v-if="result.error" class="text-danger">{{ result.error }}</p></div><Badge :tone="(() => { if (result.status === 'failed') { return 'danger'; } if (result.status === 'skipped') { return 'neutral'; } return 'success'; })()">{{ m(result.status) }}</Badge></li></ul>
             <template #footer><button class="btn" @click="resultsOpen = false">{{ m('close') }}</button></template>
         </Modal>
     </section>

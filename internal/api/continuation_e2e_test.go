@@ -130,8 +130,11 @@ func gatewayUser(text string) map[string]any {
 func gatewayExchange(t *testing.T, conn *websocket.Conn, body map[string]any) map[string]any {
 	t.Helper()
 	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	if err := conn.WriteJSON(body); err != nil {
-		t.Fatalf("send gateway turn: %v", err)
+	{
+		err := conn.WriteJSON(body)
+		reportTestFailure(t, err != nil, func() {
+			t.Fatalf("send gateway turn: %v", err)
+		})
 	}
 	return gatewayTerminal(t, conn)
 }
@@ -141,8 +144,11 @@ func gatewayTerminal(t *testing.T, conn *websocket.Conn) map[string]any {
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	for {
 		var event map[string]any
-		if err := conn.ReadJSON(&event); err != nil {
-			t.Fatalf("receive gateway turn: %v", err)
+		{
+			err := conn.ReadJSON(&event)
+			reportTestFailure(t, err != nil, func() {
+				t.Fatalf("receive gateway turn: %v", err)
+			})
 		}
 		switch event["type"] {
 		case "response.completed", "response.done", "response.failed", "response.incomplete", "error":
@@ -154,22 +160,22 @@ func gatewayTerminal(t *testing.T, conn *websocket.Conn) map[string]any {
 func gatewayResponseID(t *testing.T, event map[string]any) string {
 	t.Helper()
 	response, ok := event["response"].(map[string]any)
-	if !ok || event["type"] != "response.completed" {
+	reportTestFailure(t, !ok || event["type"] != "response.completed", func() {
 		t.Fatalf("expected completed response: %v", event)
-	}
+	})
 	id, _ := response["id"].(string)
-	if id == "" {
+	reportTestFailure(t, id == "", func() {
 		t.Fatal("response is missing its ID")
-	}
+	})
 	return id
 }
 
 func gatewayErrorCode(t *testing.T, event map[string]any) string {
 	t.Helper()
 	problem, ok := event["error"].(map[string]any)
-	if !ok {
+	reportTestFailure(t, !ok, func() {
 		t.Fatalf("expected structured error: %v", event)
-	}
+	})
 	code, _ := problem["code"].(string)
 	return code
 }
@@ -189,9 +195,9 @@ func gatewayOnlySession(t *testing.T, h *testHarness) string {
 	t.Helper()
 	h.dataPlane.lifecycle.mu.Lock()
 	defer h.dataPlane.lifecycle.mu.Unlock()
-	if len(h.dataPlane.lifecycle.active) != 1 {
+	reportTestFailure(t, len(h.dataPlane.lifecycle.active) != 1, func() {
 		t.Fatalf("active downstreams = %d, want one", len(h.dataPlane.lifecycle.active))
-	}
+	})
 	for id := range h.dataPlane.lifecycle.active {
 		return id
 	}
@@ -216,25 +222,25 @@ func gatewayAwait(t *testing.T, check func() bool, description string) {
 func gatewayHTTP(t *testing.T, h *testHarness, body map[string]any) (int, []byte) {
 	t.Helper()
 	raw, err := json.Marshal(body)
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatal(err)
-	}
+	})
 	req, err := http.NewRequest(http.MethodPost, h.server.URL+"/v1/responses", bytes.NewReader(raw))
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatal(err)
-	}
+	})
 	req.Header.Set("Authorization", "Bearer "+h.key)
 	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatal(err)
-	}
+	})
 	defer resp.Body.Close()
 	payload, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatal(err)
-	}
+	})
 	return resp.StatusCode, payload
 }
 
@@ -252,26 +258,29 @@ func TestGatewayContinuationStablePrivateSessionAndToolDelta(t *testing.T) {
 	secondInput := []any{gatewayUser("first"), call, result, gatewayUser("second")}
 	gatewayResponseID(t, gatewayExchange(t, conn, gatewayCreate(secondInput, "", "")))
 	second := gatewayObservedTurn(t, b)
-	if gatewayOnlySession(t, h) != privateID || second.connection != first.connection || b.connections.Load() != 1 {
+	reportTestFailure(t, gatewayOnlySession(t, h) != privateID || second.connection != first.connection || b.connections.Load() != 1, func() {
 		t.Fatal("same downstream did not keep its internal identity and upstream socket")
-	}
-	if second.body["previous_response_id"] != firstID {
+	})
+	reportTestFailure(t, second.body["previous_response_id"] != firstID, func() {
 		t.Fatalf("full-history optimization lost parent: %v", second.body)
-	}
+	})
 	delta, _ := second.body["input"].([]any)
-	if len(delta) != 2 || !reflect.DeepEqual(delta[0], result) {
+	reportTestFailure(t, len(delta) != 2 || !reflect.DeepEqual(delta[0], result), func() {
 		t.Fatalf("tool result/new input order or delta is wrong: %v", delta)
-	}
+	})
 	for _, turn := range []gatewayTurn{first, second} {
 		for _, name := range []string{"session_id", "session-id", "x-session-id", "x-client-request-id"} {
-			if turn.headers.Get(name) != "" {
+			reportTestFailure(t, turn.headers.Get(name) != "", func() {
 				t.Errorf("generated session leaked in %s", name)
-			}
+			})
 		}
 		body, _ := json.Marshal(turn.body)
 		headers, _ := json.Marshal(turn.headers)
-		if _, exists := turn.body["prompt_cache_key"]; exists || bytes.Contains(body, []byte(privateID)) || bytes.Contains(headers, []byte(privateID)) {
-			t.Fatal("internal connection identity appeared on the upstream wire")
+		{
+			_, exists := turn.body["prompt_cache_key"]
+			reportTestFailure(t, exists || bytes.Contains(body, []byte(privateID)) || bytes.Contains(headers, []byte(privateID)), func() {
+				t.Fatal("internal connection identity appeared on the upstream wire")
+			})
 		}
 	}
 	_ = conn.Close()
@@ -283,9 +292,9 @@ func TestGatewayContinuationStablePrivateSessionAndToolDelta(t *testing.T) {
 	next := dialGatewayContinuation(t, h, h.key)
 	gatewayResponseID(t, gatewayExchange(t, next, gatewayCreate(firstInput, "", "")))
 	third := gatewayObservedTurn(t, b)
-	if gatewayOnlySession(t, h) == privateID || third.connection == first.connection {
+	reportTestFailure(t, gatewayOnlySession(t, h) == privateID || third.connection == first.connection, func() {
 		t.Fatal("an independent no-session downstream reused another connection's implicit chain")
-	}
+	})
 }
 
 func TestGatewayContinuationSameHintIsolationAndReconnect(t *testing.T) {
@@ -296,8 +305,11 @@ func TestGatewayContinuationSameHintIsolationAndReconnect(t *testing.T) {
 			key2 := h.key
 			if differentKey {
 				key := &store.APIKey{Name: "other", Key: "sk-other-continuation", Enabled: true}
-				if err := h.store.CreateKey(context.Background(), key); err != nil {
-					t.Fatal(err)
+				{
+					err := h.store.CreateKey(context.Background(), key)
+					reportTestFailure(t, err != nil, func() {
+						t.Fatal(err)
+					})
 				}
 				key2 = key.Key
 			}
@@ -307,33 +319,33 @@ func TestGatewayContinuationSameHintIsolationAndReconnect(t *testing.T) {
 			turn1 := gatewayObservedTurn(t, b)
 			id2 := gatewayResponseID(t, gatewayExchange(t, two, gatewayCreate([]any{gatewayUser("two")}, "", "same-hint")))
 			turn2 := gatewayObservedTurn(t, b)
-			if turn1.connection == turn2.connection {
+			reportTestFailure(t, turn1.connection == turn2.connection, func() {
 				t.Fatal("independent downstreams with same hint shared mutable state")
-			}
+			})
 			if differentKey {
 				event := gatewayExchange(t, two, gatewayCreate([]any{gatewayUser("steal")}, id1, "same-hint"))
-				if gatewayErrorCode(t, event) != "previous_response_not_found" || b.generations.Load() != 2 {
+				reportTestFailure(t, gatewayErrorCode(t, event) != "previous_response_not_found" || b.generations.Load() != 2, func() {
 					t.Fatalf("foreign continuation was sent upstream: %v", event)
-				}
+				})
 			}
 			_ = one.Close()
 			reconnected := dialGatewayContinuation(t, h, h.key)
 			newID := gatewayResponseID(t, gatewayExchange(t, reconnected, gatewayCreate([]any{gatewayUser("delta-one")}, id1, "new-hint")))
 			resumed := gatewayObservedTurn(t, b)
-			if resumed.connection != turn1.connection || resumed.body["previous_response_id"] != id1 || len(resumed.body["input"].([]any)) != 1 {
+			reportTestFailure(t, resumed.connection != turn1.connection || resumed.body["previous_response_id"] != id1 || len(resumed.body["input"].([]any)) != 1, func() {
 				t.Fatalf("reconnect did not resume original socket with explicit delta: %v", resumed)
-			}
+			})
 			gatewayResponseID(t, gatewayExchange(t, two, gatewayCreate([]any{gatewayUser("delta-two")}, id2, "same-hint")))
 			independent := gatewayObservedTurn(t, b)
-			if independent.connection != turn2.connection || independent.body["previous_response_id"] != id2 {
+			reportTestFailure(t, independent.connection != turn2.connection || independent.body["previous_response_id"] != id2, func() {
 				t.Fatal("resuming first chain overwrote second chain")
-			}
-			if gatewayErrorCode(t, gatewayExchange(t, reconnected, gatewayCreate([]any{gatewayUser("old")}, id1, ""))) != "previous_response_not_found" {
+			})
+			reportTestFailure(t, gatewayErrorCode(t, gatewayExchange(t, reconnected, gatewayCreate([]any{gatewayUser("old")}, id1, ""))) != "previous_response_not_found", func() {
 				t.Fatal("an old parent was accepted")
-			}
-			if newID == id1 || b.generations.Load() != 4 || b.connections.Load() != 2 || b.httpCalls.Load() != 0 {
+			})
+			reportTestFailure(t, newID == id1 || b.generations.Load() != 4 || b.connections.Load() != 2 || b.httpCalls.Load() != 0, func() {
 				t.Fatal("reconnect or stale rejection caused extra generation/handshake/HTTP fallback")
-			}
+			})
 		})
 	}
 }
@@ -350,27 +362,30 @@ func TestGatewayContinuationHTTPUsesOnlyLiveOriginalSocket(t *testing.T) {
 			delete(body, "type")
 			body["stream"] = stream
 			status, raw := gatewayHTTP(t, h, body)
-			if status != http.StatusOK || !bytes.Contains(raw, []byte("gateway-response-2")) {
+			reportTestFailure(t, status != http.StatusOK || !bytes.Contains(raw, []byte("gateway-response-2")), func() {
 				t.Fatalf("HTTP downstream cannot bridge to live WS: %d %s", status, raw)
-			}
+			})
 			second := gatewayObservedTurn(t, b)
-			if first.connection != second.connection || second.body["previous_response_id"] != id || b.httpCalls.Load() != 0 {
+			reportTestFailure(t, first.connection != second.connection || second.body["previous_response_id"] != id || b.httpCalls.Load() != 0, func() {
 				t.Fatal("connection-local continuation was sent on a new upstream transport")
-			}
+			})
 			// A stale ID is rejected before headers/streaming start, for both APIs.
 			status, raw = gatewayHTTP(t, h, body)
-			if status != http.StatusBadRequest || !bytes.Contains(raw, []byte("previous_response_not_found")) || b.generations.Load() != 2 {
+			reportTestFailure(t, status != http.StatusBadRequest || !bytes.Contains(raw, []byte("previous_response_not_found")) || b.generations.Load() != 2, func() {
 				t.Fatalf("stale HTTP continuation was executed: %d %s", status, raw)
-			}
+			})
 			delete(body, "previous_response_id")
 			body["input"] = []any{gatewayUser("one"), gatewayUser("delta"), gatewayUser("complete new chain")}
 			status, raw = gatewayHTTP(t, h, body)
-			if status != http.StatusOK || b.generations.Load() != 3 {
+			reportTestFailure(t, status != http.StatusOK || b.generations.Load() != 3, func() {
 				t.Fatalf("complete new chain did not execute exactly once: %d %s", status, raw)
-			}
+			})
 			third := gatewayObservedTurn(t, b)
-			if _, present := third.body["previous_response_id"]; present || len(third.body["input"].([]any)) != 3 {
-				t.Fatal("new chain inherited a stale delta")
+			{
+				_, present := third.body["previous_response_id"]
+				reportTestFailure(t, present || len(third.body["input"].([]any)) != 3, func() {
+					t.Fatal("new chain inherited a stale delta")
+				})
 			}
 		})
 	}
@@ -405,24 +420,27 @@ func TestGatewayContinuationUntrustedMetadataNeverReachesUpstream(t *testing.T) 
 			h := newGatewayContinuationHarness(t, b, gatewayResolveFailure{memory, tc.err})
 			conn := dialGatewayContinuation(t, h, h.key)
 			request := gatewayCreate([]any{gatewayUser("delta")}, "not-owned", "")
-			if code := gatewayErrorCode(t, gatewayExchange(t, conn, request)); code != tc.code {
-				t.Fatalf("WS error code = %q, want %q", code, tc.code)
+			{
+				code := gatewayErrorCode(t, gatewayExchange(t, conn, request))
+				reportTestFailure(t, code != tc.code, func() {
+					t.Fatalf("WS error code = %q, want %q", code, tc.code)
+				})
 			}
 			for _, stream := range []bool{false, true} {
 				request["stream"] = stream
 				status, raw := gatewayHTTP(t, h, request)
-				if status != tc.status || !bytes.Contains(raw, []byte(tc.code)) {
+				reportTestFailure(t, status != tc.status || !bytes.Contains(raw, []byte(tc.code)), func() {
 					t.Fatalf("HTTP error = %d %s, want %d %s", status, raw, tc.status, tc.code)
-				}
+				})
 			}
-			if b.generations.Load() != 0 || b.connections.Load() != 0 || b.httpCalls.Load() != 0 {
+			reportTestFailure(t, b.generations.Load() != 0 || b.connections.Load() != 0 || b.httpCalls.Load() != 0, func() {
 				t.Fatal("untrusted response ID reached upstream")
-			}
+			})
 			delete(request, "previous_response_id")
 			gatewayResponseID(t, gatewayExchange(t, conn, request))
-			if b.generations.Load() != 1 {
+			reportTestFailure(t, b.generations.Load() != 1, func() {
 				t.Fatal("optional session backend failure blocked an ordinary complete request")
-			}
+			})
 		})
 	}
 }
@@ -437,9 +455,9 @@ func TestGatewayContinuationCurrentPolicyAndIdentityRechecked(t *testing.T) {
 			gatewayObservedTurn(t, b)
 			ctx := context.Background()
 			key, err := h.store.GetKeyByValue(ctx, h.key)
-			if err != nil {
+			reportTestFailure(t, err != nil, func() {
 				t.Fatal(err)
-			}
+			})
 			switch mutation {
 			case "disable-key":
 				key.Enabled = false
@@ -465,14 +483,14 @@ func TestGatewayContinuationCurrentPolicyAndIdentityRechecked(t *testing.T) {
 			case "proxy":
 				_, err = h.store.ExecContext(ctx, `UPDATE accounts SET proxy_url=? WHERE id=?`, "http://127.0.0.1:1", h.accountID)
 			}
-			if err != nil {
+			reportTestFailure(t, err != nil, func() {
 				t.Fatal(err)
-			}
+			})
 			event := gatewayExchange(t, conn, gatewayCreate([]any{gatewayUser("delta")}, id, ""))
 			gatewayErrorCode(t, event)
-			if b.generations.Load() != 1 || b.connections.Load() != 1 || b.httpCalls.Load() != 0 {
+			reportTestFailure(t, b.generations.Load() != 1 || b.connections.Load() != 1 || b.httpCalls.Load() != 0, func() {
 				t.Fatalf("changed %s bypassed continuation validation", mutation)
-			}
+			})
 			gatewayAwait(t, func() bool { return h.dataPlane.accounts.Inflight(h.accountID) == 0 }, "rejected continuation leaked an account slot")
 		})
 	}
@@ -480,81 +498,7 @@ func TestGatewayContinuationCurrentPolicyAndIdentityRechecked(t *testing.T) {
 
 func TestGatewayContinuationDisconnectAndShutdownDoNotCommitCreated(t *testing.T) {
 	for _, action := range []string{"disconnect", "shutdown", "max-age"} {
-		t.Run(action, func(t *testing.T) {
-			b := newGatewayContinuationBackend()
-			upstreamClosed := make(chan struct{})
-			b.hook = func(conn *websocket.Conn, turn gatewayTurn) bool {
-				defer close(upstreamClosed)
-				_ = conn.WriteJSON(map[string]any{"type": "response.created", "response": map[string]any{"id": turn.id}})
-				_, _, _ = conn.ReadMessage()
-				return false
-			}
-			memory := session.NewMemory(session.Options{})
-			defer memory.Close()
-			h := newGatewayContinuationHarness(t, b, memory)
-			if action == "max-age" {
-				// Compile/install rules before the short connection timer starts.
-				// Under -race this cold setup can exceed the entire test lifetime;
-				// this case must expire an active created response, not its setup.
-				if _, _, err := h.dataPlane.ruleService.Load(t.Context()); err != nil {
-					t.Fatalf("initialize rules before connection expiry: %v", err)
-				}
-				h.dataPlane.wsMaxAge = time.Second
-			}
-			conn := dialGatewayContinuation(t, h, h.key)
-			if err := conn.WriteJSON(gatewayCreate([]any{gatewayUser("one")}, "", "")); err != nil {
-				t.Fatal(err)
-			}
-			_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
-			var created map[string]any
-			if err := conn.ReadJSON(&created); err != nil || created["type"] != "response.created" {
-				t.Fatalf("created: %v %v", created, err)
-			}
-			turn := gatewayObservedTurn(t, b)
-			if action == "max-age" {
-				var expired map[string]any
-				if err := conn.ReadJSON(&expired); err != nil || gatewayErrorCode(t, expired) != "websocket_connection_limit_reached" {
-					t.Fatalf("maximum-age notice: %v %v", expired, err)
-				}
-			}
-			if action == "disconnect" {
-				_ = conn.Close()
-			}
-			if action == "shutdown" {
-				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-				defer cancel()
-				if err := h.dataPlane.Shutdown(ctx); err != nil {
-					t.Fatal(err)
-				}
-			}
-			select {
-			case <-upstreamClosed:
-			case <-time.After(3 * time.Second):
-				t.Fatal("downstream termination did not cancel upstream")
-			}
-			gatewayAwait(t, func() bool {
-				h.dataPlane.lifecycle.mu.Lock()
-				active := len(h.dataPlane.lifecycle.active)
-				h.dataPlane.lifecycle.mu.Unlock()
-				return active == 0 && h.dataPlane.accounts.Inflight(h.accountID) == 0
-			}, "terminated downstream leaked a handler or account reservation")
-			key, err := h.store.GetKeyByValue(context.Background(), h.key)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := h.dataPlane.limiter.Active(key.ID); got != 0 {
-				t.Fatalf("terminated downstream leaked %d key reservations", got)
-			}
-			if _, err := memory.Resolve(context.Background(), key.ID, turn.id); !errors.Is(err, session.ErrMiss) {
-				t.Fatalf("created-only response committed: %v", err)
-			}
-			if _, err := h.dataPlane.upstream.ResolveContinuation(context.Background(), key.ID, turn.id); !errors.Is(err, upstream.ErrContinuationUnavailable) {
-				t.Fatalf("created-only local state is resumable: %v", err)
-			}
-			if b.generations.Load() != 1 || b.httpCalls.Load() != 0 {
-				t.Fatal("interrupted generation was replayed")
-			}
-		})
+		t.Run(action, func(t *testing.T) { runGatewayContinuationDisconnectAndShutdownDoNotCommitCreatedCase(t, &action) })
 	}
 }
 
@@ -568,24 +512,30 @@ func TestGatewayContinuationQueuedImplicitTurnRechecksKey(t *testing.T) {
 			h := newGatewayContinuationHarness(t, b, nil)
 			ctx := context.Background()
 			one := 1
-			if err := h.store.PatchAccountManagementFields(ctx, h.accountID, store.AccountManagementPatch{Concurrency: &one}); err != nil {
-				t.Fatal(err)
+			{
+				err := h.store.PatchAccountManagementFields(ctx, h.accountID, store.AccountManagementPatch{Concurrency: &one})
+				reportTestFailure(t, err != nil, func() {
+					t.Fatal(err)
+				})
 			}
 			conn := dialGatewayContinuation(t, h, h.key)
 			gatewayResponseID(t, gatewayExchange(t, conn, gatewayCreate([]any{gatewayUser("one")}, "", "")))
 			gatewayObservedTurn(t, b)
 			key, err := h.store.GetKeyByValue(ctx, h.key)
-			if err != nil {
+			reportTestFailure(t, err != nil, func() {
 				t.Fatal(err)
-			}
+			})
 			gatewayAwait(t, func() bool { return h.dataPlane.limiter.Active(key.ID) == 0 }, "first turn did not release key admission")
 			_, release, err := h.dataPlane.accounts.AcquireSpecific(ctx, h.accountID, "test-model")
-			if err != nil {
+			reportTestFailure(t, err != nil, func() {
 				t.Fatal(err)
-			}
+			})
 			defer release()
-			if err := conn.WriteJSON(gatewayCreate([]any{gatewayUser("one"), gatewayUser("two")}, "", "")); err != nil {
-				t.Fatal(err)
+			{
+				err := conn.WriteJSON(gatewayCreate([]any{gatewayUser("one"), gatewayUser("two")}, "", ""))
+				reportTestFailure(t, err != nil, func() {
+					t.Fatal(err)
+				})
 			}
 			gatewayAwait(t, func() bool { return h.dataPlane.limiter.Active(key.ID) == 1 }, "queued turn did not pass authentication and key admission")
 			switch mutation {
@@ -597,14 +547,14 @@ func TestGatewayContinuationQueuedImplicitTurnRechecksKey(t *testing.T) {
 			case "delete":
 				err = h.store.DeleteKey(ctx, key.ID)
 			}
-			if err != nil {
+			reportTestFailure(t, err != nil, func() {
 				t.Fatal(err)
-			}
+			})
 			release()
 			gatewayErrorCode(t, gatewayTerminal(t, conn))
-			if b.generations.Load() != 1 || b.connections.Load() != 1 || b.httpCalls.Load() != 0 {
+			reportTestFailure(t, b.generations.Load() != 1 || b.connections.Load() != 1 || b.httpCalls.Load() != 0, func() {
 				t.Fatalf("queued implicit continuation survived key %s", mutation)
-			}
+			})
 			gatewayAwait(t, func() bool {
 				return h.dataPlane.limiter.Active(key.ID) == 0 && h.dataPlane.accounts.Inflight(h.accountID) == 0
 			}, "rejected queued turn leaked key/account admission")
@@ -635,8 +585,11 @@ func TestGatewayContinuationBusyReconnectRevalidatesParent(t *testing.T) {
 	first := dialGatewayContinuation(t, h, h.key)
 	id := gatewayResponseID(t, gatewayExchange(t, first, gatewayCreate([]any{gatewayUser("one")}, "", "shared")))
 	original := gatewayObservedTurn(t, b)
-	if err := first.WriteJSON(gatewayCreate([]any{gatewayUser("two")}, id, "shared")); err != nil {
-		t.Fatal(err)
+	{
+		err := first.WriteJSON(gatewayCreate([]any{gatewayUser("two")}, id, "shared"))
+		reportTestFailure(t, err != nil, func() {
+			t.Fatal(err)
+		})
 	}
 	select {
 	case <-started:
@@ -644,30 +597,139 @@ func TestGatewayContinuationBusyReconnectRevalidatesParent(t *testing.T) {
 		t.Fatal("second turn did not start")
 	}
 	second := gatewayObservedTurn(t, b)
-	if second.connection != original.connection {
+	reportTestFailure(t, second.connection != original.connection, func() {
 		t.Fatal("second turn changed socket")
-	}
+	})
 	reconnected := dialGatewayContinuation(t, h, h.key)
-	if err := reconnected.WriteJSON(gatewayCreate([]any{gatewayUser("competing")}, id, "different")); err != nil {
-		t.Fatal(err)
+	{
+		err := reconnected.WriteJSON(gatewayCreate([]any{gatewayUser("competing")}, id, "different"))
+		reportTestFailure(t, err != nil, func() {
+			t.Fatal(err)
+		})
 	}
 	gatewayAwait(t, func() bool { return h.dataPlane.accounts.Inflight(h.accountID) == 2 }, "reconnect did not wait for original busy socket")
-	if b.connections.Load() != 1 || b.generations.Load() != 2 {
+	reportTestFailure(t, b.connections.Load() != 1 || b.generations.Load() != 2, func() {
 		t.Fatal("busy reconnect dialed a replacement or generated twice")
-	}
+	})
 	close(release)
 	gatewayResponseID(t, gatewayTerminal(t, first))
-	if code := gatewayErrorCode(t, gatewayTerminal(t, reconnected)); code != "previous_response_not_found" {
-		t.Fatalf("stale queued parent error = %s", code)
+	{
+		code := gatewayErrorCode(t, gatewayTerminal(t, reconnected))
+		reportTestFailure(t, code != "previous_response_not_found", func() {
+			t.Fatalf("stale queued parent error = %s", code)
+		})
 	}
-	if b.generations.Load() != 2 || b.httpCalls.Load() != 0 {
+	reportTestFailure(t, b.generations.Load() != 2 || b.httpCalls.Load() != 0, func() {
 		t.Fatal("queued stale parent was replayed")
-	}
+	})
 	key, err := h.store.GetKeyByValue(context.Background(), h.key)
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatal(err)
-	}
+	})
 	gatewayAwait(t, func() bool {
 		return h.dataPlane.accounts.Inflight(h.accountID) == 0 && h.dataPlane.limiter.Active(key.ID) == 0
 	}, "busy reconnect leaked reservations")
+}
+
+// runGatewayContinuationDisconnectAndShutdownDoNotCommitCreatedCase exercises one isolated test phase with the original shared state.
+func runGatewayContinuationDisconnectAndShutdownDoNotCommitCreatedCase(t *testing.T, capturedAction *string) {
+	t.Helper()
+
+	b := newGatewayContinuationBackend()
+	upstreamClosed := make(chan struct{})
+	b.hook = func(conn *websocket.Conn, turn gatewayTurn) bool {
+		defer close(upstreamClosed)
+		_ = conn.WriteJSON(map[string]any{"type": "response.created", "response": map[string]any{"id": turn.id}})
+		_, _, _ = conn.ReadMessage()
+		return false
+	}
+	memory := session.NewMemory(session.Options{})
+	defer memory.Close()
+	h := newGatewayContinuationHarness(t, b, memory)
+	if (*capturedAction) == "max-age" {
+		// Compile/install rules before the short connection timer starts.
+		// Under -race this cold setup can exceed the entire test lifetime;
+		// this case must expire an active created response, not its setup.
+		{
+			_, _, err := h.dataPlane.ruleService.Load(t.Context())
+			reportTestFailure(t, err != nil, func() {
+				t.Fatalf("initialize rules before connection expiry: %v", err)
+			})
+		}
+		h.dataPlane.wsMaxAge = time.Second
+	}
+	conn := dialGatewayContinuation(t, h, h.key)
+	{
+		err := conn.WriteJSON(gatewayCreate([]any{gatewayUser("one")}, "", ""))
+		reportTestFailure(t, err != nil, func() {
+			t.Fatal(err)
+		})
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var created map[string]any
+	{
+		err := conn.ReadJSON(&created)
+		reportTestFailure(t, err != nil || created["type"] != "response.created", func() {
+			t.Fatalf("created: %v %v", created, err)
+		})
+	}
+	turn := gatewayObservedTurn(t, b)
+	if (*capturedAction) == "max-age" {
+		var expired map[string]any
+		{
+			err := conn.ReadJSON(&expired)
+			reportTestFailure(t, err != nil || gatewayErrorCode(t, expired) != "websocket_connection_limit_reached", func() {
+				t.Fatalf("maximum-age notice: %v %v", expired, err)
+			})
+		}
+	}
+	if (*capturedAction) == "disconnect" {
+		_ = conn.Close()
+	}
+	if (*capturedAction) == "shutdown" {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		{
+			err := h.dataPlane.Shutdown(ctx)
+			reportTestFailure(t, err != nil, func() {
+				t.Fatal(err)
+			})
+		}
+	}
+	select {
+	case <-upstreamClosed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("downstream termination did not cancel upstream")
+	}
+	gatewayAwait(t, func() bool {
+		h.dataPlane.lifecycle.mu.Lock()
+		active := len(h.dataPlane.lifecycle.active)
+		h.dataPlane.lifecycle.mu.Unlock()
+		return active == 0 && h.dataPlane.accounts.Inflight(h.accountID) == 0
+	}, "terminated downstream leaked a handler or account reservation")
+	key, err := h.store.GetKeyByValue(context.Background(), h.key)
+	reportTestFailure(t, err != nil, func() {
+		t.Fatal(err)
+	})
+	{
+		got := h.dataPlane.limiter.Active(key.ID)
+		reportTestFailure(t, got != 0, func() {
+			t.Fatalf("terminated downstream leaked %d key reservations", got)
+		})
+	}
+	{
+		_, err := memory.Resolve(context.Background(), key.ID, turn.id)
+		reportTestFailure(t, !errors.Is(err, session.ErrMiss), func() {
+			t.Fatalf("created-only response committed: %v", err)
+		})
+	}
+	{
+		_, err := h.dataPlane.upstream.ResolveContinuation(context.Background(), key.ID, turn.id)
+		reportTestFailure(t, !errors.Is(err, upstream.ErrContinuationUnavailable), func() {
+			t.Fatalf("created-only local state is resumable: %v", err)
+		})
+	}
+	reportTestFailure(t, b.generations.Load() != 1 || b.httpCalls.Load() != 0, func() {
+		t.Fatal("interrupted generation was replayed")
+	})
 }

@@ -84,9 +84,27 @@ export const actionCapabilities: RuleCapability[] = [
     capability('drop_event', 'Drop ordinary non-terminal content events only. Errors, terminal events and tool-call correlation must remain intact.', '仅丢弃普通非终态内容事件；禁止丢弃错误、终态或破坏工具调用关联。', [], ['response_event']),
 ]
 const compareFields = () => [source(), pointer(), encoding()]
+const groupDescriptions = {
+    all: ['Every child must match; non-empty group.', '全部子条件必须匹配；组不能为空。'],
+    any: ['At least one child must match; non-empty group.', '至少一个子条件匹配；组不能为空。'],
+    not: ['Negate exactly one child condition.', '对恰好一个子条件取反。'],
+}
+
+function comparisonFields(id: string): RuleField[] {
+    const fields = compareFields()
+    if (['exists', 'not_exists'].includes(id)) return fields
+    if (id === 'type') return [...fields, field('value', 'enum', 'JSON type; missing values require not_exists.', 'JSON 类型；缺失值请使用 not_exists。', {
+        required: true, enum: ['null', 'boolean', 'number', 'string', 'array', 'object'], default: 'string',
+    })]
+    if (['regex', 'not_regex'].includes(id)) return [...fields, field('value', 'string', 'Static Go RE2 expression; dynamic references are prohibited.', '静态 Go RE2 正则，不允许动态引用。', {
+        required: true, default: '',
+    }), ...regex()]
+    return [...fields, value()]
+}
+
 export const conditionCapabilities: RuleCapability[] = [
     capability('always', 'Always match. Use this explicitly instead of an empty group.', '始终匹配，应明确使用此类型，不依赖空组。', []),
-    ...['all', 'any', 'not'].map(op => capability(op, op === 'not' ? 'Negate exactly one child condition.' : op === 'all' ? 'Every child must match; non-empty group.' : 'At least one child must match; non-empty group.', op === 'not' ? '对恰好一个子条件取反。' : op === 'all' ? '全部子条件必须匹配；组不能为空。' : '至少一个子条件匹配；组不能为空。', [])),
+    ...Object.entries(groupDescriptions).map(([op, [en, zh]]) => capability(op, en!, zh!, [])),
     ...[
         ['eq', 'Equal JSON values (types are significant)', 'JSON 值相等（区分类型）'], ['ne', 'Not equal', 'JSON 值不相等'],
         ['exists', 'Path exists, including explicit null', '路径存在（含显式 null）'], ['not_exists', 'Path is missing; null does not match', '路径不存在（null 不匹配）'],
@@ -96,14 +114,7 @@ export const conditionCapabilities: RuleCapability[] = [
         ['regex', 'Go RE2 pattern matches a string (use json encoding for objects)', 'Go RE2 匹配字符串（对象请使用 json 编码）'], ['not_regex', 'Go RE2 pattern does not match', 'Go RE2 不匹配'],
         ['gt', 'Numeric greater than', '数值大于'], ['gte', 'Numeric greater than or equal', '数值大于等于'], ['lt', 'Numeric less than', '数值小于'], ['lte', 'Numeric less than or equal', '数值小于等于'],
         ['type', 'JSON type is null, boolean, number, string, array or object', 'JSON 类型为 null、boolean、number、string、array 或 object'],
-    ].map(([id, en, zh]) => capability(id!, en!, zh!, [...compareFields(), ...(['exists', 'not_exists'].includes(id!) ? [] : id === 'type' ? [field('value', 'enum', 'JSON type; missing values require not_exists.', 'JSON 类型；缺失值请使用 not_exists。', {
-        required: true,
-        enum: ['null', 'boolean', 'number', 'string', 'array', 'object'],
-        default: 'string'
-    })] : ['regex', 'not_regex'].includes(id!) ? [field('value', 'string', 'Static Go RE2 expression; dynamic references are prohibited.', '静态 Go RE2 正则，不允许动态引用。', {
-        required: true,
-        default: ''
-    })] : [value()]), ...(['regex', 'not_regex'].includes(id!) ? regex() : [])])),
+    ].map(([id, en, zh]) => capability(id!, en!, zh!, comparisonFields(id!))),
 ]
 export const ruleSchema: RuleSchema = {
     schema_version: 1, phases, sources: ['current', 'client', 'context', 'item'], encodings: ['value', 'json'],
@@ -159,13 +170,26 @@ ruleSchema.rule_fields.find(f => f.name === 'priority')!.default = 100
 export const rendererKinds: RuleRenderer[] = ['string', 'number', 'boolean', 'enum', 'strings', 'value', 'values', 'condition']
 
 export function localHelp(value: LocalizedHelp | string | undefined, locale: string): string {
-    return typeof value === 'string' ? value : value?.[locale === 'zh-CN' ? 'zh-CN' : 'en'] ?? ''
+    if (typeof value === 'string') return value
+    return value?.[locale === 'zh-CN' ? 'zh-CN' : 'en'] ?? ''
 }
 
 export function defaultForField(f: RuleField): unknown {
     // Catalog values can be Vue proxies when rendered inside reactive drafts.
     const copy = (value: unknown) => JSON.parse(JSON.stringify(value))
-    return f.non_empty && (f.default === undefined || f.default === '') && f.examples?.length ? copy(f.examples[0]) : f.default !== undefined ? copy(f.default) : f.type === 'boolean' ? false : f.type === 'number' ? 0 : ['strings', 'values', 'action_array', 'condition_array'].includes(f.type) ? [] : f.type === 'value' ? null : f.type === 'condition' ? {op: 'always'} : f.enum?.[0] ?? ''
+    if (f.non_empty && (f.default === undefined || f.default === '') && f.examples?.length) return copy(f.examples[0])
+    if (f.default !== undefined) return copy(f.default)
+    switch (f.type) {
+        case 'boolean': return false
+        case 'number': return 0
+        case 'strings':
+        case 'values':
+        case 'action_array':
+        case 'condition_array': return []
+        case 'value': return null
+        case 'condition': return {op: 'always'}
+        default: return f.enum?.[0] ?? ''
+    }
 }
 
 export function newRule(): Rule {

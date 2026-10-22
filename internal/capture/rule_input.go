@@ -21,15 +21,15 @@ func (r *Recorder) OnRuleInput(phase string, input *rules.Input, contextOnly boo
 	if input == nil {
 		return
 	}
-	copy := *input
-	copy.Trace = false
-	copy.ConditionTrace = false
-	copy.TraceMaxBytes = 0
-	copy.MaxTraces = 0
+	snapshot := *input
+	snapshot.Trace = false
+	snapshot.ConditionTrace = false
+	snapshot.TraceMaxBytes = 0
+	snapshot.MaxTraces = 0
 	kind := KindRuleInput
 	if contextOnly {
 		kind = KindRuleContext
-		copy.Body = nil
+		snapshot.Body = nil
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -46,9 +46,9 @@ func (r *Recorder) OnRuleInput(phase string, input *rules.Input, contextOnly boo
 	left := limit
 	// Check a lower size bound before Marshal: a multi-megabyte request must not
 	// cause a second unbounded allocation merely to discover the snapshot is full.
-	fits := checkpointFits(copy.Body, &left, 0) && checkpointFits(copy.ClientBody, &left, 0) && checkpointFits(copy.Context, &left, 0) && checkpointFits(copy.Model, &left, 0)
+	fits := checkpointFits(snapshot.Body, &left, 0) && checkpointFits(snapshot.ClientBody, &left, 0) && checkpointFits(snapshot.Context, &left, 0) && checkpointFits(snapshot.Model, &left, 0)
 	if fits {
-		raw, err := json.Marshal(&copy)
+		raw, err := json.Marshal(&snapshot)
 		frame.Bytes = len(raw)
 		if err == nil && len(raw) <= limit {
 			r.allow(len(raw))
@@ -90,17 +90,22 @@ func checkpointFits(value any, left *int, depth int) bool {
 			}
 		}
 	case *piwire.OrderedMap:
-		if v != nil {
-			for _, key := range v.Keys() {
-				*left -= len(key)
-				child, _ := v.Get(key)
-				if !checkpointFits(child, left, depth+1) {
-					return false
-				}
-			}
-		}
+		return checkpointOrderedMapFits(v, left, depth)
 	default:
 		return false
+	}
+	return *left >= 0
+}
+
+func checkpointOrderedMapFits(v *piwire.OrderedMap, left *int, depth int) bool {
+	if v != nil {
+		for _, key := range v.Keys() {
+			*left -= len(key)
+			child, _ := v.Get(key)
+			if !checkpointFits(child, left, depth+1) {
+				return false
+			}
+		}
 	}
 	return *left >= 0
 }

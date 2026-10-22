@@ -18,7 +18,7 @@ const error = computed(() => props.accounts.filter(account => account.enabled &&
 const normalRate = computed(() => props.accounts.length ? `${Math.round(normal.value / props.accounts.length * 100)}%` : '—')
 const statusBars = computed(() => {
 	const total = props.accounts.length
-	if (!total) return []
+	if (!total) { return [] }
 	return [{ value: normal.value, tone: 'success' }, { value: limited.value, tone: 'warn' }, { value: disabled.value + error.value, tone: 'danger' }].filter(item => item.value > 0).map(item => ({ ...item, width: `${item.value / total * 100}%` }))
 })
 const activeAccounts = computed(() => [...props.accounts].filter(account => account.last_used_at > 0).sort((a, b) => b.last_used_at - a.last_used_at).slice(0, 4))
@@ -30,7 +30,15 @@ const totalSlots = computed(() => props.accounts.reduce((total, account) => tota
 const usedSlots = computed(() => props.accounts.reduce((total, account) => total + account.inflight, 0))
 const slotsRatio = computed(() => totalSlots.value ? Math.min(100, usedSlots.value / totalSlots.value * 100) : 0)
 function accountValue(account: Account) { return metric(account.request_count) }
-function statusTone(account: Account) { return quotaLimited(account) ? 'warn' : account.enabled && account.status === 'ready' ? 'success' : 'danger' }
+function statusTone(account: Account) { return (() => {
+    if (quotaLimited(account)) {
+        return 'warn'
+    }
+    if (account.enabled && account.status === 'ready') {
+        return 'success'
+    }
+    return 'danger'
+})() }
 </script>
 
 <template>

@@ -56,9 +56,7 @@ func TestOpenMigratesLegacyAccountsColumnsIdempotently(t *testing.T) {
 		}
 	})
 	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, err)
 	_, err = db.Exec(`CREATE TABLE accounts (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		name TEXT NOT NULL,
@@ -91,9 +89,7 @@ func TestOpenMigratesLegacyAccountsColumnsIdempotently(t *testing.T) {
 		db.Close()
 		t.Fatal(err)
 	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, db.Close())
 
 	// Independent pools exercise SQLite's file-level migration lock.
 	start := make(chan struct{})
@@ -110,59 +106,24 @@ func TestOpenMigratesLegacyAccountsColumnsIdempotently(t *testing.T) {
 	}
 	close(start)
 	for i := 0; i < 2; i++ {
-		if err := <-errs; err != nil {
-			t.Errorf("concurrent migration: %v", err)
+		{
+			err := <-errs
+			reportStoreTestFailure(t, err != nil, func() {
+				t.Errorf("concurrent migration: %v", err)
+			})
 		}
 	}
-	if t.Failed() {
+	reportStoreTestFailure(t, t.Failed(), func() {
 		t.FailNow()
-	}
+	})
 
-	for i := 0; i < 2; i++ {
-		s, err := Open(path)
-		if err != nil {
-			t.Fatalf("migration pass %d: %v", i+1, err)
-		}
-		ctx := context.Background()
-		a, err := s.GetAccount(ctx, 1)
-		if err != nil || a == nil {
-			s.Close()
-			t.Fatalf("legacy account=%+v err=%v", a, err)
-		}
-		wantModels := []string{}
-		if i > 0 {
-			wantModels = []string{"manual-a", "manual-b"}
-		}
-		if a.Name != "legacy" || a.AccessToken != "old-access" || a.RefreshToken != "old-refresh" || a.ProxyURL != "http://127.0.0.1:8888" || a.CreatedAt != 10 || !reflect.DeepEqual(a.SupplementalModels, wantModels) {
-			s.Close()
-			t.Fatalf("migration/reopen changed legacy data or lost models: %+v", a)
-		}
-		if i == 0 {
-			if err := s.PatchAccountManagementFields(ctx, a.ID, AccountManagementPatch{SupplementalModels: []string{" manual-b ", "manual-a", "manual-b"}}); err != nil {
-				s.Close()
-				t.Fatal(err)
-			}
-		} else {
-			catalog, err := s.GetAccountModelCatalog(ctx, a.ID)
-			if err != nil || catalog == nil || catalog.FetchedAt != 0 || len(catalog.Models) != 2 || catalog.Models[0].Source != "manual" {
-				s.Close()
-				t.Fatalf("reopened manual catalog=%+v err=%v", catalog, err)
-			}
-		}
-		if err := s.Close(); err != nil {
-			t.Fatal(err)
-		}
-	}
+	func() { verifyOpenMigratesLegacyAccountsColumnsIdempotently2(&t, &path) }()
 
 	check, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, err)
 	defer check.Close()
 	rows, err := check.Query("PRAGMA table_info(accounts)")
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, err)
 	defer rows.Close()
 	want := map[string]bool{
 		"quota_json": true, "quota_updated_at": true, "quota_error": true,
@@ -174,20 +135,115 @@ func TestOpenMigratesLegacyAccountsColumnsIdempotently(t *testing.T) {
 		var cid, notNull, pk int
 		var name, ctype string
 		var dflt any
-		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
-			t.Fatal(err)
-		}
+		requireDataNoError(t, rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk))
 		if want[name] {
-			if notNull != 1 || dflt == nil {
+			reportStoreTestFailure(t, notNull != 1 || dflt == nil, func() {
 				t.Errorf("%s lost NOT NULL DEFAULT: %d, %v", name, notNull, dflt)
-			}
+			})
 		}
 		delete(want, name)
 	}
-	if err := rows.Err(); err != nil {
-		t.Fatal(err)
+	requireDataNoError(t, rows.Err())
+	requireDataTruef(t, !(len(want) != 0), "missing migrated columns: %v", want)
+}
+
+// verifyOpenMigratesLegacyAccountsColumnsIdempotently exercises one isolated test phase with the original shared state.
+func verifyOpenMigratesLegacyAccountsColumnsIdempotently(capturedT **testing.T, capturedI *int, capturedS **Store, capturedCtx *context.Context, capturedA **Account) {
+	(*capturedT).Helper()
+
+	if (*capturedI) == 0 {
+		if err := (*capturedS).PatchAccountManagementFields((*capturedCtx), (*capturedA).ID, AccountManagementPatch{SupplementalModels: []string{" manual-b ", "manual-a", "manual-b"}}); err != nil {
+			(*capturedS).Close()
+			(*capturedT).Fatal(err)
+		}
+	} else {
+		catalog, err := (*capturedS).GetAccountModelCatalog((*capturedCtx), (*capturedA).ID)
+		if err != nil || catalog == nil || catalog.FetchedAt != 0 || len(catalog.Models) != 2 || catalog.Models[0].Source != "manual" {
+			(*capturedS).Close()
+			(*capturedT).Fatalf("reopened manual catalog=%+v err=%v", catalog, err)
+		}
 	}
-	if len(want) != 0 {
-		t.Fatalf("missing migrated columns: %v", want)
+}
+
+// verifyOpenMigratesLegacyAccountsColumnsIdempotently2 exercises one isolated test phase with the original shared state.
+func verifyOpenMigratesLegacyAccountsColumnsIdempotently2(capturedT **testing.T, capturedPath *string) {
+	(*capturedT).Helper()
+
+	for i := 0; i < 2; i++ {
+		s, err := Open((*capturedPath))
+		reportStoreTestFailure((*capturedT), err != nil, func() {
+			(*capturedT).Fatalf("migration pass %d: %v", i+1, err)
+		})
+		ctx := context.Background()
+		a, err := s.GetAccount(ctx, 1)
+		if err != nil || a == nil {
+			s.Close()
+			(*capturedT).Fatalf("legacy account=%+v err=%v", a, err)
+		}
+		wantModels := []string{}
+		if i > 0 {
+			wantModels = []string{"manual-a", "manual-b"}
+		}
+		if a.Name != "legacy" || a.AccessToken != "old-access" || a.RefreshToken != "old-refresh" || a.ProxyURL != "http://127.0.0.1:8888" || a.CreatedAt != 10 || !reflect.DeepEqual(a.SupplementalModels, wantModels) {
+			s.Close()
+			(*capturedT).Fatalf("migration/reopen changed legacy data or lost models: %+v", a)
+		}
+		func() { verifyOpenMigratesLegacyAccountsColumnsIdempotently(&(*capturedT), &i, &s, &ctx, &a) }()
+		requireDataNoError((*capturedT), s.Close())
+	}
+}
+
+const (
+	migrationTestTable  = "api_keys"
+	migrationTestColumn = "label"
+)
+
+// A nil connection proves invalid DDL is rejected before any database access.
+func TestEnsureColumnsRejectsUnregisteredDDL(t *testing.T) {
+	cases := []struct {
+		name    string
+		table   string
+		columns map[string]string
+	}{
+		{"unregistered table", "unregistered", nil},
+		{"injected table", "accounts); DROP TABLE accounts; --", nil},
+		{"unregistered column", "accounts", map[string]string{"unregistered": "TEXT"}},
+		{"injected column", "accounts", map[string]string{"name; DROP TABLE accounts; --": "TEXT"}},
+		{"changed definition", migrationTestTable, map[string]string{migrationTestColumn: "TEXT"}},
+		{"injected definition", migrationTestTable, map[string]string{migrationTestColumn: "TEXT; DROP TABLE accounts; --"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := ensureColumns(t.Context(), nil, tc.table, tc.columns); err == nil {
+				t.Fatal("unregistered migration DDL was accepted")
+			}
+		})
+	}
+}
+
+func TestValidateMigrationColumnsAcceptsStaticRegistry(t *testing.T) {
+	for table, columns := range additiveColumns() {
+		if err := validateMigrationColumns(table, columns); err != nil {
+			t.Fatalf("registered migration %s rejected: %v", table, err)
+		}
+	}
+}
+
+func TestEnsureColumnsAddsRegisteredColumnIdempotently(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	requireDataNoError(t, err)
+	defer db.Close()
+	conn, err := db.Conn(t.Context())
+	requireDataNoError(t, err)
+	defer conn.Close()
+	_, err = conn.ExecContext(t.Context(), "CREATE TABLE api_keys(id INTEGER PRIMARY KEY); INSERT INTO api_keys(id) VALUES(1)")
+	requireDataNoError(t, err)
+	for range 2 {
+		requireDataNoError(t, ensureColumns(t.Context(), conn, migrationTestTable, map[string]string{migrationTestColumn: textEmptyColumn}))
+	}
+	var label string
+	requireDataNoError(t, conn.QueryRowContext(t.Context(), "SELECT label FROM api_keys WHERE id=1").Scan(&label))
+	if label != "" {
+		t.Fatalf("registered migration changed default: %q", label)
 	}
 }

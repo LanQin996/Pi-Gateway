@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import {computed, ref, watch} from 'vue'
 import type {RuleGraphValue} from '../../utils/ruleGraph'
-import type {RuleSchema, ValueExpr} from '../../api/rules'
+import type {RuleSchema, JsonValue} from '../../api/rules'
 import {useI18n} from '../../i18n'
 import RuleField from './RuleField.vue'
 const props = defineProps<{modelValue: RuleGraphValue; schema: RuleSchema; nodeId: string}>()
 const emit = defineEmits<{'update:modelValue':[value:RuleGraphValue]}>()
 const {locale,t} = useI18n()
-const expression = computed(() => (props.modelValue.value as {$expr?:{op:string;args:ValueExpr[]}})?.$expr)
+const expression = computed(() => (props.modelValue.value as {$expr?:{op:string;args:JsonValue[]}})?.$expr)
 const reference = computed(() => (props.modelValue.value as {$ref?:Record<string,unknown>})?.$ref)
 const literal = ref(''), error = ref('')
 const literalHelp = computed(()=>locale.value==='zh-CN'?'JSON 字面量，例如字符串、42、false、null、[]、{}；对象内部不求值。':'JSON literal, e.g. string, 42, false, null, [], {}; object contents are not evaluated.')
@@ -18,11 +18,11 @@ function setLiteral() {
 }
 function updateReference(key:string,value:unknown) {
  const next={...reference.value}; if(value===undefined)delete next[key];else next[key]=value
- emit('update:modelValue',{mode:'reference',value:{$ref:next} as ValueExpr})
+ emit('update:modelValue',{mode:'reference',value:{$ref:next} as JsonValue})
 }
 function addArgument() {
  if(expression.value)emit('update:modelValue',{mode:'computed',value:{$expr:{...expression.value,args:[...expression.value.args,null]}}})
- else emit('update:modelValue',{mode:'values',value:[...props.modelValue.value as ValueExpr[],null]})
+ else emit('update:modelValue',{mode:'values',value:[...props.modelValue.value as JsonValue[],null]})
 }
 </script>
 <template>

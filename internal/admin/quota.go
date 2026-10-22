@@ -136,13 +136,13 @@ func (s *Server) handleGetQuota(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if account == nil {
-		writeErr(w, http.StatusNotFound, "account not found")
+		writeErr(w, http.StatusNotFound, accountNotFoundMessage)
 		return
 	}
 	// The snapshot is produced by the Codex credential; without one there is
 	// nothing authoritative to show, so surface the same conflict as refresh.
 	if !account.CodexLinked() {
-		writeErr(w, http.StatusConflict, "this account has no Codex credential; link one to read quota")
+		writeErr(w, http.StatusConflict, codexCredentialRequiredMessage)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"quota": s.buildQuotaView(r.Context(), account)})
@@ -161,7 +161,7 @@ func (s *Server) handleRefreshQuota(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if account == nil {
-		writeErr(w, http.StatusNotFound, "account not found")
+		writeErr(w, http.StatusNotFound, accountNotFoundMessage)
 		return
 	}
 	if s.accounts.QuotaClient() == nil {
@@ -171,7 +171,7 @@ func (s *Server) handleRefreshQuota(w http.ResponseWriter, r *http.Request) {
 	// Quota state lives on the Codex backend, so it needs the account's optional
 	// Codex credential rather than the ChatGPT model credential.
 	if !account.CodexLinked() {
-		writeErr(w, http.StatusConflict, "this account has no Codex credential; link one to read quota")
+		writeErr(w, http.StatusConflict, codexCredentialRequiredMessage)
 		return
 	}
 
@@ -208,7 +208,7 @@ func (s *Server) handleConsumeResetCredit(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if account == nil {
-		writeErr(w, http.StatusNotFound, "account not found")
+		writeErr(w, http.StatusNotFound, accountNotFoundMessage)
 		return
 	}
 	if s.accounts.QuotaClient() == nil {
@@ -218,7 +218,7 @@ func (s *Server) handleConsumeResetCredit(w http.ResponseWriter, r *http.Request
 	// Quota state lives on the Codex backend, so it needs the account's optional
 	// Codex credential rather than the ChatGPT model credential.
 	if !account.CodexLinked() {
-		writeErr(w, http.StatusConflict, "this account has no Codex credential; link one to read quota")
+		writeErr(w, http.StatusConflict, codexCredentialRequiredMessage)
 		return
 	}
 

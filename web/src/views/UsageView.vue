@@ -53,7 +53,7 @@ async function load() {
 			account_id: f.account_id ? Number(f.account_id) : undefined,
 			model: f.model.trim(), search: f.search.trim(), limit: limit.value, offset: offset.value,
 		})
-		if (run !== generation) return
+		if (run !== generation) { return }
 		total.value = result.total
 		if (offset.value > 0 && offset.value >= result.total) {
 			offset.value = Math.max(0, (Math.ceil(result.total / limit.value) - 1) * limit.value)
@@ -63,7 +63,7 @@ async function load() {
 		records.value = result.records ?? []
 	} catch (err) {
 		if (run === generation) { error.value = err instanceof Error ? err.message : t('stats.loadFailed'); total.value = 0 }
-	} finally { if (run === generation) loading.value = false }
+	} finally { if (run === generation) { loading.value = false } }
 }
 async function loadSummary() {
 	const run = ++summaryGeneration
@@ -72,10 +72,10 @@ async function loadSummary() {
 	summary.value = null
 	try {
 		const result = await api.statsSummary(range.value.start, range.value.end)
-		if (run === summaryGeneration) summary.value = result
+		if (run === summaryGeneration) { summary.value = result }
 	} catch (err) {
-		if (run === summaryGeneration) summaryError.value = err instanceof Error ? err.message : t('stats.loadFailed')
-	} finally { if (run === summaryGeneration) summaryLoading.value = false }
+		if (run === summaryGeneration) { summaryError.value = err instanceof Error ? err.message : t('stats.loadFailed') }
+	} finally { if (run === summaryGeneration) { summaryLoading.value = false } }
 }
 function apply() { activeFilters.value = { ...filters.value }; offset.value = 0; void load() }
 function changeRange(next: StatsRange) { range.value = next; offset.value = 0; void load(); void loadSummary() }
@@ -87,9 +87,9 @@ function showDetail(record: UsageRecord) { selectedRecord.value = record; detail
 async function loadLookups() {
 	lookupError.value = ''
 	const results = await Promise.allSettled([api.listKeys(), api.listAccounts()])
-	if (results[0].status === 'fulfilled') keys.value = results[0].value.keys ?? []
-	if (results[1].status === 'fulfilled') accounts.value = results[1].value.accounts ?? []
-	if (results.some(result => result.status === 'rejected')) lookupError.value = t('usage.lookupFailed')
+	if (results[0].status === 'fulfilled') { keys.value = results[0].value.keys ?? [] }
+	if (results[1].status === 'fulfilled') { accounts.value = results[1].value.accounts ?? [] }
+	if (results.some(result => result.status === 'rejected')) { lookupError.value = t('usage.lookupFailed') }
 }
 onMounted(() => { void load(); void loadSummary(); void loadLookups() })
 onBeforeUnmount(() => { generation++; summaryGeneration++ })
@@ -121,7 +121,7 @@ onBeforeUnmount(() => { generation++; summaryGeneration++ })
 							<button type="button" class="btn btn-ghost" :disabled="loading" @click="reset">{{ t('usage.reset') }}</button>
 						</div>
 					</form>
-					<p v-if="lookupError" role="status" class="lookup-warning">{{ lookupError }}</p>
+					<output v-if="lookupError"  class="lookup-warning">{{ lookupError }}</output>
 					<p v-if="error" role="alert" class="notice notice-error">{{ error }}</p>
 					<UsageRecordsTable :rows="records" :loading="loading" :error="error" @detail="showDetail" />
 					<footer class="records-pagination"><span>{{ t('usage.pagination', { page, pages, total }) }}</span><div class="pagination-controls"><select v-model.number="limit" class="input page-size" :aria-label="t('usage.pageSize')" :disabled="loading" @change="resizePage"><option v-for="size in [25, 50, 100]" :key="size" :value="size">{{ size }} / {{ t('usage.pageSize') }}</option></select><button type="button" class="btn btn-ghost btn-icon" :title="t('usage.previous')" :aria-label="t('usage.previous')" :disabled="loading || offset === 0" @click="paginate(-1)"><ChevronLeft :size="16" /></button><span class="current-page">{{ page }}</span><button type="button" class="btn btn-ghost btn-icon" :title="t('usage.next')" :aria-label="t('usage.next')" :disabled="loading || offset + limit >= total" @click="paginate(1)"><ChevronRight :size="16" /></button></div></footer>

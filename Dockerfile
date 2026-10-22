@@ -5,7 +5,7 @@ ARG NODE_VERSION=24
 FROM --platform=$BUILDPLATFORM node:${NODE_VERSION}-bookworm-slim AS frontend
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
-RUN npm ci
+RUN npm ci --ignore-scripts
 COPY web/ ./
 RUN npm run typecheck && npm run check:i18n && npm run check:capture && npm run build
 
@@ -19,7 +19,9 @@ RUN go mod download
 COPY cmd/ ./cmd/
 COPY internal/ ./internal/
 COPY --from=frontend /src/internal/webui/dist/ ./internal/webui/dist/
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/pi-gateway ./cmd/pi-gateway
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
+    -ldflags="-s -w -X main.version=${VERSION}" \
+    -o /out/pi-gateway ./cmd/pi-gateway
 
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata \

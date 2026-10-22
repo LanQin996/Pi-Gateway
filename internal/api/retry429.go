@@ -69,130 +69,172 @@ func (s *Server) streamWith429RetryWindow(ctx context.Context, p *prepared, req 
 	excluded := map[int64]bool{}
 	var waitCtx context.Context
 	for attempt := 1; ; attempt++ {
-		mayRetry := attempt < attempts && p.Continuation == nil && p.PreviousResponseID == ""
+		mayRetry := p.canRetry429(attempt, attempts)
 		maySwitch := mayRetry && s.switchOn429(ctx, p)
-		delivered := false
-		var pending *upstream.Event
-		result, err := s.upstream.Stream(ctx, req, func(event *upstream.Event) error {
-			if mayRetry && !delivered {
-				if failure := upstream.FailureFromEvent(event); failure != nil && errorFromUpstream(failure).Status == 429 {
-					pending = event
-					return nil
-				}
-			}
-			delivered = true
-			return onEvent(event)
-		})
+		delivery := &retryDelivery{mayRetry: mayRetry, onEvent: onEvent}
+		result, err := s.upstream.Stream(ctx, req, delivery.onStreamEvent)
 		now := time.Now()
-		status := 200
-		message := ""
-		if err != nil {
-			status = errorFromUpstream(err).Status
-			message = err.Error()
-		}
-		if status == 429 && mayRetry && !maySwitch && !delivered && waitCtx == nil {
+		status, message := retryAttemptStatus(err)
+		if status == 429 && mayRetry && !maySwitch && !delivery.delivered && waitCtx == nil {
 			var cancelWait context.CancelFunc
 			waitCtx, cancelWait = context.WithTimeout(ctx, waitTimeout)
 			defer cancelWait()
 		}
-		recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		healthStatus := status
-		var failure *upstream.FailureError
-		if errors.As(err, &failure) && failure.OperationDenied {
-			healthStatus = 0
-		}
-		recordErr := s.accounts.RecordResult(recordCtx, p.Account.ID, accounts.Result{Failed: err != nil, StatusCode: healthStatus, RetryAfter: retryAfterDuration(p.ResponseHeaders, now), Error: message}, now)
-		cancel()
-		if recordErr != nil {
-			s.logger.Warn("recording account attempt failed", "account", p.Account.ID, "error", recordErr)
-		}
+		recordErr := s.recordRetryAttempt(ctx, p, err, status, message, now)
 		if ctx.Err() != nil {
 			return result, ctx.Err()
 		}
-		if err == nil || status != 429 || !mayRetry || delivered || (recordErr != nil && !maySwitch) {
-			if pending != nil {
-				if deliveryErr := onEvent(pending); deliveryErr != nil {
-					return result, deliveryErr
-				}
-			}
-			return result, err
+		if err == nil || status != 429 || !mayRetry || delivery.delivered || (recordErr != nil && !maySwitch) {
+			return result, delivery.finish(err)
 		}
-		if p.AccountRelease != nil {
-			p.AccountRelease()
-			p.AccountRelease = nil
-		}
-		var next *store.Account
-		var release func()
-		var acquireErr error
-		if maySwitch {
-			excluded[p.Account.ID] = true
-			next, release, acquireErr = s.accounts.AcquireExcluding(ctx, p.Key, p.Built.Model, "", excluded)
-		} else {
-			// Release first, then join the original account's FIFO queue. The
-			// manager rechecks current cooldown, concurrency and authorization.
-			next, release, acquireErr = s.accounts.AcquireRetry(waitCtx, p.Key, p.Account.ID, p.Built.Model)
-		}
+		next, release, acquireErr := s.acquireRetryAccount(ctx, waitCtx, p, maySwitch, excluded)
 		if acquireErr != nil {
-			if ctx.Err() != nil {
-				return result, ctx.Err()
-			}
-			if pending != nil {
-				if deliveryErr := onEvent(pending); deliveryErr != nil {
-					return result, deliveryErr
-				}
-			}
-			// A spent wait budget preserves the upstream 429 and retry headers.
-			return result, err
+			return result, delivery.finishAcquisition(ctx, err)
 		}
-		// Preserve a separate usage entry for the failed attempt before replaying.
-		if p.Usage != nil {
-			p.Usage.finalize(context.WithoutCancel(ctx), store.OutcomeError, message)
+		previousHeaders := s.prepareRetryAccount(ctx, p, next, release, message)
+		nextRequest, finalResult, finalErr, done := s.rebuildRetryRequest(ctx, p, maySwitch, waitCtx, previousHeaders, retryAttemptResult{result, err, delivery})
+		if done {
+			return finalResult, finalErr
 		}
-		_ = s.store.MarkAccountUsed(context.WithoutCancel(ctx), p.Account.ID, true)
-		p.Account, p.AccountRelease = next, release
-		p.Release = composeRelease(p.Release, release)
-		clientTransport := "sse"
-		if p.Usage != nil {
-			clientTransport = p.Usage.clientTransport
-		}
-		p.Transport = s.resolveTransport(s.settings.Get(), p.Key, next, clientTransport)
-		if p.Compact {
-			p.Transport = "sse"
-		}
-		previousHeaders := p.ResponseHeaders
-		p.ResponseHeaders = nil
-		p.RuleContext["account_id"], p.RuleContext["upstream_protocol"] = next.ID, p.Transport
-		if p.Recorder != nil {
-			p.Recorder.SetRoute(next.ID, next.Name, p.Built.Model, p.SessionID, p.Transport)
-		}
-		p.Usage = s.newUsageTracker(p.Key, next, p.Built.Model, clientTransport, p.Transport, p.SessionID, stringField(p.ClientBody, "service_tier"))
-		p.Usage.noteRequestMetadata(p.Built.JSON)
-		if p.Compact {
-			p.Usage.requestKind = "compaction"
-		}
-		s.startUsage(ctx, p.Usage)
-		buildCtx := ctx
-		if !maySwitch {
-			buildCtx = waitCtx
-		}
-		var buildErr error
-		req, buildErr = s.newUpstreamRequest(buildCtx, p)
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		if !maySwitch && waitCtx.Err() != nil {
-			// Token/rule preparation also must not send a replay after the
-			// shared deadline, or discard the last upstream retry metadata.
-			p.ResponseHeaders = previousHeaders
-			if pending != nil {
-				if deliveryErr := onEvent(pending); deliveryErr != nil {
-					return result, deliveryErr
-				}
-			}
-			return result, err
-		}
-		if buildErr != nil {
-			return nil, buildErr
+		req = nextRequest
+	}
+}
+
+type retryDelivery struct {
+	mayRetry, delivered bool
+	pending             *upstream.Event
+	onEvent             func(*upstream.Event) error
+}
+
+func (delivery *retryDelivery) onStreamEvent(event *upstream.Event) error {
+	if delivery.mayRetry && !delivery.delivered {
+		if failure := upstream.FailureFromEvent(event); failure != nil && errorFromUpstream(failure).Status == 429 {
+			delivery.pending = event
+			return nil
 		}
 	}
+	delivery.delivered = true
+	return delivery.onEvent(event)
+}
+
+func (s *Server) recordRetryAttempt(ctx context.Context, p *prepared, err error, status int, message string, now time.Time) error {
+	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	healthStatus := status
+	var failure *upstream.FailureError
+	if errors.As(err, &failure) && failure.OperationDenied {
+		healthStatus = 0
+	}
+	recordErr := s.accounts.RecordResult(recordCtx, p.Account.ID, accounts.Result{Failed: err != nil, StatusCode: healthStatus, RetryAfter: retryAfterDuration(p.ResponseHeaders, now), Error: message}, now)
+	cancel()
+	if recordErr != nil {
+		s.logger.Warn("recording account attempt failed", "account", p.Account.ID, "error", recordErr)
+	}
+	return recordErr
+}
+
+func (delivery *retryDelivery) finish(err error) error {
+	if delivery.pending != nil {
+		if deliveryErr := delivery.onEvent(delivery.pending); deliveryErr != nil {
+			return deliveryErr
+		}
+	}
+	return err
+}
+
+func (s *Server) acquireRetryAccount(ctx, waitCtx context.Context, p *prepared, maySwitch bool, excluded map[int64]bool) (*store.Account, func(), error) {
+	if p.AccountRelease != nil {
+		p.AccountRelease()
+		p.AccountRelease = nil
+	}
+	var next *store.Account
+	var release func()
+	var acquireErr error
+	if maySwitch {
+		excluded[p.Account.ID] = true
+		next, release, acquireErr = s.accounts.AcquireExcluding(ctx, p.Key, p.Built.Model, "", excluded)
+	} else {
+		// Release first, then join the original account's FIFO queue. The
+		// manager rechecks current cooldown, concurrency and authorization.
+		next, release, acquireErr = s.accounts.AcquireRetry(waitCtx, p.Key, p.Account.ID, p.Built.Model)
+	}
+	return next, release, acquireErr
+}
+
+func (s *Server) prepareRetryAccount(ctx context.Context, p *prepared, next *store.Account, release func(), message string) http.Header {
+	// Preserve a separate usage entry for the failed attempt before replaying.
+	if p.Usage != nil {
+		p.Usage.finalize(context.WithoutCancel(ctx), store.OutcomeError, message)
+	}
+	_ = s.store.MarkAccountUsed(context.WithoutCancel(ctx), p.Account.ID, true)
+	p.Account, p.AccountRelease = next, release
+	p.Release = composeRelease(p.Release, release)
+	clientTransport := "sse"
+	if p.Usage != nil {
+		clientTransport = p.Usage.clientTransport
+	}
+	p.Transport = s.resolveTransport(s.settings.Get(), p.Key, next, clientTransport)
+	if p.Compact {
+		p.Transport = "sse"
+	}
+	previousHeaders := p.ResponseHeaders
+	p.ResponseHeaders = nil
+	p.RuleContext["account_id"], p.RuleContext["upstream_protocol"] = next.ID, p.Transport
+	if p.Recorder != nil {
+		p.Recorder.SetRoute(next.ID, next.Name, p.Built.Model, p.SessionID, p.Transport)
+	}
+	p.Usage = s.newUsageTracker(p.Key, next, p.Built.Model, clientTransport, p.Transport, p.SessionID, stringField(p.ClientBody, "service_tier"))
+	p.Usage.noteRequestMetadata(p.Built.JSON)
+	if p.Compact {
+		p.Usage.requestKind = "compaction"
+	}
+	s.startUsage(ctx, p.Usage)
+	return previousHeaders
+}
+
+type retryAttemptResult struct {
+	result   *upstream.StreamResult
+	err      error
+	delivery *retryDelivery
+}
+
+func (s *Server) rebuildRetryRequest(ctx context.Context, p *prepared, maySwitch bool, waitCtx context.Context, previousHeaders http.Header, outcome retryAttemptResult) (*upstream.Request, *upstream.StreamResult, error, bool) {
+	buildCtx := ctx
+	if !maySwitch {
+		buildCtx = waitCtx
+	}
+	req, buildErr := s.newUpstreamRequest(buildCtx, p)
+	if ctx.Err() != nil {
+		return nil, nil, ctx.Err(), true
+	}
+	if !maySwitch && waitCtx.Err() != nil {
+		// Token/rule preparation also must not send a replay after the
+		// shared deadline, or discard the last upstream retry metadata.
+		p.ResponseHeaders = previousHeaders
+		return nil, outcome.result, outcome.delivery.finish(outcome.err), true
+	}
+	if buildErr != nil {
+		return nil, nil, buildErr, true
+	}
+	return req, nil, nil, false
+}
+
+func retryAttemptStatus(err error) (int, string) {
+	status := 200
+	message := ""
+	if err != nil {
+		status = errorFromUpstream(err).Status
+		message = err.Error()
+	}
+	return status, message
+}
+
+func (delivery *retryDelivery) finishAcquisition(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return delivery.finish(err)
+}
+
+func (p *prepared) canRetry429(attempt, attempts int) bool {
+	return attempt < attempts && p.Continuation == nil && p.PreviousResponseID == ""
 }

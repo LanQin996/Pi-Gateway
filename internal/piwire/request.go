@@ -77,27 +77,7 @@ func BuildRequest(client map[string]any, o BuildOptions) (*BuiltRequest, error) 
 	// ChatGPT rejects store:true for subscription accounts ("Store must be set to false").
 	body.Set("store", false)
 
-	if v, ok := client["service_tier"]; ok && v != nil {
-		body.Set("service_tier", v)
-	}
-	if tools, ok := client["tools"].([]any); ok && len(tools) > 0 {
-		body.Set("tools", tools)
-	}
-	if v, ok := client["tool_choice"]; ok && v != nil {
-		body.Set("tool_choice", v)
-	}
-
-	reasoning := buildReasoning(client, o)
-	if reasoning != nil {
-		body.Set("reasoning", reasoning)
-	}
-	// Pi requests encrypted reasoning whenever reasoning is used; an explicit client
-	// include list is preserved.
-	if v, ok := client["include"]; ok && v != nil {
-		body.Set("include", v)
-	} else if reasoning != nil {
-		body.Set("include", []any{IncludeReasoningEncrypted})
-	}
+	appendRequestOptions(body, client, o)
 
 	// previous_response_id is appended last, matching Pi's spread order. Unlike
 	// Pi's own client (which lets the transport own continuation state), the
@@ -107,22 +87,7 @@ func BuildRequest(client map[string]any, o BuildOptions) (*BuiltRequest, error) 
 		body.SetLast("previous_response_id", v)
 	}
 
-	// Preserve extensions and model-specific options, including false, null and
-	// nested values. Never restore a field already owned by normalisation.
-	var extraKeys []string
-	for field := range client {
-		switch field {
-		case "model", "input", "stream", "store", "prompt_cache_key", "service_tier", "tools", "tool_choice", "reasoning", "include", "previous_response_id", "type":
-			continue
-		}
-		if !isChatGPTRejectedField(field) {
-			extraKeys = append(extraKeys, field)
-		}
-	}
-	sort.Strings(extraKeys)
-	for _, field := range extraKeys {
-		body.Set(field, client[field])
-	}
+	appendRequestExtensions(body, client)
 	EnforcePiShape(body)
 
 	raw, err := json.Marshal(body)
@@ -300,4 +265,48 @@ func getNestedString(m map[string]any, outer, inner string) string {
 		return ""
 	}
 	return getString(obj, inner)
+}
+
+func appendRequestExtensions(body *OrderedMap, client map[string]any) {
+	// Preserve extensions and model-specific options, including false, null and
+	// nested values. Never restore a field already owned by normalisation.
+	var extraKeys []string
+	for field := range client {
+		switch field {
+		case "model", "input", "stream", "store", "prompt_cache_key", "service_tier", "tools", "tool_choice", "reasoning", "include", "previous_response_id", "type":
+			continue
+		}
+		if !isChatGPTRejectedField(field) {
+			extraKeys = append(extraKeys, field)
+		}
+	}
+	sort.Strings(extraKeys)
+	for _, field := range extraKeys {
+		body.Set(field, client[field])
+	}
+}
+
+func appendRequestOptions(body *OrderedMap, client map[string]any, o BuildOptions) {
+	if v, ok := client["service_tier"]; ok && v != nil {
+		body.Set("service_tier", v)
+	}
+	if tools, ok := client["tools"].([]any); ok && len(tools) > 0 {
+		body.Set("tools", tools)
+	}
+	if v, ok := client["tool_choice"]; ok && v != nil {
+		body.Set("tool_choice", v)
+	}
+
+	reasoning := buildReasoning(client, o)
+	if reasoning != nil {
+		body.Set("reasoning", reasoning)
+	}
+	// Pi requests encrypted reasoning whenever reasoning is used; an explicit client
+	// include list is preserved.
+	if v, ok := client["include"]; ok && v != nil {
+		body.Set("include", v)
+	} else if reasoning != nil {
+		body.Set("include", []any{IncludeReasoningEncrypted})
+	}
+
 }

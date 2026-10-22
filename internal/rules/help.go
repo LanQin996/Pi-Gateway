@@ -30,18 +30,21 @@ func fieldExamples(f FieldSpec) []any {
 		if f.Name == "value" && f.Label == "表达式 / Expression" {
 			return []any{expr("eq", 1, 1)}
 		}
-		return []any{map[string]any{"enabled": true}, refExpr("client", "/metadata"), expr("length", refExpr("current", "/input"))}
+		return []any{map[string]any{"enabled": true}, refExpr("client", "/metadata"), expr("length", refExpr("current", inputPointer))}
 	case "value_array":
 		return []any{[]any{"hello", 42}}
 	case "string_array":
 		return []any{[]any{"metadata", "truncation"}}
 	case "condition":
-		return []any{map[string]any{"op": "type", "source": "current", "path": "/input", "value": "array"}}
+		return []any{map[string]any{"op": "type", "source": "current", "path": inputPointer, "value": "array"}}
 	case "condition_array":
 		return []any{[]any{map[string]any{"op": "exists", "path": "/metadata"}}}
 	case "action_array":
 		return []any{[]any{map[string]any{"id": "set-value", "type": "json_set", "params": map[string]any{"path": "/metadata/policy", "value": "example", "create_parents": true}}}}
 	}
+	return defaultFieldExamples(f)
+}
+func defaultFieldExamples(f FieldSpec) []any {
 	if f.Default != nil {
 		if s, ok := f.Default.(string); ok && s != "" {
 			return []any{s}
@@ -116,10 +119,10 @@ func computedCapabilities() []Capability {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	cap := Capability{ID: "computed", Label: "计算值 / Computed value", Description: "{$expr:{op,args}}；所有参数支持嵌套引用与计算；对象使用 object 的键值对数组构造，普通 JSON 对象永远是字面量。", Phases: phases, Fields: []FieldSpec{field("op", "string", "运算 / Operator", "get 动态 JSON Pointer；index 读取数组下标；object 为键值对；regex_replace 的三个参数为原文、RE2 模式、替换值。", nil, true, names...), field("args", "value_array", "参数 / Arguments", "参数按顺序求值；and/or/coalesce 短路；不存在与 null 区分。", nil, true)}}
+	capability := Capability{ID: "computed", Label: "计算值 / Computed value", Description: "{$expr:{op,args}}；所有参数支持嵌套引用与计算；对象使用 object 的键值对数组构造，普通 JSON 对象永远是字面量。", Phases: phases, Fields: []FieldSpec{field("op", "string", "运算 / Operator", "get 动态 JSON Pointer；index 读取数组下标；object 为键值对；regex_replace 的三个参数为原文、RE2 模式、替换值。", nil, true, names...), field("args", "value_array", "参数 / Arguments", "参数按顺序求值；and/or/coalesce 短路；不存在与 null 区分。", nil, true)}}
 	for _, name := range names {
-		cap.Fields[0].EnumHelp[name] = expressionHelp(name)
+		capability.Fields[0].EnumHelp[name] = expressionHelp(name)
 	}
-	cap.Fields[1].Examples = []any{[]any{refExpr("current", "/input"), "\n"}, []any{refExpr("current", "/model"), "example-model"}}
-	return []Capability{cap}
+	capability.Fields[1].Examples = []any{[]any{refExpr("current", inputPointer), "\n"}, []any{refExpr("current", "/model"), "example-model"}}
+	return []Capability{capability}
 }

@@ -42,14 +42,15 @@ interface DisplayPayload {
 }
 
 /** Header names and ordering are insignificant; duplicate values remain significant. */
-export function normalizeHeaders(headers: Array<{ name: string; value: string }>): unknown {
+export function normalizeHeaders(headers: Array<{name: string; value: string}>): unknown {
     return headers
         .map(({name, value}) => ({name: name.toLowerCase(), value}))
         .sort((left, right) => compareText(left.name, right.name) || compareText(left.value, right.value))
 }
 
 function compareText(left: string, right: string): number {
-    return left < right ? -1 : left > right ? 1 : 0
+    if (left < right) return -1
+    return left > right ? 1 : 0
 }
 
 function crop(text: string, limit: number): string {
@@ -139,6 +140,10 @@ function preparePayload(input: unknown, orders?: Map<string, string[]>, canonica
                 stop('… [unsupported value]')
         }
 
+        visitContainer(current, depth, path)
+    }
+
+    function visitContainer(current: object, depth: number, path: string): void {
         if (ancestors.has(current)) stop('… [circular value]')
         const array = Array.isArray(current)
         if (!array) {
@@ -149,17 +154,16 @@ function preparePayload(input: unknown, orders?: Map<string, string[]>, canonica
         const keys = array ? undefined : Object.keys(current)
         const count = array ? ownValue(current, 'length') as number : keys!.length
         if (count > MAX_VALUES - visited) stop()
-        if (keys) {
-            if (canonical) keys.sort()
-            else if (orders) {
-                const previous = orders.get(path)
-                if (previous) {
-                    const ranks = new Map(previous.map((key, index) => [key, index]))
-                    keys.sort((a, b) => (ranks.get(a) ?? Infinity) - (ranks.get(b) ?? Infinity))
-                } else orders.set(path, [...keys])
-            }
-        }
+        if (keys) orderKeys(keys, path)
         append(array ? '[' : '{')
+        visitEntries(current, keys, count, depth, path)
+        if (count > 0) append('\n' + '  '.repeat(depth))
+        append(array ? ']' : '}')
+        ancestors.delete(current)
+    }
+
+    function visitEntries(current: object, keys: string[] | undefined, count: number, depth: number, path: string): void {
+        const array = keys === undefined
         for (let index = 0; index < count; index++) {
             append(index === 0 ? '\n' : ',\n')
             append('  '.repeat(depth + 1))
@@ -168,11 +172,20 @@ function preparePayload(input: unknown, orders?: Map<string, string[]>, canonica
                 quoted(key)
                 append(': ')
             }
-            visit(ownValue(current, key), depth + 1, path + "/" + key.replace(/~/g, "~0").replace(/\//g, "~1"))
+            visit(ownValue(current, key), depth + 1, path + "/" + key.replaceAll("~", "~0").replaceAll("/", "~1"))
         }
-        if (count > 0) append('\n' + '  '.repeat(depth))
-        append(array ? ']' : '}')
-        ancestors.delete(current)
+    }
+
+    function orderKeys(keys: string[], path: string): void {
+        if (canonical) keys.sort((a, b) => a.localeCompare(b) || compareText(a, b))
+        else if (orders) {
+            const previous = orders.get(path)
+            if (previous) {
+                const ranks = new Map(previous.map((key, index) => [key, index]))
+                keys.sort((a, b) => (ranks.get(a) ?? Infinity) - (ranks.get(b) ?? Infinity))
+            } else orders.set(path, [...keys])
+        }
+
     }
 
     try {
@@ -273,10 +286,18 @@ export function diffPayloads(before: unknown, after: unknown): DiffResult {
     while (
         suffix < a.length - prefix && suffix < b.length - prefix
         && a[a.length - suffix - 1]!.text === b[b.length - suffix - 1]!.text
-        ) suffix++
+    ) suffix++
 
     const lines: DiffLine[] = []
     for (let index = 0; index < prefix; index++) lines.push(contextLine(a[index]!, b[index]!))
+    appendEditLines(a, b, prefix, suffix, lines)
+    for (let index = suffix; index > 0; index--) lines.push(contextLine(a[a.length - index]!, b[b.length - index]!))
+    // Defensive: identical previews must never turn an unproven comparison into equality.
+    if (!lines.some((line) => line.kind !== 'context')) return replacement(a, b)
+    return result(false, lines, false)
+}
+
+function appendEditLines(a: DisplayLine[], b: DisplayLine[], prefix: number, suffix: number, lines: DiffLine[]): void {
     let row = prefix, column = prefix
     const edits = diffArrays(a.slice(prefix, a.length - suffix).map(line => line.text), b.slice(prefix, b.length - suffix).map(line => line.text))
     for (const edit of edits) {
@@ -288,8 +309,5 @@ export function diffPayloads(before: unknown, after: unknown): DiffResult {
             } else lines.push(contextLine(a[row++]!, b[column++]!))
         }
     }
-    for (let index = suffix; index > 0; index--) lines.push(contextLine(a[a.length - index]!, b[b.length - index]!))
-    // Defensive: identical previews must never turn an unproven comparison into equality.
-    if (!lines.some((line) => line.kind !== 'context')) return replacement(a, b)
-    return result(false, lines, false)
+
 }

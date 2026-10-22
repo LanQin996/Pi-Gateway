@@ -111,95 +111,112 @@ func boundValue(v any, path string) (any, bool) {
 	}
 	return redact(v), false
 }
+
+type structuralDiffer struct {
+	changes []Change
+	omitted int
+}
+
 func structuralDiff(before, after any) ([]Change, int) {
-	out := []Change{}
-	omitted := 0
-	add := func(c Change) {
-		if len(out) >= MaxTraceChanges {
-			omitted++
-			return
-		}
-		out = append(out, c)
+	differ := structuralDiffer{changes: []Change{}}
+	differ.walk(before, after, "")
+	return differ.changes, differ.omitted
+}
+
+func (d *structuralDiffer) add(change Change) {
+	if len(d.changes) >= MaxTraceChanges {
+		d.omitted++
+		return
 	}
-	var walk func(any, any, string)
-	walk = func(a, b any, path string) {
-		if jsonEqual(a, b) {
-			return
-		}
-		_, aok := object(a)
-		_, bok := object(b)
-		if aok && bok {
-			seen := map[string]bool{}
-			for _, k := range keys(a) {
-				seen[k] = true
-				av, _ := objGet(a, k)
-				bv, be := objGet(b, k)
-				p := joinPointer(path, k)
-				if !be {
-					add(Change{Path: p, Operation: "remove", BeforeExists: true, Before: av})
-					continue
-				}
-				walk(av, bv, p)
-			}
-			for _, k := range keys(b) {
-				if !seen[k] {
-					bv, _ := objGet(b, k)
-					add(Change{Path: joinPointer(path, k), Operation: "add", AfterExists: true, After: bv})
-				}
-			}
-			return
-		}
-		aa, aok := a.([]any)
-		bb, bok := b.([]any)
-		if aok && bok {
-			i, j := 0, 0
-			for i < len(aa) && j < len(bb) {
-				if jsonEqual(aa[i], bb[j]) {
-					i++
-					j++
-					continue
-				}
-				// Align surviving messages after deletions/insertions instead of
-				// reporting every following message as a replacement.
-				left, right := -1, -1
-				for k := i + 1; k < len(aa); k++ {
-					if jsonEqual(aa[k], bb[j]) {
-						left = k
-						break
-					}
-				}
-				for k := j + 1; k < len(bb); k++ {
-					if jsonEqual(aa[i], bb[k]) {
-						right = k
-						break
-					}
-				}
-				if left >= 0 && (right < 0 || left-i <= right-j) {
-					for i < left {
-						add(Change{Path: fmt.Sprintf("%s/%d", path, i), Operation: "remove", BeforeExists: true, Before: aa[i]})
-						i++
-					}
-				} else if right >= 0 {
-					for j < right {
-						add(Change{Path: fmt.Sprintf("%s/%d", path, j), Operation: "add", AfterExists: true, After: bb[j]})
-						j++
-					}
-				} else {
-					walk(aa[i], bb[j], fmt.Sprintf("%s/%d", path, j))
-					i++
-					j++
-				}
-			}
-			for ; i < len(aa); i++ {
-				add(Change{Path: fmt.Sprintf("%s/%d", path, i), Operation: "remove", BeforeExists: true, Before: aa[i]})
-			}
-			for ; j < len(bb); j++ {
-				add(Change{Path: fmt.Sprintf("%s/%d", path, j), Operation: "add", AfterExists: true, After: bb[j]})
-			}
-			return
-		}
-		add(Change{Path: path, Operation: "replace", BeforeExists: true, AfterExists: true, Before: a, After: b})
+	d.changes = append(d.changes, change)
+}
+
+func (d *structuralDiffer) walk(a, b any, path string) {
+	if jsonEqual(a, b) {
+		return
 	}
-	walk(before, after, "")
-	return out, omitted
+	_, aObject := object(a)
+	_, bObject := object(b)
+	if aObject && bObject {
+		d.objects(a, b, path)
+		return
+	}
+	aa, aArray := a.([]any)
+	bb, bArray := b.([]any)
+	if aArray && bArray {
+		d.arrays(aa, bb, path)
+		return
+	}
+	d.add(Change{Path: path, Operation: "replace", BeforeExists: true, AfterExists: true, Before: a, After: b})
+}
+
+func (d *structuralDiffer) objects(a, b any, path string) {
+	seen := map[string]bool{}
+	for _, key := range keys(a) {
+		seen[key] = true
+		av, _ := objGet(a, key)
+		bv, exists := objGet(b, key)
+		childPath := joinPointer(path, key)
+		if !exists {
+			d.add(Change{Path: childPath, Operation: "remove", BeforeExists: true, Before: av})
+			continue
+		}
+		d.walk(av, bv, childPath)
+	}
+	for _, key := range keys(b) {
+		if seen[key] {
+			continue
+		}
+		value, _ := objGet(b, key)
+		d.add(Change{Path: joinPointer(path, key), Operation: "add", AfterExists: true, After: value})
+	}
+}
+
+func nextEqual(values []any, start int, target any) int {
+	for index := start; index < len(values); index++ {
+		if jsonEqual(values[index], target) {
+			return index
+		}
+	}
+	return -1
+}
+
+func (d *structuralDiffer) removeArrayRange(values []any, start, end int, path string) {
+	for index := start; index < end; index++ {
+		d.add(Change{Path: fmt.Sprintf("%s/%d", path, index), Operation: "remove", BeforeExists: true, Before: values[index]})
+	}
+}
+
+func (d *structuralDiffer) addArrayRange(values []any, start, end int, path string) {
+	for index := start; index < end; index++ {
+		d.add(Change{Path: fmt.Sprintf("%s/%d", path, index), Operation: "add", AfterExists: true, After: values[index]})
+	}
+}
+
+func (d *structuralDiffer) arrays(before, after []any, path string) {
+	i, j := 0, 0
+	for i < len(before) && j < len(after) {
+		if jsonEqual(before[i], after[j]) {
+			i++
+			j++
+			continue
+		}
+		// Align surviving messages after edits rather than replacing every later item.
+		left := nextEqual(before, i+1, after[j])
+		right := nextEqual(after, j+1, before[i])
+		switch {
+		case left >= 0 && (right < 0 || left-i <= right-j):
+			d.removeArrayRange(before, i, left, path)
+			i = left
+		case right >= 0:
+			d.addArrayRange(after, j, right, path)
+			j = right
+		default:
+			d.walk(before[i], after[j], fmt.Sprintf("%s/%d", path, j))
+			i++
+			j++
+		}
+	}
+	d.removeArrayRange(before, i, len(before), path)
+	d.addArrayRange(after, j, len(after), path)
 }

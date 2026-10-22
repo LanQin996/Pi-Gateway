@@ -419,7 +419,7 @@ export type {
     RuleSchema,
     RuleCondition,
     RuleAction,
-    ValueExpr,
+    JsonValue,
     RuleFieldError,
     RuleList,
     RuleSimulationRequest,

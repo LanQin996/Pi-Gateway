@@ -79,6 +79,10 @@ func run() error {
 		return checkHealth(context.Background(), cfg.Server.Host, cfg.Server.Port)
 	}
 
+	return runGateway(cfg)
+}
+
+func runGateway(cfg *config.Config) error {
 	logger, closeLog, err := logging.Setup(cfg.Logging.Level, cfg.Logging.File)
 	if err != nil {
 		return err
@@ -117,18 +121,8 @@ func run() error {
 		return err
 	}
 
-	if err := seedMiddlewares(rootCtx, st, logger); err != nil {
+	if err := initializeRules(rootCtx, st, logger); err != nil {
 		return err
-	}
-	// Publish the legacy middleware configuration exactly once. The data plane
-	// only runs the immutable rule snapshot after this succeeds.
-	if err := rulesruntime.New(st).Ensure(rootCtx); err != nil {
-		if !errors.Is(err, rulesruntime.ErrMigration) {
-			return fmt.Errorf("initialize rules: %w", err)
-		}
-		// Keep the admin repair path and unchanged legacy chain available. Never
-		// turn an unconvertible policy into an empty, permissive new rule set.
-		logger.Error("rule migration requires repair; retaining legacy middleware", "error", err)
 	}
 
 	factory := egress.NewFactory(egress.Options{
@@ -164,62 +158,7 @@ func run() error {
 		Timeout:      time.Duration(cfg.OAuth.TimeoutSeconds) * time.Second,
 		DeviceID:     func() string { return deviceUUID },
 		Logger:       logger,
-		OnComplete: func(flow *oauth.Flow, tok *oauth.Token) error {
-			name, proxyURL, accountRef := "", "", ""
-			if flow.Meta != nil {
-				name = flow.Meta["name"]
-				proxyURL = flow.Meta["proxy_url"]
-				accountRef = flow.Meta["account_id"]
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-
-			if flow.Kind == oauth.FlowKindCodex {
-				if accountRef == "" {
-					return errors.New("codex credential finished without a target account")
-				}
-				id, parseErr := strconv.ParseInt(accountRef, 10, 64)
-				if parseErr != nil {
-					return fmt.Errorf("codex credential target account id %q is invalid: %w", accountRef, parseErr)
-				}
-				acc, findErr := st.GetAccount(ctx, id)
-				if findErr != nil {
-					return fmt.Errorf("codex credential target account lookup failed: %w", findErr)
-				}
-				if acc == nil {
-					return fmt.Errorf("codex credential target account %s was not found", accountRef)
-				}
-				if linkErr := accountsMgr.LinkCodexCredential(ctx, acc, tok); linkErr != nil {
-					return fmt.Errorf("linking the codex credential failed: %w", linkErr)
-				}
-				flow.DBAccountID = acc.ID
-				logger.Info("codex credential linked", "account", acc.Name)
-				return nil
-			}
-
-			if accountRef != "" {
-				id, err := strconv.ParseInt(accountRef, 10, 64)
-				if err != nil {
-					return errors.New("invalid ChatGPT target account")
-				}
-				acc, err := st.GetAccount(ctx, id)
-				if err != nil || acc == nil {
-					return errors.New("ChatGPT target account not found")
-				}
-				if err := accountsMgr.LinkChatGPTCredential(ctx, acc, tok); err != nil {
-					return err
-				}
-				flow.DBAccountID = acc.ID
-				return nil
-			}
-			acc, err := accountsMgr.CreateFromToken(ctx, name, tok, proxyURL)
-			if err != nil {
-				return fmt.Errorf("persisting the authorized account failed: %w", err)
-			}
-			flow.DBAccountID = acc.ID
-			logger.Info("account authorized", "account", acc.Name, "account_id", acc.AccountID, "plan", acc.PlanType)
-			return nil
-		},
+		OnComplete:   (&oauthCompletion{st: st, accounts: accountsMgr, logger: logger}).complete,
 	})
 
 	compactionKey, err := st.CompactionKey(rootCtx)
@@ -252,13 +191,8 @@ func run() error {
 		BaseURL:         quota.CodexBaseURL,
 		OfficialBaseURL: quota.CodexBaseURL,
 		Originator:      cfg.Upstream.Originator,
-		UserAgentFunc: func() string {
-			if rt := settingsHolder.Get(); rt != nil && rt.UserAgent != "" {
-				return rt.UserAgent
-			}
-			return cfg.Upstream.UserAgent
-		},
-		Timeout: 20 * time.Second,
+		UserAgentFunc:   quotaUserAgent(settingsHolder, cfg.Upstream.UserAgent),
+		Timeout:         20 * time.Second,
 	}, factory, logger))
 
 	accountsMgr.StartRefresher(rootCtx,
@@ -582,5 +516,99 @@ func runUsageMaintenance(ctx context.Context, st *store.Store, holder *settings.
 			reconcile()
 			prune()
 		}
+	}
+}
+
+type oauthCompletion struct {
+	st       *store.Store
+	accounts *accounts.Manager
+	logger   *slog.Logger
+}
+
+func (h *oauthCompletion) complete(flow *oauth.Flow, tok *oauth.Token) error {
+	name, proxyURL, accountRef := "", "", ""
+	if flow.Meta != nil {
+		name = flow.Meta["name"]
+		proxyURL = flow.Meta["proxy_url"]
+		accountRef = flow.Meta["account_id"]
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if flow.Kind == oauth.FlowKindCodex {
+		return h.linkCodex(ctx, flow, tok, accountRef)
+	}
+
+	if accountRef != "" {
+		id, err := strconv.ParseInt(accountRef, 10, 64)
+		if err != nil {
+			return errors.New("invalid ChatGPT target account")
+		}
+		acc, err := h.st.GetAccount(ctx, id)
+		if err != nil || acc == nil {
+			return errors.New("ChatGPT target account not found")
+		}
+		if err := h.accounts.LinkChatGPTCredential(ctx, acc, tok); err != nil {
+			return err
+		}
+		flow.DBAccountID = acc.ID
+		return nil
+	}
+	acc, err := h.accounts.CreateFromToken(ctx, name, tok, proxyURL)
+	if err != nil {
+		return fmt.Errorf("persisting the authorized account failed: %w", err)
+	}
+	flow.DBAccountID = acc.ID
+	h.logger.Info("account authorized", "account", acc.Name, "account_id", acc.AccountID, "plan", acc.PlanType)
+	return nil
+}
+
+func (h *oauthCompletion) linkCodex(ctx context.Context, flow *oauth.Flow, tok *oauth.Token, accountRef string) error {
+	if accountRef == "" {
+		return errors.New("codex credential finished without a target account")
+	}
+	id, parseErr := strconv.ParseInt(accountRef, 10, 64)
+	if parseErr != nil {
+		return fmt.Errorf("codex credential target account id %q is invalid: %w", accountRef, parseErr)
+	}
+	acc, findErr := h.st.GetAccount(ctx, id)
+	if findErr != nil {
+		return fmt.Errorf("codex credential target account lookup failed: %w", findErr)
+	}
+	if acc == nil {
+		return fmt.Errorf("codex credential target account %s was not found", accountRef)
+	}
+	if linkErr := h.accounts.LinkCodexCredential(ctx, acc, tok); linkErr != nil {
+		return fmt.Errorf("linking the codex credential failed: %w", linkErr)
+	}
+	flow.DBAccountID = acc.ID
+	h.logger.Info("codex credential linked", "account", acc.Name)
+	return nil
+}
+
+func initializeRules(ctx context.Context, st *store.Store, logger *slog.Logger) error {
+	if err := seedMiddlewares(ctx, st, logger); err != nil {
+		return err
+	}
+	// Publish the legacy middleware configuration exactly once. The data plane
+	// only runs the immutable rule snapshot after this succeeds.
+	if err := rulesruntime.New(st).Ensure(ctx); err != nil {
+		if !errors.Is(err, rulesruntime.ErrMigration) {
+			return fmt.Errorf("initialize rules: %w", err)
+		}
+		// Keep the admin repair path and unchanged legacy chain available. Never
+		// turn an unconvertible policy into an empty, permissive new rule set.
+		logger.Error("rule migration requires repair; retaining legacy middleware", "error", err)
+	}
+
+	return nil
+}
+
+func quotaUserAgent(holder *settings.Holder, fallback string) func() string {
+	return func() string {
+		if rt := holder.Get(); rt != nil && rt.UserAgent != "" {
+			return rt.UserAgent
+		}
+		return fallback
 	}
 }

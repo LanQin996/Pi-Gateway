@@ -10,15 +10,15 @@ const diffDependencyURL = pathToFileURL(createRequire(import.meta.url).resolve('
 
 // Mount the real Vue SFCs with a minimal in-memory host. No browser, stubs of the
 // trace component, network calls, generated files or new dependencies are needed.
-const asModule = source => `data:text/javascript;base64,${Buffer.from(source.replace("from 'diff'", `from '${diffDependencyURL}'`)).toString('base64')}`
+const asModule = source => `data:text/javascript;base64,${Buffer.from(source.replace("from 'diff'", "from '" + diffDependencyURL + "'")).toString('base64')}`
 const transpile = source => ts.transpileModule(source, {
     compilerOptions: {
         target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.ES2020,
     }
 }).outputText
 const translationsURL = asModule(transpile(readFileSync(new URL('./src/i18n/captureRulesMessages.ts', import.meta.url), 'utf8')))
-const localeURL = asModule(`import {captureRulesEn as messages} from '${translationsURL}';
-export const useI18n = () => ({locale: {value:'en-US'}, t: (key, params={}) => (messages[key] ?? key).replace(/\\{(\\w+)\\}/g, (_,name) => String(params[name] ?? ''))});`)
+const localeURL = asModule(String.raw`import {captureRulesEn as messages} from '${translationsURL}';
+export const useI18n = () => ({locale: {value:'en-US'}, t: (key, params={}) => (messages[key] ?? key).replace(/\{(\w+)\}/g, (_,name) => String(params[name] ?? ''))});`)
 const modules = new Map()
 
 async function compileModule(url) {
@@ -34,7 +34,7 @@ async function compileModule(url) {
     for (const match of imports) {
         const specifier = match[2]
         let replacement
-        if (/\/i18n$/.test(specifier)) replacement = localeURL
+        if (specifier.endsWith('/i18n')) replacement = localeURL
         else if (specifier.startsWith('.')) {
             let resolved = new URL(specifier, url)
             if (!existsSync(resolved)) resolved = new URL(`${specifier}.ts`, url)

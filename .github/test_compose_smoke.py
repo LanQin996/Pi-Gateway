@@ -10,7 +10,8 @@ import time
 import unittest
 from urllib.error import URLError
 
-from compose_smoke import Probe
+from compose_smoke import Probe, state_path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -85,6 +86,22 @@ class ComposeProbeTest(unittest.TestCase):
         for url in ("https://127.0.0.1", "http://example.com", "http://127.0.0.1/admin"):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 Probe(url, "unused")
+
+
+class StatePathTest(unittest.TestCase):
+    def test_confines_state_to_runner_temp(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"RUNNER_TEMP": directory}):
+            root = Path(directory)
+            accepted = root / "pi-gateway-ci-test.json"
+            self.assertEqual(state_path(accepted), accepted.resolve())
+            for candidate in (root / "secret.json", root / ".." / accepted.name, root / "subdir" / accepted.name):
+                with self.subTest(path=candidate), self.assertRaises((ValueError, FileNotFoundError)):
+                    state_path(candidate)
+            target = root / "target"
+            target.write_text("private", encoding="utf-8")
+            accepted.symlink_to(target)
+            with self.assertRaisesRegex(ValueError, "symbolic link"):
+                state_path(accepted)
 
 
 if __name__ == "__main__":

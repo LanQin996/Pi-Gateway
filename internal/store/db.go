@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
-	_ "modernc.org/sqlite"
+	_ "github.com/jackc/pgx/v5/stdlib" // Registers the PostgreSQL database/sql driver.
+	_ "modernc.org/sqlite"             // Registers the SQLite database/sql driver.
 )
 
 // Store wraps a database/sql pool and exposes typed data access.
@@ -46,41 +46,13 @@ func OpenOptions(opts Options) (*Store, error) {
 	if opts.MaxOpenConns < 0 || opts.MaxIdleConns < 0 || opts.ConnMaxLifetime < 0 {
 		return nil, errors.New("store: connection pool options must not be negative")
 	}
-	driver := strings.ToLower(strings.TrimSpace(opts.Driver))
-	if driver == "" {
-		driver = "sqlite"
+	driver, err := normalizeStoreDriver(opts.Driver)
+	if err != nil {
+		return nil, err
 	}
-	if driver == "postgresql" || driver == "pgx" {
-		driver = "postgres"
-	}
-	if driver != "sqlite" && driver != "postgres" {
-		return nil, fmt.Errorf("store: unsupported database driver %q", opts.Driver)
-	}
-	path, dsn, sqlDriver := opts.Path, opts.DSN, "pgx"
-	if driver == "postgres" {
-		if strings.TrimSpace(dsn) == "" {
-			return nil, errors.New("store: PostgreSQL requires a DSN")
-		}
-	} else {
-		sqlDriver = "sqlite"
-		if dsn != "" {
-			path = dsn
-		}
-		if strings.TrimSpace(path) == "" {
-			return nil, errors.New("store: empty database path")
-		}
-		if !strings.HasPrefix(path, "file:") && path != ":memory:" {
-			if dir := filepath.Dir(strings.SplitN(path, "?", 2)[0]); dir != "" && dir != "." {
-				if err := os.MkdirAll(dir, 0755); err != nil {
-					return nil, fmt.Errorf("store: create data dir: %w", err)
-				}
-			}
-		}
-		separator := "?"
-		if strings.Contains(path, "?") {
-			separator = "&"
-		}
-		dsn = path + separator + "_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)"
+	path, dsn, sqlDriver, err := storeDataSource(opts, driver)
+	if err != nil {
+		return nil, err
 	}
 	db, err := sql.Open(sqlDriver, dsn)
 	if err != nil {
@@ -97,7 +69,7 @@ func OpenOptions(opts Options) (*Store, error) {
 	if maxIdle == 0 {
 		maxIdle = 8
 	}
-	memorySQLite := driver == "sqlite" && (strings.HasPrefix(path, ":memory:") || strings.Contains(path, "mode=memory") || strings.HasPrefix(path, "file::memory:"))
+	memorySQLite := driver == "sqlite" && sqliteMemorySource(path)
 	lifetime := opts.ConnMaxLifetime
 	if memorySQLite {
 		// A memory database belongs to one connection; expiring it destroys its schema.
@@ -130,7 +102,7 @@ func OpenOptions(opts Options) (*Store, error) {
 
 // sqliteBackupPath strips connection parameters from on-disk snapshot filenames.
 func sqliteBackupPath(dsn string) string {
-	if strings.HasPrefix(dsn, ":memory:") || strings.Contains(dsn, "mode=memory") || strings.HasPrefix(dsn, "file::memory:") {
+	if sqliteMemorySource(dsn) {
 		return ""
 	}
 	if strings.HasPrefix(dsn, "file:") {
@@ -485,50 +457,53 @@ func (s *Store) migrateOnce() error {
 func additiveColumns() map[string]map[string]string {
 	return map[string]map[string]string{
 		"api_keys": {
-			"label":               "TEXT NOT NULL DEFAULT ''",
-			"max_concurrency":     "INTEGER NOT NULL DEFAULT 0",
-			"requests_per_minute": "INTEGER NOT NULL DEFAULT 0",
-			"daily_limit_usd":     "REAL NOT NULL DEFAULT 0",
-			"weekly_limit_usd":    "REAL NOT NULL DEFAULT 0",
+			"label":               textEmptyColumn,
+			"max_concurrency":     integerZeroColumn,
+			"requests_per_minute": integerZeroColumn,
+			"daily_limit_usd":     realZeroColumn,
+			"weekly_limit_usd":    realZeroColumn,
 		},
 		"captures": {
-			"rule_traces":           "TEXT NOT NULL DEFAULT '[]'",
-			"rules_version":         "INTEGER NOT NULL DEFAULT 0",
-			"rules_trace_truncated": "INTEGER NOT NULL DEFAULT 0",
-			"rules_trace_omitted":   "INTEGER NOT NULL DEFAULT 0",
+			"rule_traces":           textArrayColumn,
+			"rules_version":         integerZeroColumn,
+			"rules_trace_truncated": integerZeroColumn,
+			"rules_trace_omitted":   integerZeroColumn,
 		},
-		"usage_records":         {"request_kind": "TEXT NOT NULL DEFAULT ''", "reasoning_effort": "TEXT NOT NULL DEFAULT ''", "requested_service_tier": "TEXT NOT NULL DEFAULT ''", "service_tier": "TEXT NOT NULL DEFAULT ''", "billing_details": "TEXT NOT NULL DEFAULT ''"},
+		"usage_records":         {"request_kind": textEmptyColumn, "reasoning_effort": textEmptyColumn, "requested_service_tier": textEmptyColumn, "service_tier": textEmptyColumn, "billing_details": textEmptyColumn},
 		"account_model_catalog": {"source_catalogs_json": "TEXT NOT NULL DEFAULT '{}'"},
-		"account_groups":        {"disabled_models": "TEXT NOT NULL DEFAULT '[]'", "switch_on_429": "TEXT NOT NULL DEFAULT 'inherit'"},
+		"account_groups":        {"disabled_models": textArrayColumn, "switch_on_429": "TEXT NOT NULL DEFAULT 'inherit'"},
 		"accounts": {
 			"cooldown_429_seconds": "INTEGER NOT NULL DEFAULT -1",
-			"disabled_models":      "TEXT NOT NULL DEFAULT '[]'",
-			"supplemental_models":  "TEXT NOT NULL DEFAULT '[]'",
+			"disabled_models":      textArrayColumn,
+			"supplemental_models":  textArrayColumn,
 			"proxy_id":             "INTEGER REFERENCES proxies(id) ON DELETE RESTRICT",
-			"consecutive_failures": "INTEGER NOT NULL DEFAULT 0",
-			"cooldown_until":       "INTEGER NOT NULL DEFAULT 0",
-			"cooldown_kind":        "TEXT NOT NULL DEFAULT ''",
-			"last_started_at":      "INTEGER NOT NULL DEFAULT 0",
-			"ewma_first_output_ms": "REAL NOT NULL DEFAULT 0",
-			"ewma_failure_rate_bp": "INTEGER NOT NULL DEFAULT 0",
-			"quota_json":           "TEXT NOT NULL DEFAULT ''",
-			"quota_updated_at":     "INTEGER NOT NULL DEFAULT 0",
-			"quota_error":          "TEXT NOT NULL DEFAULT ''",
+			"consecutive_failures": integerZeroColumn,
+			"cooldown_until":       integerZeroColumn,
+			"cooldown_kind":        textEmptyColumn,
+			"last_started_at":      integerZeroColumn,
+			"ewma_first_output_ms": realZeroColumn,
+			"ewma_failure_rate_bp": integerZeroColumn,
+			"quota_json":           textEmptyColumn,
+			"quota_updated_at":     integerZeroColumn,
+			"quota_error":          textEmptyColumn,
 			// Modern ChatGPT registration client id is required for token refresh.
-			"oauth_client_id":   "TEXT NOT NULL DEFAULT ''",
-			"upstream_protocol": "TEXT NOT NULL DEFAULT ''",
+			"oauth_client_id":   textEmptyColumn,
+			"upstream_protocol": textEmptyColumn,
 			// Optional Codex credentials are used for quota and model catalogs.
-			"codex_access_token":  "TEXT NOT NULL DEFAULT ''",
-			"codex_refresh_token": "TEXT NOT NULL DEFAULT ''",
-			"codex_id_token":      "TEXT NOT NULL DEFAULT ''",
-			"codex_expires_at":    "INTEGER NOT NULL DEFAULT 0",
-			"codex_account_id":    "TEXT NOT NULL DEFAULT ''",
+			"codex_access_token":  textEmptyColumn,
+			"codex_refresh_token": textEmptyColumn,
+			"codex_id_token":      textEmptyColumn,
+			"codex_expires_at":    integerZeroColumn,
+			"codex_account_id":    textEmptyColumn,
 		},
 	}
 }
 
 // ensureColumns adds missing SQLite columns under the migration write lock.
 func ensureColumns(ctx context.Context, conn *sql.Conn, table string, want map[string]string) error {
+	if err := validateMigrationColumns(table, want); err != nil {
+		return err
+	}
 	rows, err := conn.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
 	if err != nil {
 		return fmt.Errorf("store: inspect %s: %w", table, err)
@@ -580,4 +555,75 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+func normalizeStoreDriver(value string) (string, error) {
+	driver := strings.ToLower(strings.TrimSpace(value))
+	switch driver {
+	case "", "sqlite":
+		return "sqlite", nil
+	case "postgres", "postgresql", "pgx":
+		return "postgres", nil
+	default:
+		return "", fmt.Errorf("store: unsupported database driver %q", value)
+	}
+}
+
+func storeDataSource(opts Options, driver string) (string, string, string, error) {
+	if driver == "postgres" {
+		if strings.TrimSpace(opts.DSN) == "" {
+			return "", "", "", errors.New("store: PostgreSQL requires a DSN")
+		}
+		return opts.Path, opts.DSN, "pgx", nil
+	}
+	path := opts.Path
+	if opts.DSN != "" {
+		path = opts.DSN
+	}
+	if strings.TrimSpace(path) == "" {
+		return "", "", "", errors.New("store: empty database path")
+	}
+	if err := createSQLiteDirectory(path); err != nil {
+		return "", "", "", err
+	}
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	dsn := path + separator + "_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)"
+	return path, dsn, "sqlite", nil
+}
+
+func createSQLiteDirectory(path string) error {
+	if strings.HasPrefix(path, "file:") || path == sqliteMemoryPath {
+		return nil
+	}
+	dir := filepath.Dir(strings.SplitN(path, "?", 2)[0])
+	if dir == "" || dir == "." {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("store: create data dir: %w", err)
+	}
+	return nil
+}
+
+// SQL identifiers and DDL cannot be bound as query parameters. Only the static
+// migration registry may supply them; reject unregistered tables or definitions.
+func validateMigrationColumns(table string, want map[string]string) error {
+	approved, ok := additiveColumns()[table]
+	if !ok {
+		return fmt.Errorf("store: unregistered migration table %q", table)
+	}
+	for name, definition := range want {
+		expected, exists := approved[name]
+		if !exists || definition != expected {
+			return fmt.Errorf("store: unregistered migration column %s.%s", table, name)
+		}
+	}
+	return nil
+}
+
+func sqliteMemorySource(path string) bool {
+	return strings.HasPrefix(path, sqliteMemoryPath) || strings.Contains(path, "mode=memory") || strings.HasPrefix(path, "file::memory:")
 }

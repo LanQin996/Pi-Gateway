@@ -181,9 +181,9 @@ func (p *prepared) applyResponseEventRules(ctx context.Context, event *upstream.
 	if err != nil {
 		return nil, ruleAPIError("response rules must produce a JSON object")
 	}
-	copy := *event
-	copy.Raw, copy.Data = raw, data
-	return &copy, nil
+	cloned := *event
+	cloned.Raw, cloned.Data = raw, data
+	return &cloned, nil
 }
 
 func (p *prepared) transformResponseBody(ctx context.Context, body map[string]any) (map[string]any, error) {
@@ -242,18 +242,13 @@ func ruleOrderedBody(body any, previous *piwire.OrderedMap) (*piwire.OrderedMap,
 		return nil, fmt.Errorf("expected a JSON object")
 	}
 	ordered := piwire.NewOrderedMap()
-	if previous == nil {
-		for _, key := range piwire.PreferredKeyOrder {
-			if value, exists := object[key]; exists {
-				ordered.Set(key, value)
-			}
-		}
-	}
+	keys := piwire.PreferredKeyOrder
 	if previous != nil {
-		for _, key := range previous.Keys() {
-			if value, exists := object[key]; exists {
-				ordered.Set(key, value)
-			}
+		keys = previous.Keys()
+	}
+	for _, key := range keys {
+		if value, exists := object[key]; exists {
+			ordered.Set(key, value)
 		}
 	}
 	remaining := make([]string, 0)
@@ -291,17 +286,27 @@ func (p *prepared) recordGatewayDifference(id, name string, before, after []byte
 	if json.Unmarshal(before, &left) != nil || json.Unmarshal(after, &right) != nil {
 		return
 	}
-	keys, seen := []string{}, map[string]bool{}
-	for key := range left {
-		keys = append(keys, key)
-		seen[key] = true
+	changes, omitted := gatewayChanges(left, right)
+	if len(changes) == 0 && omitted == 0 {
+		return
 	}
-	for key := range right {
-		if !seen[key] {
-			keys = append(keys, key)
-		}
+	trace["changes"], trace["omitted_changes"] = changes, omitted
+	p.Recorder.OnRuleTrace(p.RuleVersion, trace)
+}
+
+func boundedRuleValue(value any) (any, bool) {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil, true
 	}
-	sort.Strings(keys)
+	if len(raw) <= rules.MaxPayloadBytes {
+		return value, false
+	}
+	return map[string]any{"preview": strings.ToValidUTF8(string(raw[:rules.MaxPayloadBytes]), "\uFFFD"), "bytes": len(raw)}, true
+}
+
+func gatewayChanges(left, right map[string]any) ([]rules.Change, int) {
+	keys := sortedGatewayKeys(left, right)
 	changes := make([]rules.Change, 0)
 	omitted := 0
 	for _, key := range keys {
@@ -325,20 +330,21 @@ func (p *prepared) recordGatewayDifference(id, name string, before, after []byte
 		changes = append(changes, rules.Change{Path: "/" + strings.NewReplacer("~", "~0", "/", "~1").Replace(key),
 			Operation: op, BeforeExists: had, AfterExists: has, Before: old, After: next, Truncated: oldTruncated || nextTruncated})
 	}
-	if len(changes) == 0 && omitted == 0 {
-		return
-	}
-	trace["changes"], trace["omitted_changes"] = changes, omitted
-	p.Recorder.OnRuleTrace(p.RuleVersion, trace)
+	return changes, omitted
 }
 
-func boundedRuleValue(value any) (any, bool) {
-	raw, err := json.Marshal(value)
-	if err != nil {
-		return nil, true
+func sortedGatewayKeys(left, right map[string]any) []string {
+	keys, seen := []string{}, map[string]bool{}
+	for key := range left {
+		keys = append(keys, key)
+		seen[key] = true
 	}
-	if len(raw) <= rules.MaxPayloadBytes {
-		return value, false
+	for key := range right {
+		if !seen[key] {
+			keys = append(keys, key)
+		}
 	}
-	return map[string]any{"preview": strings.ToValidUTF8(string(raw[:rules.MaxPayloadBytes]), "\uFFFD"), "bytes": len(raw)}, true
+	sort.Strings(keys)
+
+	return keys
 }

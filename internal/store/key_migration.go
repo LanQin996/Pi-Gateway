@@ -2,7 +2,7 @@ package store
 
 import (
 	"context"
-	"crypto/sha1"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -80,7 +80,7 @@ func migrateLegacyKeyGroups(ctx context.Context, conn *sql.Conn) error {
 		for i, id := range b.ids {
 			parts[i] = strconv.FormatInt(id, 10)
 		}
-		name := fmt.Sprintf("migrated:%x", sha1.Sum([]byte(strings.Join(parts, ","))))
+		name := fmt.Sprintf("migrated:%x", sha256.Sum256([]byte(strings.Join(parts, ","))))
 		if _, err := conn.ExecContext(ctx, `INSERT INTO account_groups(name,created_at,updated_at) VALUES (?,?,?) ON CONFLICT(name) DO NOTHING`, name, now, now); err != nil {
 			return err
 		}

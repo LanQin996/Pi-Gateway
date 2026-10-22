@@ -21,7 +21,7 @@ const {
 } = await import(`data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].text).toString('base64')}`)
 const keys = Object.keys(en)
 const failures = []
-const placeholders = value => [...String(value).matchAll(/\{(\w+)\}/g)].map(match => match[1]).sort()
+const placeholders = value => [...String(value).matchAll(/\{(\w+)\}/g)].map(match => match[1]).sort((a, b) => a.localeCompare(b))
 for (const key of keys) {
     if (!Object.hasOwn(zh, key)) failures.push(`${key}: missing zh-CN entry`)
     else {
@@ -72,21 +72,20 @@ function inspectTemplate(node, location) {
 }
 
 async function inspect(dir) {
-    for (const entry of await readdir(dir, {withFileTypes: true})) {
-        const path = join(dir, entry.name)
-        if (entry.isDirectory()) {
-            await inspect(path);
-            continue
-        }
-        if (!['.ts', '.vue'].includes(extname(path)) || path.startsWith(join(root, 'i18n'))) continue
-        const text = await readFile(path, 'utf8')
-        const location = relative(root, path)
-        if (extname(path) === '.vue') {
-            const {descriptor} = parseSFC(text)
-            for (const script of [descriptor.script, descriptor.scriptSetup]) if (script) inspectCode(script.content, location)
-            if (descriptor.template) inspectTemplate(baseParse(descriptor.template.content), location)
-        } else inspectCode(text, location)
-    }
+    const entries = await readdir(dir, {withFileTypes: true})
+    await Promise.all(entries.map(entry => inspectEntry(dir, entry)))
+}
+
+async function inspectEntry(dir, entry) {
+    const path = join(dir, entry.name)
+    if (entry.isDirectory()) return inspect(path)
+    if (!['.ts', '.vue'].includes(extname(path)) || path.startsWith(join(root, 'i18n'))) return
+    const text = await readFile(path, 'utf8')
+    const location = relative(root, path)
+    if (extname(path) !== '.vue') return inspectCode(text, location)
+    const {descriptor} = parseSFC(text)
+    for (const script of [descriptor.script, descriptor.scriptSetup]) if (script) inspectCode(script.content, location)
+    if (descriptor.template) inspectTemplate(baseParse(descriptor.template.content), location)
 }
 
 await inspect(root)

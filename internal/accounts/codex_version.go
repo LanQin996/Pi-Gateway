@@ -66,36 +66,7 @@ func (m *Manager) resolveCodexClientVersion(ctx context.Context, configured, pro
 		cache.inflight = pending
 		cache.mu.Unlock()
 
-		fetched, fetchErr := m.fetchLatestCodexClientVersion(ctx, proxyURL)
-		cache.mu.Lock()
-		// A caller's cancellation must not install a process-wide failure cache.
-		// Waiters with live contexts can start a fresh attempt after this one ends.
-		if err := ctx.Err(); err != nil {
-			cache.inflight = nil
-			close(pending)
-			cache.mu.Unlock()
-			return "", err
-		}
-		if cache.version == "" {
-			cache.version = config.DefaultCodexClientVersion
-		}
-		delay := codexVersionCacheTTL
-		if fetchErr != nil {
-			delay = codexVersionRetryDelay
-		} else if compareCodexVersions(fetched, cache.version) > 0 {
-			cache.version = fetched
-		}
-		cache.nextCheck = m.nowTime().Add(delay)
-		version := cache.version
-		cache.inflight = nil
-		close(pending)
-		cache.mu.Unlock()
-		if fetchErr != nil && m.logger != nil {
-			// fetchErr is classified locally; never log transport errors, URLs,
-			// proxy passwords or the release response body.
-			m.logger.Warn("Codex client version lookup failed; using fallback", "version", version, "reason", fetchErr.Error())
-		}
-		return version, nil
+		return m.completeCodexVersionLookup(ctx, proxyURL, cache, pending)
 	}
 }
 
@@ -209,4 +180,37 @@ func compareCodexVersions(a, b string) int {
 		}
 	}
 	return 0
+}
+
+func (m *Manager) completeCodexVersionLookup(ctx context.Context, proxyURL string, cache *codexVersionCache, pending chan struct{}) (string, error) {
+	fetched, fetchErr := m.fetchLatestCodexClientVersion(ctx, proxyURL)
+	cache.mu.Lock()
+	// A caller's cancellation must not install a process-wide failure cache.
+	// Waiters with live contexts can start a fresh attempt after this one ends.
+	if err := ctx.Err(); err != nil {
+		cache.inflight = nil
+		close(pending)
+		cache.mu.Unlock()
+		return "", err
+	}
+	if cache.version == "" {
+		cache.version = config.DefaultCodexClientVersion
+	}
+	delay := codexVersionCacheTTL
+	if fetchErr != nil {
+		delay = codexVersionRetryDelay
+	} else if compareCodexVersions(fetched, cache.version) > 0 {
+		cache.version = fetched
+	}
+	cache.nextCheck = m.nowTime().Add(delay)
+	version := cache.version
+	cache.inflight = nil
+	close(pending)
+	cache.mu.Unlock()
+	if fetchErr != nil && m.logger != nil {
+		// fetchErr is classified locally; never log transport errors, URLs,
+		// proxy passwords or the release response body.
+		m.logger.Warn("Codex client version lookup failed; using fallback", "version", version, "reason", fetchErr.Error())
+	}
+	return version, nil
 }

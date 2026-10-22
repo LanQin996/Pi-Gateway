@@ -94,117 +94,51 @@ func TestAccountModelBatchReadCountAndDialectContract(t *testing.T) {
 	// Fixture insertion is intentionally batched in a transaction and excluded
 	// from observed read counts, so large boundary tests stay inexpensive.
 	tx, err := s.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, err)
 	defer tx.Rollback()
 	for id := 1; id <= count; id++ {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO accounts(id,name,created_at,updated_at) VALUES(?,?,0,0)`, id, "fixture"); err != nil {
-			t.Fatal(err)
+		{
+			_, err := tx.ExecContext(ctx, `INSERT INTO accounts(id,name,created_at,updated_at) VALUES(?,?,0,0)`, id, "fixture")
+			requireDataTrue(t, !(err != nil), err)
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, tx.Commit())
 	for _, dialect := range []string{"sqlite", "postgres"} {
 		t.Run(dialect, func(t *testing.T) {
 			s.driver = dialect
 			for _, n := range []int{0, 1, 20, 100, accountModelBatchSize, accountModelBatchSize + 1, count} {
 				t.Run(fmt.Sprint(n), func(t *testing.T) {
-					ids := make([]int64, 0, n*2)
-					for id := n; id > 0; id-- {
-						ids = append(ids, int64(id), int64(id))
-					}
-					original := append([]int64{}, ids...)
-					for _, restrictions := range []bool{false, true} {
-						observer.reset()
-						if restrictions {
-							got, err := s.DisabledModelsForAccounts(ctx, ids, &APIKey{ID: 42})
-							if err != nil || got == nil || len(got) != n {
-								t.Fatalf("restrictions size=%d err=%v", len(got), err)
-							}
-						} else {
-							got, err := s.GetAccountModelCatalogs(ctx, ids)
-							if err != nil || got == nil || len(got) != n {
-								t.Fatalf("catalog size=%d err=%v", len(got), err)
-							}
-						}
-						queries := observer.snapshot()
-						if len(queries) != (n+accountModelBatchSize-1)/accountModelBatchSize {
-							t.Fatalf("N+1 regression: n=%d reads=%d", n, len(queries))
-						}
-						for batch, query := range queries {
-							args := min(accountModelBatchSize, n-batch*accountModelBatchSize)
-							if restrictions {
-								args++
-							}
-							if len(query.args) != args || args > 501 {
-								t.Fatalf("unbounded/wrong arguments: %d want %d", len(query.args), args)
-							}
-							if strings.Contains(query.sql, "access_token") || strings.Contains(query.sql, "refresh_token") {
-								t.Fatal("catalog/policy read fetched account credentials")
-							}
-							if dialect == "postgres" {
-								if strings.Contains(query.sql, "?") || !strings.Contains(query.sql, fmt.Sprintf("$%d", args)) {
-									t.Fatalf("bad PostgreSQL bindings: %s", query.sql)
-								}
-							} else if strings.Count(query.sql, "?") != args {
-								t.Fatalf("bad SQLite bindings: %s", query.sql)
-							}
-							for i, arg := range query.args {
-								want := int64(batch*accountModelBatchSize + i + 1)
-								if restrictions && i == len(query.args)-1 {
-									want = 42
-								}
-								if arg.Ordinal != i+1 || arg.Value != want {
-									t.Fatalf("unstable/wrong arguments: %+v want %d", arg, want)
-								}
-							}
-						}
-					}
-					if !reflect.DeepEqual(ids, original) {
-						t.Fatal("caller IDs mutated")
-					}
+					testAccountModelBatchReadCountAndDialectContractCase1(t, ctx, dialect, n, observer, s)
 				})
 			}
 		})
 	}
 	s.driver = "sqlite"
-	for _, restrictions := range []bool{false, true} {
-		observer.reset()
-		for id := int64(1); id <= 100; id++ {
-			if restrictions {
-				_, err = s.DisabledModelsForAccount(ctx, id, nil)
-			} else {
-				_, err = s.GetAccountModelCatalog(ctx, id)
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-		}
-		if got := len(observer.snapshot()); got != 100 {
-			t.Fatalf("individual SQL baseline=%d want 100", got)
-		}
-	}
+	func() { verifyAccountModelBatchReadCountAndDialectContract(&t, &ctx, &s, &observer, &err) }()
 	allIDs := make([]int64, count)
 	for i := range allIDs {
 		allIDs[i] = int64(i + 1)
 	}
 	// A corrupt policy/catalog in batch three must discard both good batches.
-	if _, err := s.ExecContext(ctx, `UPDATE accounts SET disabled_models='null', supplemental_models='null' WHERE id=?`, count); err != nil {
-		t.Fatal(err)
+	{
+		_, err := s.ExecContext(ctx, `UPDATE accounts SET disabled_models='null', supplemental_models='null' WHERE id=?`, count)
+		requireDataTrue(t, !(err != nil), err)
 	}
-	if out, err := s.GetAccountModelCatalogs(ctx, allIDs); err == nil || out != nil {
-		t.Fatal("late catalog failure returned partial results")
+	{
+		out, err := s.GetAccountModelCatalogs(ctx, allIDs)
+		requireDataTrue(t, !(err == nil || out != nil), "late catalog failure returned partial results")
 	}
-	if out, err := s.DisabledModelsForAccounts(ctx, allIDs, nil); err == nil || out != nil {
-		t.Fatal("late policy failure returned partial results")
+	{
+		out, err := s.DisabledModelsForAccounts(ctx, allIDs, nil)
+		requireDataTrue(t, !(err == nil || out != nil), "late policy failure returned partial results")
 	}
-	if _, err := s.ExecContext(ctx, `DELETE FROM accounts WHERE id=?`, count); err != nil {
-		t.Fatal(err)
+	{
+		_, err := s.ExecContext(ctx, `DELETE FROM accounts WHERE id=?`, count)
+		requireDataTrue(t, !(err != nil), err)
 	}
-	if out, err := s.DisabledModelsForAccounts(ctx, allIDs, nil); !errors.Is(err, sql.ErrNoRows) || out != nil {
-		t.Fatal("late unknown ID returned partial restrictions")
+	{
+		out, err := s.DisabledModelsForAccounts(ctx, allIDs, nil)
+		requireDataTrue(t, !(!errors.Is(err, sql.ErrNoRows) || out != nil), "late unknown ID returned partial restrictions")
 	}
 }
 
@@ -215,9 +149,7 @@ func exerciseAccountModelBatches(t *testing.T, s *Store) {
 	a := &Account{Name: "batch-rich", Enabled: true, SupplementalModels: []string{"shared", "manual"}, DisabledModels: []string{"account-blocked", "shared"}}
 	b := &Account{Name: "batch-empty", Enabled: true}
 	for _, account := range []*Account{a, b} {
-		if err := s.CreateAccount(ctx, account); err != nil {
-			t.Fatal(err)
-		}
+		requireDataNoError(t, s.CreateAccount(ctx, account))
 	}
 	metadata := map[string]json.RawMessage{
 		"large":  json.RawMessage(`9007199254740993123456789`),
@@ -225,114 +157,82 @@ func exerciseAccountModelBatches(t *testing.T, s *Store) {
 		"empty":  json.RawMessage(`[]`), "null": json.RawMessage(`null`),
 		"false": json.RawMessage(`false`), "sensitive_unknown": json.RawMessage(`"preserved-not-sanitized-by-store"`),
 	}
-	if err := s.SaveAccountModelCatalog(ctx, a.ID, &ModelCatalog{Models: []CatalogModel{
+	requireDataNoError(t, s.SaveAccountModelCatalog(ctx, a.ID, &ModelCatalog{Models: []CatalogModel{
 		{ID: " shared ", Name: "Rich", Description: "Complete", Metadata: metadata},
 		{ID: "shared", Name: "duplicate"}, {ID: "", Name: "empty"},
-	}, FetchedAt: 10, AttemptedAt: 11}); err != nil {
-		t.Fatal(err)
-	}
+	}, FetchedAt: 10, AttemptedAt: 11}))
 	missing := max(a.ID, b.ID) + 999999
 	ids := []int64{b.ID, missing, a.ID, a.ID, 0, -1}
 	got, err := s.GetAccountModelCatalogs(ctx, ids)
-	if err != nil || len(got) != 2 || got[missing] != nil {
-		t.Fatalf("catalog unknown/duplicate semantics: %+v err=%v", got, err)
-	}
+	requireDataTruef(t, !(err != nil || len(got) != 2 || got[missing] != nil), "catalog unknown/duplicate semantics: %+v err=%v", got, err)
 	for _, account := range []*Account{a, b} {
 		one, err := s.GetAccountModelCatalog(ctx, account.ID)
-		if err != nil || !reflect.DeepEqual(one, got[account.ID]) {
-			t.Fatalf("single/batch mismatch: %+v %+v err=%v", one, got[account.ID], err)
+		{
+			reportStoreTestFailure(t, err != nil || !reflect.DeepEqual(one, got[account.ID]), func() {
+				t.Fatalf("single/batch mismatch: %+v %+v err=%v", one, got[account.ID], err)
+			})
 		}
 	}
-	if !reflect.DeepEqual(got[a.ID].Models[0].Metadata, metadata) || len(got[a.ID].Models) != 2 || !reflect.DeepEqual(got[a.ID].Models[1], NewManualCatalogModel("manual")) {
-		t.Fatalf("metadata/manual defaults changed: %+v", got[a.ID])
+	{
+		reportStoreTestFailure(t, !reflect.DeepEqual(got[a.ID].Models[0].Metadata, metadata) || len(got[a.ID].Models) != 2 || !reflect.DeepEqual(got[a.ID].Models[1], NewManualCatalogModel("manual")), func() {
+			t.Fatalf("metadata/manual defaults changed: %+v", got[a.ID])
+		})
 	}
-	if got[b.ID].Models == nil || got[b.ID].FetchedAt != 0 || len(got[b.ID].Models) != 0 {
-		t.Fatal("empty account fabricated fetched models")
-	}
+	requireDataCondition(t, !(got[b.ID].Models == nil || got[b.ID].FetchedAt != 0 || len(got[b.ID].Models) != 0), "empty account fabricated fetched models")
 	member := &AccountGroup{Name: "batch-member", Enabled: true, AccountIDs: []int64{a.ID}, DisabledModels: []string{"membership-blocked", "shared"}}
 	keyGroup := &AccountGroup{Name: "batch-key", Enabled: true, DisabledModels: []string{"key-blocked", "shared"}}
 	disabled := &AccountGroup{Name: "batch-disabled", Enabled: false, AccountIDs: []int64{a.ID, b.ID}, DisabledModels: []string{"ignored"}}
 	for _, group := range []*AccountGroup{member, keyGroup, disabled} {
-		if err := s.CreateAccountGroup(ctx, group); err != nil {
-			t.Fatal(err)
-		}
+		requireDataNoError(t, s.CreateAccountGroup(ctx, group))
 	}
 	key := &APIKey{Name: "batch-key", GroupIDs: []int64{member.ID}}
-	if err := s.CreateKey(ctx, key); err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, s.CreateKey(ctx, key))
 	// Leave key.GroupIDs stale while changing its authoritative database bindings.
-	if err := s.SetKeyGroups(ctx, key.ID, []int64{keyGroup.ID, disabled.ID}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.ExecContext(ctx, `UPDATE account_groups SET disabled_models='not-json' WHERE id=?`, disabled.ID); err != nil {
-		t.Fatal(err)
+	requireDataNoError(t, s.SetKeyGroups(ctx, key.ID, []int64{keyGroup.ID, disabled.ID}))
+	{
+		_, err := s.ExecContext(ctx, `UPDATE account_groups SET disabled_models='not-json' WHERE id=?`, disabled.ID)
+		requireDataTrue(t, !(err != nil), err)
 	}
 	assertRestrictions := func(k *APIKey, wantA, wantB []string) {
-		t.Helper()
-		out, err := s.DisabledModelsForAccounts(ctx, []int64{b.ID, a.ID, a.ID}, k)
-		if err != nil || len(out) != 2 || !reflect.DeepEqual(out[a.ID], wantA) || !reflect.DeepEqual(out[b.ID], wantB) {
-			t.Fatalf("restrictions=%+v err=%v want=%v/%v", out, err, wantA, wantB)
-		}
-		for _, account := range []*Account{a, b} {
-			one, err := s.DisabledModelsForAccount(ctx, account.ID, k)
-			if err != nil || !reflect.DeepEqual(one, out[account.ID]) {
-				t.Fatalf("single/batch restrictions mismatch: %v %v err=%v", one, out[account.ID], err)
-			}
-		}
+		verifyExerciseAccountModelBatches(&ctx, k, wantA, wantB, verifyExerciseAccountModelBatchesState{capturedT: &t, capturedS: &s, capturedA: &a, capturedB: &b})
 	}
 	assertRestrictions(key, []string{"account-blocked", "key-blocked", "membership-blocked", "shared"}, []string{"key-blocked", "shared"})
 	assertRestrictions(nil, []string{"account-blocked", "membership-blocked", "shared"}, []string{})
-	if err := s.SetKeyGroups(ctx, key.ID, []int64{}); err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, s.SetKeyGroups(ctx, key.ID, []int64{}))
 	assertRestrictions(key, []string{"account-blocked", "membership-blocked", "shared"}, []string{})
-	if err := s.SetAccountGroupAccounts(ctx, member.ID, []int64{b.ID}); err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, s.SetAccountGroupAccounts(ctx, member.ID, []int64{b.ID}))
 	assertRestrictions(key, []string{"account-blocked", "shared"}, []string{"membership-blocked", "shared"})
 	for _, id := range []int64{missing, 0, -1} {
-		if out, err := s.DisabledModelsForAccounts(ctx, []int64{a.ID, id}, key); !errors.Is(err, sql.ErrNoRows) || out != nil {
-			t.Fatalf("unknown ID failed open: %v %v", out, err)
+		{
+			out, err := s.DisabledModelsForAccounts(ctx, []int64{a.ID, id}, key)
+			requireDataTruef(t, !(!errors.Is(err, sql.ErrNoRows) || out != nil), "unknown ID failed open: %v %v", out, err)
 		}
-		if out, err := s.DisabledModelsForAccount(ctx, id, key); !errors.Is(err, sql.ErrNoRows) || out != nil {
-			t.Fatalf("legacy missing semantics changed: %v %v", out, err)
+		{
+			out, err := s.DisabledModelsForAccount(ctx, id, key)
+			requireDataTruef(t, !(!errors.Is(err, sql.ErrNoRows) || out != nil), "legacy missing semantics changed: %v %v", out, err)
 		}
 	}
 	// All applicable policy sources must fail closed. Disabled groups above are
 	// ignored even when malformed; newly enabled groups must fail immediately.
-	if err := s.SetKeyGroups(ctx, key.ID, []int64{keyGroup.ID}); err != nil {
-		t.Fatal(err)
-	}
-	for _, source := range []struct {
-		table string
-		id    int64
-	}{{"accounts", a.ID}, {"account_groups", member.ID}, {"account_groups", keyGroup.ID}} {
-		for _, malformed := range []string{"not-json", "null", `{}`, `[123]`, `[null]`} {
-			query := "UPDATE " + source.table + " SET disabled_models=? WHERE id=?"
-			if _, err := s.ExecContext(ctx, query, malformed, source.id); err != nil {
-				t.Fatal(err)
-			}
-			if out, err := s.DisabledModelsForAccounts(ctx, []int64{a.ID, b.ID}, key); err == nil || out != nil {
-				t.Fatalf("malformed %s %q failed open: %v %v", source.table, malformed, out, err)
-			}
-			if _, err := s.ExecContext(ctx, query, `[]`, source.id); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
+	requireDataNoError(t, s.SetKeyGroups(ctx, key.ID, []int64{keyGroup.ID}))
+	func() {
+		verifyExerciseAccountModelBatches2(&ctx, verifyExerciseAccountModelBatches2State{capturedT: &t, capturedS: &s, capturedA: &a, capturedB: &b, capturedMember: &member, capturedKeyGroup: &keyGroup, capturedKey: &key})
+	}()
 	for _, field := range []struct{ table, column, idColumn string }{
 		{"account_model_catalog", "models_json", "account_id"}, {"accounts", "supplemental_models", "id"},
 	} {
 		query := "UPDATE " + field.table + " SET " + field.column + "=? WHERE " + field.idColumn + "=?"
-		if _, err := s.ExecContext(ctx, query, "not-json", a.ID); err != nil {
-			t.Fatal(err)
+		{
+			_, err := s.ExecContext(ctx, query, "not-json", a.ID)
+			requireDataTrue(t, !(err != nil), err)
 		}
-		if out, err := s.GetAccountModelCatalogs(ctx, []int64{a.ID, b.ID}); err == nil || out != nil {
-			t.Fatalf("malformed catalog returned partial/success: %v %v", out, err)
+		{
+			out, err := s.GetAccountModelCatalogs(ctx, []int64{a.ID, b.ID})
+			requireDataTruef(t, !(err == nil || out != nil), "malformed catalog returned partial/success: %v %v", out, err)
 		}
-		if _, err := s.ExecContext(ctx, query, "[]", a.ID); err != nil {
-			t.Fatal(err)
+		{
+			_, err := s.ExecContext(ctx, query, "[]", a.ID)
+			requireDataTrue(t, !(err != nil), err)
 		}
 	}
 }
@@ -363,5 +263,165 @@ func TestAccountModelBatchEmptyInputAndDatabaseFailures(t *testing.T) {
 	}
 	if revision, err := s.CatalogRevision(ctx); err == nil || revision != "" {
 		t.Fatal("revision DB error silently defaulted")
+	}
+}
+
+func testAccountModelBatchReadCountAndDialectContractCase1(t *testing.T, ctx context.Context, dialect string, n int, observer *catalogSQLObserver, s *Store) {
+	ids := make([]int64, 0, n*2)
+	for id := n; id > 0; id-- {
+		ids = append(ids, int64(id), int64(id))
+	}
+	original := append([]int64{}, ids...)
+	for _, restrictions := range []bool{false, true} {
+		observer.reset()
+		if restrictions {
+			got, err := s.DisabledModelsForAccounts(ctx, ids, &APIKey{ID: 42})
+			{
+				reportStoreTestFailure(t, err != nil || got == nil || len(got) != n, func() {
+					t.Fatalf("restrictions size=%d err=%v", len(got), err)
+				})
+			}
+		} else {
+			got, err := s.GetAccountModelCatalogs(ctx, ids)
+			{
+				reportStoreTestFailure(t, err != nil || got == nil || len(got) != n, func() {
+					t.Fatalf("catalog size=%d err=%v", len(got), err)
+				})
+			}
+		}
+		queries := observer.snapshot()
+		{
+			reportStoreTestFailure(t, len(queries) != (n+accountModelBatchSize-1)/accountModelBatchSize, func() {
+				t.Fatalf("N+1 regression: n=%d reads=%d", n, len(queries))
+			})
+		}
+		func() {
+			verifyAccountModelBatchReadCountAndDialectContractCase12(&t, &dialect, &n, &restrictions, &queries)
+		}()
+	}
+	requireDataCondition(t, !(!reflect.DeepEqual(ids, original)), "caller IDs mutated")
+}
+
+type verifyExerciseAccountModelBatchesState struct {
+	capturedT **testing.T
+	capturedS **Store
+	capturedA **Account
+	capturedB **Account
+}
+
+// verifyExerciseAccountModelBatches exercises one isolated test phase with the original shared state.
+func verifyExerciseAccountModelBatches(capturedCtx *context.Context, k *APIKey, wantA, wantB []string, state verifyExerciseAccountModelBatchesState) {
+	(*state.capturedT).Helper()
+	out, err := (*state.capturedS).DisabledModelsForAccounts((*capturedCtx), []int64{(*state.capturedB).ID, (*state.capturedA).ID, (*state.capturedA).ID}, k)
+	requireDataTruef((*state.capturedT), !(err != nil || len(out) != 2 || !reflect.DeepEqual(out[(*state.capturedA).ID], wantA) || !reflect.DeepEqual(out[(*state.capturedB).ID], wantB)), "restrictions=%+v err=%v want=%v/%v", out, err, wantA, wantB)
+	for _, account := range []*Account{(*state.capturedA), (*state.capturedB)} {
+		one, err := (*state.capturedS).DisabledModelsForAccount((*capturedCtx), account.ID, k)
+		{
+			reportStoreTestFailure((*state.capturedT), err != nil || !reflect.DeepEqual(one, out[account.ID]), func() {
+				(*state.capturedT).Fatalf("single/batch restrictions mismatch: %v %v err=%v", one, out[account.ID], err)
+			})
+		}
+	}
+}
+
+// verifyAccountModelBatchReadCountAndDialectContract exercises one isolated test phase with the original shared state.
+func verifyAccountModelBatchReadCountAndDialectContract(capturedT **testing.T, capturedCtx *context.Context, capturedS **Store, capturedObserver **catalogSQLObserver, capturedErr *error) {
+	(*capturedT).Helper()
+
+	for _, restrictions := range []bool{false, true} {
+		(*capturedObserver).reset()
+		for id := int64(1); id <= 100; id++ {
+			if restrictions {
+				_, (*capturedErr) = (*capturedS).DisabledModelsForAccount((*capturedCtx), id, nil)
+			} else {
+				_, (*capturedErr) = (*capturedS).GetAccountModelCatalog((*capturedCtx), id)
+			}
+			requireDataNoError((*capturedT), (*capturedErr))
+		}
+		{
+			got := len((*capturedObserver).snapshot())
+			requireDataTruef((*capturedT), !(got != 100), "individual SQL baseline=%d want 100", got)
+		}
+	}
+}
+
+type verifyExerciseAccountModelBatches2State struct {
+	capturedT        **testing.T
+	capturedS        **Store
+	capturedA        **Account
+	capturedB        **Account
+	capturedMember   **AccountGroup
+	capturedKeyGroup **AccountGroup
+	capturedKey      **APIKey
+}
+
+// verifyExerciseAccountModelBatches2 exercises one isolated test phase with the original shared state.
+func verifyExerciseAccountModelBatches2(capturedCtx *context.Context, state verifyExerciseAccountModelBatches2State) {
+	for _, source := range []struct {
+		table string
+		id    int64
+	}{{"accounts", (*state.capturedA).ID}, {"account_groups", (*state.capturedMember).ID}, {"account_groups", (*state.capturedKeyGroup).ID}} {
+		for _, malformed := range []string{"not-json", "null", `{}`, `[123]`, `[null]`} {
+			query := "UPDATE " + source.table + " SET disabled_models=? WHERE id=?"
+			{
+				_, err := (*state.capturedS).ExecContext((*capturedCtx), query, malformed, source.id)
+				requireDataTrue((*state.capturedT), !(err != nil), err)
+			}
+			{
+				out, err := (*state.capturedS).DisabledModelsForAccounts((*capturedCtx), []int64{(*state.capturedA).ID, (*state.capturedB).ID}, (*state.capturedKey))
+				reportStoreTestFailure((*state.capturedT), err == nil || out != nil, func() {
+					(*state.capturedT).Fatalf("malformed %s %q failed open: %v %v", source.table, malformed, out, err)
+				})
+			}
+			{
+				_, err := (*state.capturedS).ExecContext((*capturedCtx), query, `[]`, source.id)
+				requireDataTrue((*state.capturedT), !(err != nil), err)
+			}
+		}
+	}
+}
+
+// verifyAccountModelBatchReadCountAndDialectContractCase1 exercises one isolated test phase with the original shared state.
+func verifyAccountModelBatchReadCountAndDialectContractCase1(capturedT **testing.T, capturedRestrictions *bool, capturedBatch *int, capturedQuery *catalogObservedQuery) {
+	(*capturedT).Helper()
+
+	for i, arg := range (*capturedQuery).args {
+		want := int64((*capturedBatch)*accountModelBatchSize + i + 1)
+		if (*capturedRestrictions) && i == len((*capturedQuery).args)-1 {
+			want = 42
+		}
+		requireDataTruef((*capturedT), !(arg.Ordinal != i+1 || arg.Value != want), "unstable/wrong arguments: %+v want %d", arg, want)
+	}
+}
+
+// verifyAccountModelBatchReadCountAndDialectContractCase12 exercises one isolated test phase with the original shared state.
+func verifyAccountModelBatchReadCountAndDialectContractCase12(capturedT **testing.T, capturedDialect *string, capturedN *int, capturedRestrictions *bool, capturedQueries *[]catalogObservedQuery) {
+	(*capturedT).Helper()
+
+	for batch, query := range *capturedQueries {
+		args := min(accountModelBatchSize, (*capturedN)-batch*accountModelBatchSize)
+		if *capturedRestrictions {
+			args++
+		}
+		{
+			reportStoreTestFailure((*capturedT), len(query.args) != args || args > 501, func() {
+				(*capturedT).Fatalf("unbounded/wrong arguments: %d want %d", len(query.args), args)
+			})
+		}
+		requireDataCondition((*capturedT), !(strings.Contains(query.sql, "access_token") || strings.Contains(query.sql, "refresh_token")), "catalog/policy read fetched account credentials")
+		if (*capturedDialect) == "postgres" {
+			{
+				reportStoreTestFailure((*capturedT), strings.Contains(query.sql, "?") || !strings.Contains(query.sql, fmt.Sprintf("$%d", args)), func() {
+					(*capturedT).Fatalf("bad PostgreSQL bindings: %s", query.sql)
+				})
+			}
+		} else {
+			reportStoreTestFailure((*capturedT), strings.Count(query.sql, "?") != args, func() {
+				(*capturedT).Fatalf("bad SQLite bindings: %s", query.sql)
+			})
+		}
+		func() {
+			verifyAccountModelBatchReadCountAndDialectContractCase1(&(*capturedT), &(*capturedRestrictions), &batch, &query)
+		}()
 	}
 }

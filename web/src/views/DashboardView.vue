@@ -40,8 +40,8 @@ function todayRange() {
 
 async function load(isRefresh = false) {
 	const run = ++generation
-	if (isRefresh) refreshing.value = true
-	else loading.value = true
+	if (isRefresh) { refreshing.value = true }
+	else { loading.value = true }
 	loadError.value = ''; statsError.value = ''; usageError.value = ''
 	const { start, end } = todayRange()
 	const results = await Promise.allSettled([
@@ -49,21 +49,21 @@ async function load(isRefresh = false) {
 		api.statsTrend(start, end, 'hour'),
 		api.usageRecords({ start, end, limit: 10, offset: 0, outcome: 'succeeded' }),
 	])
-	if (run !== generation) return
+	if (run !== generation) { return }
 	const [nextOverview, accountResult, nextSummary, trend, usage] = results
 	const errorText = (reason: unknown) => reason instanceof Error ? reason.message : t('stats.loadFailed')
-	if (nextOverview.status === 'fulfilled') overview.value = nextOverview.value
+	if (nextOverview.status === 'fulfilled') { overview.value = nextOverview.value }
 	if (accountResult.status === 'fulfilled') { accounts.value = accountResult.value.accounts ?? []; accountsLoaded.value = true }
-	if (nextSummary.status === 'fulfilled') summary.value = nextSummary.value
-	else summary.value = null
-	if (trend.status === 'fulfilled') buckets.value = [...(trend.value.buckets ?? [])].sort((a, b) => a.bucket_start - b.bucket_start)
+	if (nextSummary.status === 'fulfilled') { summary.value = nextSummary.value }
+	else { summary.value = null }
+	if (trend.status === 'fulfilled') { buckets.value = [...(trend.value.buckets ?? [])].sort((a, b) => a.bucket_start - b.bucket_start) }
 	else { buckets.value = []; statsError.value = errorText(trend.reason) }
-	if (usage.status === 'fulfilled') records.value = usage.value.records ?? []
+	if (usage.status === 'fulfilled') { records.value = usage.value.records ?? [] }
 	else { records.value = []; usageError.value = errorText(usage.reason) }
 	const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => errorText(result.reason))
 	loadError.value = [...new Set(errors)].join(' · ')
-	if (loadError.value) toast.error(loadError.value)
-	else refreshedAt.value = Date.now()
+	if (loadError.value) { toast.error(loadError.value) }
+	else { refreshedAt.value = Date.now() }
 	loading.value = false
 	refreshing.value = false
 }
@@ -84,7 +84,12 @@ const cards = computed(() => {
 	]
 })
 const lastRefreshed = computed(() => refreshedAt.value ? formatRelative(refreshedAt.value) : '—')
-const successRate = computed(() => summary.value ? percent(summary.value.request_count ? summary.value.success_count / summary.value.request_count : null) : '—')
+const successRate = computed(() => (() => {
+    if (summary.value) {
+        return percent(summary.value.request_count ? summary.value.success_count / summary.value.request_count : null)
+    }
+    return '—'
+})())
 </script>
 
 <template>
@@ -97,7 +102,7 @@ const successRate = computed(() => summary.value ? percent(summary.value.request
 			<section class="metric-grid" :aria-label="t('dashboard.title')"><MetricCard v-for="card in cards" :key="card.label" v-bind="card" /></section>
 			<section class="dashboard-two-column"><RequestTrendCard :buckets="buckets" :summary="summary" :loading="loading" :error="statsError" /><WireProfileCard :overview="overview" :error="loadError" /></section>
 			<AccountOverviewCard v-if="accountsLoaded" :accounts="accounts" :overview="overview" />
-			<div v-else class="card empty-state" role="status">{{ loading ? t('stats.loading') : loadError }}</div>
+			<output v-else class="card empty-state" >{{ loading ? t('stats.loading') : loadError }}</output>
 			<section class="result-card card"><header><div><h2>{{ t('dashboard.requestsToday') }}</h2><p>{{ t('stats.successRate') }} <strong>{{ successRate }}</strong></p></div><Badge tone="info">{{ metric(summary?.request_count) }}</Badge></header><div class="result-grid"><div><span>{{ t('dashboard.success') }}</span><strong class="tone-success">{{ metric(summary?.success_count) }}</strong></div><div><span>{{ t('dashboard.failed') }}</span><strong class="tone-danger">{{ metric(summary?.failure_count) }}</strong></div><div><span>{{ t('dashboard.cancelled') }}</span><strong>{{ metric(summary?.cancelled_count) }}</strong></div><div><span>{{ t('dashboard.incomplete') }}</span><strong>{{ metric(summary?.incomplete_count) }}</strong></div><div><span>{{ t('stats.latency') }}</span><strong>{{ summary?.avg_latency_ms == null ? '—' : formatDuration(summary.avg_latency_ms) }}</strong></div></div></section>
 			<UsageRecordCard :rows="records" :loading="loading" :error="usageError" />
 			<section v-if="overview?.recent_captures?.length" class="card recent-card"><header class="card-heading"><div><h2>{{ t('dashboard.recentExchanges') }}</h2></div><RouterLink to="/captures" class="btn btn-ghost">{{ t('dashboard.viewAll') }}</RouterLink></header><div class="table-scroll"><table class="w-full"><thead><tr><th class="th">ID</th><th class="th">{{ t('accounts.col.account') }}</th><th class="th">{{ t('settings.defaultModel') }}</th><th class="th">{{ t('captures.filter.transport') }}</th><th class="th">{{ t('captures.filter.outcome') }}</th><th class="th text-right">{{ t('capture.duration') }}</th></tr></thead><tbody><tr v-for="capture in overview.recent_captures.slice(0, 6)" :key="capture.id" class="row-hover"><td class="td font-mono"><RouterLink :to="`/captures/${capture.id}`" class="capture-link">#{{ capture.id }}</RouterLink></td><td class="td">{{ capture.account_name || '—' }}</td><td class="td font-mono text-[12px]">{{ capture.model || '—' }}</td><td class="td"><Badge tone="info">{{ capture.client_transport }}→{{ capture.upstream_transport }}</Badge></td><td class="td"><Badge :tone="capture.outcome === 'ok' ? 'success' : 'danger'">{{ capture.outcome }}</Badge></td><td class="td text-right font-mono text-[12px]">{{ formatDuration(capture.duration_ms) }}</td></tr></tbody></table></div></section>

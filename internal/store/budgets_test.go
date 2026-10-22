@@ -14,53 +14,29 @@ func TestSettleKeyChargeIdempotentAndBudgetWindowsRoll(t *testing.T) {
 	monday := time.Date(2025, 1, 6, 23, 59, 0, 0, time.UTC).UnixMilli()
 	dailyStart := time.Date(2025, 1, 6, 0, 0, 0, 0, time.UTC).UnixMilli()
 	settled, err := s.SettleKeyCharge(ctx, "request", 7, 123, monday)
-	if err != nil || !settled {
-		t.Fatalf("first charge=%v %v", settled, err)
-	}
+	requireDataTruef(t, !(err != nil || !settled), "first charge=%v %v", settled, err)
 	settled, err = s.SettleKeyCharge(ctx, "request", 7, 999, monday)
-	if err != nil || settled {
-		t.Fatalf("duplicate charge=%v %v", settled, err)
-	}
+	requireDataTruef(t, !(err != nil || settled), "duplicate charge=%v %v", settled, err)
 	settled, err = s.SettleKeyCharge(ctx, "request", 8, 999, monday)
-	if err != nil || settled {
-		t.Fatalf("request ID must be global: %v %v", settled, err)
-	}
+	requireDataTruef(t, !(err != nil || settled), "request ID must be global: %v %v", settled, err)
 	windows, err := s.KeyBudgetStatus(ctx, 7, monday)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(windows) != 2 || windows[0] != (KeyBudgetWindow{"daily", dailyStart, 123}) || windows[1] != (KeyBudgetWindow{"weekly", dailyStart, 123}) {
-		t.Fatalf("initial windows=%+v", windows)
-	}
+	requireDataNoError(t, err)
+	requireDataTruef(t, !(len(windows) != 2 || windows[0] != (KeyBudgetWindow{"daily", dailyStart, 123}) || windows[1] != (KeyBudgetWindow{"weekly", dailyStart, 123})), "initial windows=%+v", windows)
 	tuesday := monday + 120000
 	windows, err = s.KeyBudgetStatus(ctx, 7, tuesday)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if windows[0] != (KeyBudgetWindow{"daily", dailyStart + 86400000, 0}) || windows[1] != (KeyBudgetWindow{"weekly", dailyStart, 123}) {
-		t.Fatalf("rolled day=%+v", windows)
-	}
+	requireDataNoError(t, err)
+	requireDataTruef(t, !(windows[0] != (KeyBudgetWindow{"daily", dailyStart + 86400000, 0}) || windows[1] != (KeyBudgetWindow{"weekly", dailyStart, 123})), "rolled day=%+v", windows)
 	settled, err = s.SettleKeyCharge(ctx, "request", 7, 999, tuesday)
-	if err != nil || settled {
-		t.Fatalf("duplicate after rollover=%v %v", settled, err)
-	}
+	requireDataTruef(t, !(err != nil || settled), "duplicate after rollover=%v %v", settled, err)
 	settled, err = s.SettleKeyCharge(ctx, "request-two", 7, 77, tuesday)
-	if err != nil || !settled {
-		t.Fatalf("new day charge=%v %v", settled, err)
-	}
+	requireDataTruef(t, !(err != nil || !settled), "new day charge=%v %v", settled, err)
 	windows, err = s.KeyBudgetStatus(ctx, 7, tuesday)
-	if err != nil || windows[0].UsedMicros != 77 || windows[1].UsedMicros != 200 {
-		t.Fatalf("second charge windows=%+v %v", windows, err)
-	}
+	requireDataTruef(t, !(err != nil || windows[0].UsedMicros != 77 || windows[1].UsedMicros != 200), "second charge windows=%+v %v", windows, err)
 	nextMonday := dailyStart + 7*86400000
 	windows, err = s.KeyBudgetStatus(ctx, 7, nextMonday)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, err)
 	for _, w := range windows {
-		if w.WindowStart != nextMonday || w.UsedMicros != 0 {
-			t.Fatalf("rolled week=%+v", windows)
-		}
+		requireDataTruef(t, !(w.WindowStart != nextMonday || w.UsedMicros != 0), "rolled week=%+v", windows)
 	}
 }
 

@@ -148,42 +148,7 @@ func toolsAt(body map[string]any, visit func([]any, string) error) error {
 // agent_message history, without consulting User-Agent. Reserved user tools fail.
 func Detect(body map[string]any) (Profile, error) {
 	var p Profile
-	var inspect func([]any, string) error
-	inspect = func(tools []any, path string) error {
-		for i, value := range tools {
-			m := object(value)
-			at := fmt.Sprintf("%s[%d]", path, i)
-			if reservedName(m) {
-				return protocolError("codex_collaboration_alias_conflict", at, "reserved collaboration alias is already defined")
-			}
-			if text(m["type"]) != "namespace" {
-				continue
-			}
-			children, _ := m["tools"].([]any)
-			if text(m["name"]) == Namespace {
-				var bits uint32
-				matched := false
-				for _, child := range children {
-					cm := object(child)
-					if nativeMessageSpec(cm) {
-						matched = true
-					}
-					if text(cm["type"]) == "function" {
-						bits |= toolBit(text(cm["name"]))
-					}
-				}
-				if matched {
-					p.Version = 1
-					p.Tools |= bits
-				}
-			}
-			if err := inspect(children, at+".tools"); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	if err := toolsAt(body, inspect); err != nil {
+	if err := toolsAt(body, func(tools []any, path string) error { return detectTools(tools, path, &p) }); err != nil {
 		return Profile{}, err
 	}
 	input, _ := body["input"].([]any)
@@ -245,53 +210,7 @@ func stripSchema(m map[string]any) (map[string]any, bool) {
 }
 
 func forwardTools(tools []any, path string, p Profile) ([]any, bool, error) {
-	return mapArray(tools, path, func(m map[string]any, at string) (map[string]any, bool, error) {
-		if text(m["type"]) != "namespace" {
-			return m, false, nil
-		}
-		children, _ := m["tools"].([]any)
-		if text(m["name"]) == Namespace {
-			matched := false
-			for _, child := range children {
-				cm := object(child)
-				bit := toolBit(text(cm["name"]))
-				if text(cm["type"]) == "function" && bit&p.Tools != 0 {
-					matched = true
-				}
-			}
-			if matched {
-				// Renaming a namespace would also rename unknown members. Do not
-				// silently advertise them as official tools on the return path.
-				for _, child := range children {
-					cm := object(child)
-					if text(cm["type"]) != "function" || toolBit(text(cm["name"]))&p.Tools == 0 {
-						return nil, false, protocolError("codex_collaboration_tool", at, "unregistered collaboration member")
-					}
-				}
-				n := copyMap(m)
-				n["name"] = Alias
-				cleaned, _, err := mapArray(children, at+".tools", func(cm map[string]any, _ string) (map[string]any, bool, error) {
-					if toolBit(text(cm["name"]))&messageTools != 0 {
-						next, changed := stripSchema(cm)
-						return next, changed, nil
-					}
-					return cm, false, nil
-				})
-				if err != nil {
-					return nil, false, err
-				}
-				n["tools"] = cleaned
-				return n, true, nil
-			}
-		}
-		cleaned, changed, err := forwardTools(children, at+".tools", p)
-		if err != nil || !changed {
-			return m, false, err
-		}
-		n := copyMap(m)
-		n["tools"] = cleaned
-		return n, true, nil
-	})
+	return mapArray(tools, path, func(m map[string]any, at string) (map[string]any, bool, error) { return forwardTool(m, at, p) })
 }
 
 // emptyMarker accepts absent/null (serde Option::None) and empty arrays only.
@@ -327,7 +246,7 @@ func recognizableCiphertext(value string) bool {
 }
 
 func plaintextArguments(m map[string]any, path string) error {
-	if value := m["encrypted_content"]; value != nil {
+	if m["encrypted_content"] != nil {
 		return protocolError("codex_collaboration_encrypted", path+".encrypted_content", "encrypted tool call; regenerate a plaintext task from the parent agent")
 	}
 	arguments, ok := m["arguments"].(string)
@@ -445,7 +364,7 @@ func forwardChoice(m map[string]any, path string, p Profile) (map[string]any, bo
 	}
 	if text(m["type"]) == "allowed_tools" {
 		values, _ := m["tools"].([]any)
-		tools, changed, err := mapArray(values, path+".tools", func(child map[string]any, at string) (map[string]any, bool, error) {
+		tools, changed, err := mapArray(values, path+toolsPathSuffix, func(child map[string]any, at string) (map[string]any, bool, error) {
 			return forwardChoice(child, at, p)
 		})
 		if err != nil || !changed {
@@ -470,56 +389,45 @@ func Forward(body map[string]any, p Profile) (map[string]any, bool, error) {
 	}
 	n := body
 	changed := false
-	put := func(key string, value any) {
+	transforms := []struct {
+		key   string
+		apply func() (any, bool, error)
+	}{
+		{"tools", func() (any, bool, error) {
+			tools, ok := body["tools"].([]any)
+			if !ok {
+				return nil, false, nil
+			}
+			return forwardTools(tools, "tools", p)
+		}},
+		{"input", func() (any, bool, error) {
+			input, ok := body["input"].([]any)
+			if !ok {
+				return nil, false, nil
+			}
+			return mapArray(input, "input", func(m map[string]any, at string) (map[string]any, bool, error) { return forwardInput(m, at, p) })
+		}},
+		{"tool_choice", func() (any, bool, error) {
+			choice := object(body["tool_choice"])
+			if choice == nil {
+				return nil, false, nil
+			}
+			return forwardChoice(choice, "tool_choice", p)
+		}},
+	}
+	for _, transform := range transforms {
+		value, fieldChanged, err := transform.apply()
+		if err != nil {
+			return nil, false, err
+		}
+		if !fieldChanged {
+			continue
+		}
 		if !changed {
 			n = copyMap(body)
 			changed = true
 		}
-		n[key] = value
-	}
-	if tools, ok := body["tools"].([]any); ok {
-		values, c, err := forwardTools(tools, "tools", p)
-		if err != nil {
-			return nil, false, err
-		}
-		if c {
-			put("tools", values)
-		}
-	}
-	if input, ok := body["input"].([]any); ok {
-		values, c, err := mapArray(input, "input", func(m map[string]any, at string) (map[string]any, bool, error) {
-			switch text(m["type"]) {
-			case "agent_message":
-				return agentMessage(m, at)
-			case "function_call":
-				return forwardCall(m, at, p)
-			case "additional_tools":
-				tools, _ := m["tools"].([]any)
-				values, c, err := forwardTools(tools, at+".tools", p)
-				if err != nil || !c {
-					return m, false, err
-				}
-				n := copyMap(m)
-				n["tools"] = values
-				return n, true, nil
-			}
-			return m, false, nil
-		})
-		if err != nil {
-			return nil, false, err
-		}
-		if c {
-			put("input", values)
-		}
-	}
-	if choice := object(body["tool_choice"]); choice != nil {
-		value, c, err := forwardChoice(choice, "tool_choice", p)
-		if err != nil {
-			return nil, false, err
-		}
-		if c {
-			put("tool_choice", value)
-		}
+		n[transform.key] = value
 	}
 	return n, changed, nil
 }
@@ -534,16 +442,8 @@ func restoreCall(m map[string]any, path string, p Profile, terminal bool) (map[s
 		return m, false, nil
 	}
 	if bit&messageTools != 0 {
-		if err := emptyMarker(m, path); err != nil {
+		if err := validateRestoredMessage(m, path, terminal); err != nil {
 			return nil, false, err
-		}
-		if m["encrypted_content"] != nil {
-			return nil, false, protocolError("codex_collaboration_encrypted", path+".encrypted_content", "encrypted tool call cannot be restored as plaintext")
-		}
-		if terminal {
-			if err := plaintextArguments(m, path); err != nil {
-				return nil, false, err
-			}
 		}
 	}
 	changed := ns == Alias || text(m["namespace"]) != Namespace || text(m["name"]) != name
@@ -552,21 +452,9 @@ func restoreCall(m map[string]any, path string, p Profile, terminal bool) (map[s
 		n = renameIdentity(m, Namespace)
 	}
 	if bit&messageTools != 0 {
-		plain := false
-		switch marker := m["encrypted_function_args"].(type) {
-		case []any:
-			plain = marker != nil && len(marker) == 0
-		case []string:
-			plain = marker != nil && len(marker) == 0
-		}
-		if !plain || changed {
-			if !changed {
-				n = copyMap(m)
-				changed = true
-			}
-			n["encrypted_function_args"] = []any{}
-		}
+		n, changed = restorePlainMarker(m, n, changed)
 	}
+
 	return n, changed, nil
 }
 
@@ -589,67 +477,7 @@ func restoreTools(tools []any, path string, p Profile) ([]any, bool, error) {
 	if aliases > 0 && aliases+natives > 1 {
 		return nil, false, protocolError("codex_collaboration_alias_conflict", path, "conflicting collaboration namespace declarations")
 	}
-	return mapArray(tools, path, func(m map[string]any, at string) (map[string]any, bool, error) {
-		if text(m["type"]) != "namespace" {
-			if reservedName(m) {
-				return nil, false, protocolError("codex_collaboration_tool", at, "alias declaration is not a registered namespace")
-			}
-			return m, false, nil
-		}
-		if text(m["name"]) == Alias {
-			children, ok := m["tools"].([]any)
-			if !ok || len(children) == 0 {
-				return nil, false, protocolError("codex_collaboration_tool", at, "alias namespace has no registered declarations")
-			}
-			seen := uint32(0)
-			for _, value := range children {
-				child := object(value)
-				bit := toolBit(text(child["name"]))
-				if text(child["type"]) != "function" || bit == 0 || bit&p.Tools == 0 || bit&seen != 0 {
-					return nil, false, protocolError("codex_collaboration_tool", at+".tools", "unregistered or duplicate alias declaration")
-				}
-				seen |= bit
-				if bit&messageTools != 0 && schemaMessage(child) == nil {
-					return nil, false, protocolError("codex_collaboration_tool", at+".tools", "message declaration is missing its schema")
-				}
-			}
-			values, _, err := mapArray(children, at+".tools", func(child map[string]any, _ string) (map[string]any, bool, error) {
-				if toolBit(text(child["name"]))&messageTools == 0 {
-					return child, false, nil
-				}
-				if schemaMessage(child)["encrypted"] == true {
-					return child, false, nil
-				}
-				n := copyMap(child)
-				params := copyMap(object(child["parameters"]))
-				properties := copyMap(object(params["properties"]))
-				message := copyMap(schemaMessage(child))
-				message["encrypted"] = true
-				properties["message"] = message
-				params["properties"] = properties
-				n["parameters"] = params
-				return n, true, nil
-			})
-			if err != nil {
-				return nil, false, err
-			}
-			n := copyMap(m)
-			n["name"] = Namespace
-			n["tools"] = values
-			return n, true, nil
-		}
-		if reservedName(m) {
-			return nil, false, protocolError("codex_collaboration_tool", at, "invalid alias namespace declaration")
-		}
-		children, _ := m["tools"].([]any)
-		values, changed, err := restoreTools(children, at+".tools", p)
-		if err != nil || !changed {
-			return m, false, err
-		}
-		n := copyMap(m)
-		n["tools"] = values
-		return n, true, nil
-	})
+	return mapArray(tools, path, func(m map[string]any, at string) (map[string]any, bool, error) { return restoreTool(m, at, p) })
 }
 
 func restoreItem(m map[string]any, path string, p Profile, terminal bool) (map[string]any, bool, error) {
@@ -657,7 +485,7 @@ func restoreItem(m map[string]any, path string, p Profile, terminal bool) (map[s
 		return restoreCall(m, path, p, terminal)
 	}
 	tools, _ := m["tools"].([]any)
-	values, changed, err := restoreTools(tools, path+".tools", p)
+	values, changed, err := restoreTools(tools, path+toolsPathSuffix, p)
 	if err != nil || !changed {
 		return m, false, err
 	}
@@ -717,22 +545,12 @@ func RestoreEvent(event map[string]any, p Profile) (map[string]any, bool, error)
 	if !p.Enabled() {
 		return event, false, nil
 	}
-	n := event
-	changed := false
 	typ := text(event["type"])
-	if typ == "response.output_item.added" || typ == "response.output_item.done" {
-		if item := object(event["item"]); item != nil {
-			value, c, err := restoreItem(item, "event.item", p, typ == "response.output_item.done")
-			if err != nil {
-				return nil, false, err
-			}
-			if c {
-				n = copyMap(event)
-				changed = true
-				n["item"] = value
-			}
-		}
+	n, changed, err := restoreEventItem(event, p, typ)
+	if err != nil {
+		return nil, false, err
 	}
+
 	if typ == "response.function_call_arguments.delta" || typ == "response.function_call_arguments.done" {
 		ns, name := identity(event)
 		if ns == Alias && toolBit(name)&p.Tools != 0 {
@@ -754,20 +572,7 @@ func Canonical(item any, p Profile) any {
 		return item
 	}
 	if items, ok := item.([]any); ok {
-		var result []any
-		for i, value := range items {
-			next := Canonical(value, p)
-			if m := object(value); m != nil && text(m["type"]) == "function_call" {
-				if result == nil {
-					result = append([]any(nil), items...)
-				}
-				result[i] = next
-			}
-		}
-		if result != nil {
-			return result
-		}
-		return item
+		return canonicalItems(items, p)
 	}
 	m := object(item)
 	if text(m["type"]) != "function_call" {
@@ -785,4 +590,249 @@ func Canonical(item any, p Profile) any {
 		delete(n, "encrypted_function_args")
 	}
 	return n
+}
+
+func forwardTool(m map[string]any, at string, p Profile) (map[string]any, bool, error) {
+	if text(m["type"]) != "namespace" {
+		return m, false, nil
+	}
+	children, _ := m["tools"].([]any)
+	if text(m["name"]) == Namespace {
+		matched := false
+		for _, child := range children {
+			cm := object(child)
+			bit := toolBit(text(cm["name"]))
+			if text(cm["type"]) == "function" && bit&p.Tools != 0 {
+				matched = true
+			}
+		}
+		if matched {
+			return forwardNamespace(m, children, at, p)
+		}
+	}
+	cleaned, changed, err := forwardTools(children, at+toolsPathSuffix, p)
+	if err != nil || !changed {
+		return m, false, err
+	}
+	n := copyMap(m)
+	n["tools"] = cleaned
+	return n, true, nil
+}
+
+func forwardInput(m map[string]any, at string, p Profile) (map[string]any, bool, error) {
+	switch text(m["type"]) {
+	case "agent_message":
+		return agentMessage(m, at)
+	case "function_call":
+		return forwardCall(m, at, p)
+	case "additional_tools":
+		tools, _ := m["tools"].([]any)
+		values, c, err := forwardTools(tools, at+toolsPathSuffix, p)
+		if err != nil || !c {
+			return m, false, err
+		}
+		n := copyMap(m)
+		n["tools"] = values
+		return n, true, nil
+	}
+	return m, false, nil
+}
+
+func restoreTool(m map[string]any, at string, p Profile) (map[string]any, bool, error) {
+	if text(m["type"]) != "namespace" {
+		if reservedName(m) {
+			return nil, false, protocolError("codex_collaboration_tool", at, "alias declaration is not a registered namespace")
+		}
+		return m, false, nil
+	}
+	if text(m["name"]) == Alias {
+		return restoreAliasNamespace(m, at, p)
+	}
+	if reservedName(m) {
+		return nil, false, protocolError("codex_collaboration_tool", at, "invalid alias namespace declaration")
+	}
+	children, _ := m["tools"].([]any)
+	values, changed, err := restoreTools(children, at+toolsPathSuffix, p)
+	if err != nil || !changed {
+		return m, false, err
+	}
+	n := copyMap(m)
+	n["tools"] = values
+	return n, true, nil
+}
+
+func detectTools(tools []any, path string, p *Profile) error {
+	for i, value := range tools {
+		m := object(value)
+		at := fmt.Sprintf("%s[%d]", path, i)
+		if reservedName(m) {
+			return protocolError("codex_collaboration_alias_conflict", at, "reserved collaboration alias is already defined")
+		}
+		if text(m["type"]) != "namespace" {
+			continue
+		}
+		children, _ := m["tools"].([]any)
+		if text(m["name"]) == Namespace {
+			detectNamespaceTools(children, p)
+		}
+		if err := detectTools(children, at+toolsPathSuffix, p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+func detectNamespaceTools(children []any, p *Profile) {
+	var bits uint32
+	matched := false
+	for _, child := range children {
+		cm := object(child)
+		if nativeMessageSpec(cm) {
+			matched = true
+		}
+		if text(cm["type"]) == "function" {
+			bits |= toolBit(text(cm["name"]))
+		}
+	}
+	if matched {
+		p.Version = 1
+		p.Tools |= bits
+	}
+}
+
+func restoreAliasNamespace(m map[string]any, at string, p Profile) (map[string]any, bool, error) {
+	children, ok := m["tools"].([]any)
+	if !ok || len(children) == 0 {
+		return nil, false, protocolError("codex_collaboration_tool", at, "alias namespace has no registered declarations")
+	}
+	seen := uint32(0)
+	for _, value := range children {
+		child := object(value)
+		bit := toolBit(text(child["name"]))
+		if text(child["type"]) != "function" || bit == 0 || bit&p.Tools == 0 || bit&seen != 0 {
+			return nil, false, protocolError("codex_collaboration_tool", at+toolsPathSuffix, "unregistered or duplicate alias declaration")
+		}
+		seen |= bit
+		if bit&messageTools != 0 && schemaMessage(child) == nil {
+			return nil, false, protocolError("codex_collaboration_tool", at+toolsPathSuffix, "message declaration is missing its schema")
+		}
+	}
+	values, _, err := mapArray(children, at+toolsPathSuffix, func(child map[string]any, _ string) (map[string]any, bool, error) {
+		if toolBit(text(child["name"]))&messageTools == 0 {
+			return child, false, nil
+		}
+		if schemaMessage(child)["encrypted"] == true {
+			return child, false, nil
+		}
+		n := copyMap(child)
+		params := copyMap(object(child["parameters"]))
+		properties := copyMap(object(params["properties"]))
+		message := copyMap(schemaMessage(child))
+		message["encrypted"] = true
+		properties["message"] = message
+		params["properties"] = properties
+		n["parameters"] = params
+		return n, true, nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	n := copyMap(m)
+	n["name"] = Namespace
+	n["tools"] = values
+	return n, true, nil
+}
+
+func forwardNamespace(m map[string]any, children []any, at string, p Profile) (map[string]any, bool, error) {
+	// Renaming a namespace would also rename unknown members. Do not
+	// silently advertise them as official tools on the return path.
+	for _, child := range children {
+		cm := object(child)
+		if text(cm["type"]) != "function" || toolBit(text(cm["name"]))&p.Tools == 0 {
+			return nil, false, protocolError("codex_collaboration_tool", at, "unregistered collaboration member")
+		}
+	}
+	n := copyMap(m)
+	n["name"] = Alias
+	cleaned, _, err := mapArray(children, at+toolsPathSuffix, func(cm map[string]any, _ string) (map[string]any, bool, error) {
+		if toolBit(text(cm["name"]))&messageTools != 0 {
+			next, changed := stripSchema(cm)
+			return next, changed, nil
+		}
+		return cm, false, nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	n["tools"] = cleaned
+	return n, true, nil
+}
+
+func validateRestoredMessage(m map[string]any, path string, terminal bool) error {
+	if err := emptyMarker(m, path); err != nil {
+		return err
+	}
+	if m["encrypted_content"] != nil {
+		return protocolError("codex_collaboration_encrypted", path+".encrypted_content", "encrypted tool call cannot be restored as plaintext")
+	}
+	if terminal {
+		if err := plaintextArguments(m, path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func canonicalItems(items []any, p Profile) any {
+	var result []any
+	for i, value := range items {
+		next := Canonical(value, p)
+		if m := object(value); m != nil && text(m["type"]) == "function_call" {
+			if result == nil {
+				result = append([]any(nil), items...)
+			}
+			result[i] = next
+		}
+	}
+	if result != nil {
+		return result
+	}
+	return items
+}
+
+func restorePlainMarker(m, n map[string]any, changed bool) (map[string]any, bool) {
+	plain := false
+	switch marker := m["encrypted_function_args"].(type) {
+	case []any:
+		plain = marker != nil && len(marker) == 0
+	case []string:
+		plain = marker != nil && len(marker) == 0
+	}
+	if !plain || changed {
+		if !changed {
+			n = copyMap(m)
+			changed = true
+		}
+		n["encrypted_function_args"] = []any{}
+	}
+
+	return n, changed
+}
+
+func restoreEventItem(event map[string]any, p Profile, typ string) (map[string]any, bool, error) {
+	n := event
+	changed := false
+	if typ == "response.output_item.added" || typ == "response.output_item.done" {
+		if item := object(event["item"]); item != nil {
+			value, c, err := restoreItem(item, "event.item", p, typ == "response.output_item.done")
+			if err != nil {
+				return nil, false, err
+			}
+			if c {
+				n = copyMap(event)
+				changed = true
+				n["item"] = value
+			}
+		}
+	}
+	return n, changed, nil
 }

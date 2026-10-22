@@ -74,10 +74,10 @@ const terminalSSE = "data: {\"type\":\"response.completed\",\"response\":{\"id\"
 const deltaSSE = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n"
 
 // sseUpstream is a fake ChatGPT Codex backend speaking SSE.
-func sseUpstream(cap *upstreamCapture) http.HandlerFunc {
+func sseUpstream(captureRecord *upstreamCapture) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		cap.set(r, body)
+		captureRecord.set(r, body)
 
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("x-request-id", "req-from-upstream")
@@ -96,11 +96,11 @@ func sseUpstream(cap *upstreamCapture) http.HandlerFunc {
 
 // wsUpstream is a fake backend that upgrades to a WebSocket and answers each
 // response.create frame with the same event sequence.
-func wsUpstream(t *testing.T, cap *upstreamCapture) http.HandlerFunc {
+func wsUpstream(t *testing.T, captureRecord *upstreamCapture) http.HandlerFunc {
 	t.Helper()
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	return func(w http.ResponseWriter, r *http.Request) {
-		cap.set(r, nil)
+		captureRecord.set(r, nil)
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			t.Errorf("fake upstream upgrade failed: %v", err)
@@ -112,7 +112,7 @@ func wsUpstream(t *testing.T, cap *upstreamCapture) http.HandlerFunc {
 			t.Errorf("fake upstream read failed: %v", err)
 			return
 		}
-		cap.setWS(frame)
+		captureRecord.setWS(frame)
 
 		for _, payload := range []string{
 			`{"type":"response.created","response":{"id":"resp_ws_1"}}`,
@@ -175,9 +175,9 @@ func newHarness(t *testing.T, upstreamHandler http.Handler, transport string) *t
 	t.Helper()
 	dir := t.TempDir()
 	st, err := store.Open(filepath.Join(dir, "test.db"))
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatalf("open store: %v", err)
-	}
+	})
 	// Cleanups run LIFO, so the store is closed before the private SQLite
 	// directory is removed. This retry is needed on Windows for WAL handles.
 	t.Cleanup(func() {
@@ -201,17 +201,17 @@ func newHarness(t *testing.T, upstreamHandler http.Handler, transport string) *t
 func newHarnessWithStore(t *testing.T, upstreamHandler http.Handler, transport string, st *store.Store, sessions session.Store) *testHarness {
 	t.Helper()
 	ctx := context.Background()
-	if st == nil {
+	reportTestFailure(t, st == nil, func() {
 		t.Fatal("nil test store")
-	}
+	})
 
 	upstreamSrv := httptest.NewServer(upstreamHandler)
 	t.Cleanup(upstreamSrv.Close)
 
 	account, err := st.FindAccountByAccountID(ctx, "acct-123")
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatalf("read fixture account: %v", err)
-	}
+	})
 	if account == nil {
 		// The fake JWT permits account-id extraction, without contacting OAuth.
 		account = &store.Account{
@@ -220,20 +220,26 @@ func newHarnessWithStore(t *testing.T, upstreamHandler http.Handler, transport s
 			ExpiresAt: time.Now().Add(2 * time.Hour).UnixMilli(),
 			Enabled:   true, Weight: 1, Concurrency: 3, Status: store.AccountStatusReady,
 		}
-		if err := st.CreateAccount(ctx, account); err != nil {
-			t.Fatalf("create account: %v", err)
+		{
+			err := st.CreateAccount(ctx, account)
+			reportTestFailure(t, err != nil, func() {
+				t.Fatalf("create account: %v", err)
+			})
 		}
 	}
 
 	key, err := st.GetKeyByValue(ctx, "sk-pi-test")
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatalf("read fixture key: %v", err)
-	}
+	})
 	if key == nil {
 		// No groups: this key may use every account.
 		key = &store.APIKey{Name: "test-key", Key: "sk-pi-test", Enabled: true}
-		if err := st.CreateKey(ctx, key); err != nil {
-			t.Fatalf("create key: %v", err)
+		{
+			err := st.CreateKey(ctx, key)
+			reportTestFailure(t, err != nil, func() {
+				t.Fatalf("create key: %v", err)
+			})
 		}
 	}
 
@@ -264,9 +270,9 @@ func newHarnessWithStore(t *testing.T, upstreamHandler http.Handler, transport s
 		Logger:     discardLogger(),
 	}
 	upstreamCfg.CompactionKey, err = st.CompactionKey(ctx)
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatal(err)
-	}
+	})
 	if sessions != nil {
 		// Real service CI can take longer than the production best-effort cache
 		// deadline; still bound the test and require every completed write.
@@ -276,8 +282,11 @@ func newHarnessWithStore(t *testing.T, upstreamHandler http.Handler, transport s
 	t.Cleanup(upstreamClient.Close)
 
 	holder := settings.New(st, cfg)
-	if err := holder.Load(ctx); err != nil {
-		t.Fatalf("load settings: %v", err)
+	{
+		err := holder.Load(ctx)
+		reportTestFailure(t, err != nil, func() {
+			t.Fatalf("load settings: %v", err)
+		})
 	}
 
 	dataPlane := New(Options{
@@ -338,8 +347,8 @@ func discardLogger() *slog.Logger {
 // TestSSERequestReproducesPiWireShape is the core fidelity test: it asserts the
 // gateway sends exactly what Pi sends.
 func TestSSERequestReproducesPiWireShape(t *testing.T) {
-	cap := &upstreamCapture{}
-	h := newHarness(t, sseUpstream(cap), "passthrough")
+	captureRecord := &upstreamCapture{}
+	h := newHarness(t, sseUpstream(captureRecord), "passthrough")
 
 	body := `{
 		"model": "gpt-5.1-codex",
@@ -364,9 +373,9 @@ func TestSSERequestReproducesPiWireShape(t *testing.T) {
 	req.Header.Set("chatgpt-account-id", "attacker-account")
 
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatalf("request failed: %v", err)
-	}
+	})
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
@@ -374,23 +383,35 @@ func TestSSERequestReproducesPiWireShape(t *testing.T) {
 	}
 	_, _ = io.ReadAll(resp.Body)
 
-	headers, sentBody := cap.get()
+	headers, sentBody := captureRecord.get()
 
 	// ---- header assertions (Pi's exact set on the Sign in with ChatGPT route) ----
 	// The ChatGPT route sends no originator/OpenAI-Beta/chatgpt-account-id header.
 	for _, absent := range []string{"originator", "OpenAI-Beta", "chatgpt-account-id"} {
-		if got := headers.Get(absent); got != "" {
-			t.Errorf("%s = %q, want it absent on the ChatGPT route", absent, got)
+		{
+			got := headers.Get(absent)
+			reportTestFailure(t, got != "", func() {
+				t.Errorf("%s = %q, want it absent on the ChatGPT route", absent, got)
+			})
 		}
 	}
-	if got := headers.Get("User-Agent"); !strings.HasPrefix(got, "pi (") {
-		t.Errorf("User-Agent = %q, want a pi (...) value", got)
+	{
+		got := headers.Get("User-Agent")
+		reportTestFailure(t, !strings.HasPrefix(got, "pi ("), func() {
+			t.Errorf("User-Agent = %q, want a pi (...) value", got)
+		})
 	}
-	if got := headers.Get("accept"); got != "application/json" {
-		t.Errorf("accept = %q", got)
+	{
+		got := headers.Get("accept")
+		reportTestFailure(t, got != "application/json", func() {
+			t.Errorf("accept = %q", got)
+		})
 	}
-	if got := headers.Get("content-type"); got != "application/json" {
-		t.Errorf("content-type = %q", got)
+	{
+		got := headers.Get("content-type")
+		reportTestFailure(t, got != "application/json", func() {
+			t.Errorf("content-type = %q", got)
+		})
 	}
 	// The SDK's platform fingerprint headers must reach the wire, with the
 	// defaults from the example config.
@@ -403,84 +424,105 @@ func TestSSERequestReproducesPiWireShape(t *testing.T) {
 		"X-Stainless-Runtime-Version": "v24.21.0",
 		"X-Stainless-Retry-Count":     "0",
 	} {
-		if got := headers.Get(name); got != want {
-			t.Errorf("%s = %q, want %q on the wire", name, got, want)
+		{
+			got := headers.Get(name)
+			reportTestFailure(t, got != want, func() {
+				t.Errorf("%s = %q, want %q on the wire", name, got, want)
+			})
 		}
 	}
-	if got := headers.Get("X-Stainless-Timeout"); got != "" {
-		t.Errorf("X-Stainless-Timeout = %q, want it absent without an explicit timeout", got)
+	{
+		got := headers.Get("X-Stainless-Timeout")
+		reportTestFailure(t, got != "", func() {
+			t.Errorf("X-Stainless-Timeout = %q, want it absent without an explicit timeout", got)
+		})
 	}
-	if got := headers.Get("session_id"); got != "session-abc" {
-		t.Errorf("session_id = %q, want the client's prompt_cache_key", got)
+	{
+		got := headers.Get("session_id")
+		reportTestFailure(t, got != "session-abc", func() {
+			t.Errorf("session_id = %q, want the client's prompt_cache_key", got)
+		})
 	}
-	if got := headers.Get("x-client-request-id"); got != "session-abc" {
-		t.Errorf("x-client-request-id = %q", got)
+	{
+		got := headers.Get("x-client-request-id")
+		reportTestFailure(t, got != "session-abc", func() {
+			t.Errorf("x-client-request-id = %q", got)
+		})
 	}
-	if !strings.HasPrefix(headers.Get("Authorization"), "Bearer ") {
+	reportTestFailure(t, !strings.HasPrefix(headers.Get("Authorization"), "Bearer "), func() {
 		t.Errorf("Authorization missing bearer token")
-	}
+	})
 
 	// ---- no client header may leak ----
 	for _, leaked := range []string{"x-client-secret", "evil", "attacker-account"} {
 		for name, values := range headers {
 			for _, v := range values {
-				if strings.Contains(strings.ToLower(v), leaked) || strings.EqualFold(name, leaked) {
+				reportTestFailure(t, strings.Contains(strings.ToLower(v), leaked) || strings.EqualFold(name, leaked), func() {
 					t.Errorf("client header leaked upstream: %s: %s", name, v)
-				}
+				})
 			}
 		}
 	}
-	if got := headers.Get("User-Agent"); strings.Contains(got, "evil-client") {
-		t.Errorf("client User-Agent leaked: %q", got)
+	{
+		got := headers.Get("User-Agent")
+		reportTestFailure(t, strings.Contains(got, "evil-client"), func() {
+			t.Errorf("client User-Agent leaked: %q", got)
+		})
 	}
 
 	// ---- body assertions ----
 	var sent map[string]any
-	if err := json.Unmarshal(sentBody, &sent); err != nil {
-		t.Fatalf("upstream body is not JSON: %v", err)
+	{
+		err := json.Unmarshal(sentBody, &sent)
+		reportTestFailure(t, err != nil, func() {
+			t.Fatalf("upstream body is not JSON: %v", err)
+		})
 	}
-	if sent["store"] != false {
+	reportTestFailure(t, sent["store"] != false, func() {
 		t.Errorf("store = %v, want false", sent["store"])
-	}
-	if sent["stream"] != true {
+	})
+	reportTestFailure(t, sent["stream"] != true, func() {
 		t.Errorf("stream = %v, want true", sent["stream"])
-	}
+	})
 	include, ok := sent["include"].([]any)
-	if !ok || len(include) != 1 || include[0] != "reasoning.encrypted_content" {
+	reportTestFailure(t, !ok || len(include) != 1 || include[0] != "reasoning.encrypted_content", func() {
 		t.Errorf("include = %v, want [reasoning.encrypted_content]", sent["include"])
-	}
+	})
 	reasoning, _ := sent["reasoning"].(map[string]any)
-	if reasoning["effort"] != "medium" {
+	reportTestFailure(t, reasoning["effort"] != "medium", func() {
 		t.Errorf("reasoning.effort = %v, want medium", reasoning["effort"])
-	}
+	})
 	// Sign in with ChatGPT rejects these, and Pi never sends them on this route.
 	for _, dropped := range []string{"metadata", "max_output_tokens", "temperature", "tool_choice"} {
-		if _, exists := sent[dropped]; exists {
-			t.Errorf("%s was forwarded upstream; it must be dropped", dropped)
+		{
+			_, exists := sent[dropped]
+			reportTestFailure(t, exists, func() {
+				t.Errorf("%s was forwarded upstream; it must be dropped", dropped)
+			})
 		}
 	}
-	if sent["instructions"] != "You are Pi." || sent["parallel_tool_calls"] != false {
+	reportTestFailure(t, sent["instructions"] != "You are Pi." || sent["parallel_tool_calls"] != false, func() {
 		t.Errorf("client instructions/parallel_tool_calls changed: %s", sentBody)
-	}
+	})
 	text, _ := sent["text"].(map[string]any)
-	if text["verbosity"] != "high" {
+	reportTestFailure(t, text["verbosity"] != "high", func() {
 		t.Errorf("text.verbosity lost: %s", sentBody)
-	}
+	})
 
 	// Pi serialises in a fixed key order; verify the prefix matches byte for byte.
 	prefix := `{"model":"gpt-5.1-codex","input":`
-	if !strings.HasPrefix(string(sentBody), prefix) {
+	reportTestFailure(t, !strings.HasPrefix(string(sentBody), prefix), func() {
 		t.Errorf("request body key order differs from Pi:\n got: %s\nwant prefix: %s", string(sentBody), prefix)
-	}
-	if !strings.Contains(string(sentBody), `"stream":true,"prompt_cache_key":"session-abc","store":false`) {
+	})
+	reportTestFailure(t, !strings.Contains(string(sentBody), `"stream":true,"prompt_cache_key":"session-abc","store":false`), func() {
 		t.Errorf("request body is not in Pi's field order: %s", string(sentBody))
-	}
+	})
 }
 
-func multilineSSEUpstream(cap *upstreamCapture) http.HandlerFunc {
+func multilineSSEUpstream(captureRecord *upstreamCapture) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
-		cap.set(r, body)
+		captureRecord.set(r, body)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		flusher, _ := w.(http.Flusher)
@@ -497,42 +539,42 @@ func multilineSSEUpstream(cap *upstreamCapture) http.HandlerFunc {
 }
 
 func TestSSEMultilineJSONRemainsParseable(t *testing.T) {
-	cap := &upstreamCapture{}
-	h := newHarness(t, multilineSSEUpstream(cap), "passthrough")
+	captureRecord := &upstreamCapture{}
+	h := newHarness(t, multilineSSEUpstream(captureRecord), "passthrough")
 	req, _ := http.NewRequest(http.MethodPost, h.server.URL+"/v1/responses", strings.NewReader(`{"model":"gpt-5.1-codex","input":"hi"}`))
 	req.Header.Set("Authorization", "Bearer "+h.key)
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatalf("request failed: %v", err)
-	}
+	})
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
+	reportTestFailure(t, resp.StatusCode != http.StatusOK, func() {
 		t.Fatalf("status = %d, body = %s", resp.StatusCode, raw)
-	}
+	})
 
 	reader := upstream.ParseSSE(strings.NewReader(string(raw)))
 	event, err := reader.Next()
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatalf("parse relayed SSE: %v; body=%s", err, raw)
-	}
-	if event.Type != "response.output_text.delta" || event.Data["delta"] != "hello" {
+	})
+	reportTestFailure(t, event.Type != "response.output_text.delta" || event.Data["delta"] != "hello", func() {
 		t.Fatalf("event = %#v, want equivalent multiline JSON event", event.Data)
-	}
+	})
 }
 
 // TestCaptureRecordsHeadersAndFrames verifies the analysis payload.
 func TestCaptureRecordsHeadersAndFrames(t *testing.T) {
-	cap := &upstreamCapture{}
-	h := newHarness(t, sseUpstream(cap), "passthrough")
+	captureRecord := &upstreamCapture{}
+	h := newHarness(t, sseUpstream(captureRecord), "passthrough")
 
 	req, _ := http.NewRequest(http.MethodPost, h.server.URL+"/v1/responses",
 		strings.NewReader(`{"model":"gpt-5.1-codex","input":"hi"}`))
 	req.Header.Set("Authorization", "Bearer "+h.key)
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatalf("request failed: %v", err)
-	}
+	})
 	_, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
 
@@ -545,34 +587,34 @@ func TestCaptureRecordsHeadersAndFrames(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if len(captures) == 0 {
+	reportTestFailure(t, len(captures) == 0, func() {
 		t.Fatal("no capture was recorded")
-	}
+	})
 
 	c := captures[0]
-	if c.AccountID != h.accountID {
+	reportTestFailure(t, c.AccountID != h.accountID, func() {
 		t.Errorf("capture account = %d, want %d", c.AccountID, h.accountID)
-	}
-	if c.ClientTransport != "sse" || c.UpstreamTransport != "sse" {
+	})
+	reportTestFailure(t, c.ClientTransport != "sse" || c.UpstreamTransport != "sse", func() {
 		t.Errorf("transports = %s/%s, want sse/sse", c.ClientTransport, c.UpstreamTransport)
-	}
-	if c.Status != http.StatusOK {
+	})
+	reportTestFailure(t, c.Status != http.StatusOK, func() {
 		t.Errorf("capture status = %d", c.Status)
-	}
-	if c.Outcome != store.OutcomeOK {
+	})
+	reportTestFailure(t, c.Outcome != store.OutcomeOK, func() {
 		t.Errorf("capture outcome = %q, want ok", c.Outcome)
-	}
-	if c.ResponseID != "resp_test_1" {
+	})
+	reportTestFailure(t, c.ResponseID != "resp_test_1", func() {
 		t.Errorf("response id = %q", c.ResponseID)
-	}
-	if c.PromptTokens != 11 || c.CompletionTokens != 7 || c.TotalTokens != 18 {
+	})
+	reportTestFailure(t, c.PromptTokens != 11 || c.CompletionTokens != 7 || c.TotalTokens != 18, func() {
 		t.Errorf("usage = %d/%d/%d, want 11/7/18", c.PromptTokens, c.CompletionTokens, c.TotalTokens)
-	}
+	})
 
 	// Request headers must be recorded, with the bearer token masked.
-	if len(c.RequestHeaders) == 0 {
+	reportTestFailure(t, len(c.RequestHeaders) == 0, func() {
 		t.Error("request headers were not captured")
-	}
+	})
 	sawAccept, sawMaskedAuth := false, false
 	for _, hd := range c.RequestHeaders {
 		switch strings.ToLower(hd.Name) {
@@ -582,15 +624,15 @@ func TestCaptureRecordsHeadersAndFrames(t *testing.T) {
 			sawMaskedAuth = strings.Contains(hd.Value, "...")
 		}
 	}
-	if !sawAccept {
+	reportTestFailure(t, !sawAccept, func() {
 		t.Error("captured request headers are missing accept: application/json")
-	}
-	if !sawMaskedAuth {
+	})
+	reportTestFailure(t, !sawMaskedAuth, func() {
 		t.Error("captured Authorization header was not masked")
-	}
-	if len(c.ResponseHeaders) == 0 {
+	})
+	reportTestFailure(t, len(c.ResponseHeaders) == 0, func() {
 		t.Error("response headers were not captured")
-	}
+	})
 
 	// Frames must contain every incoming event.
 	//
@@ -609,50 +651,56 @@ func TestCaptureRecordsHeadersAndFrames(t *testing.T) {
 			sawTerminal = true
 		}
 	}
-	if inbound < 2 {
+	reportTestFailure(t, inbound < 2, func() {
 		t.Errorf("inbound frames = %d, want at least 2", inbound)
-	}
-	if !sawTerminal {
+	})
+	reportTestFailure(t, !sawTerminal, func() {
 		t.Error("terminal event was not captured")
-	}
-	if c.RequestBody == "" {
+	})
+	reportTestFailure(t, c.RequestBody == "", func() {
 		t.Error("request body was not captured")
-	}
-	if !strings.Contains(c.RequestBody, `"store":false`) {
+	})
+	reportTestFailure(t, !strings.Contains(c.RequestBody, `"store":false`), func() {
 		t.Errorf("captured request body is not the Pi-shaped payload: %s", c.RequestBody)
-	}
-	if !strings.Contains(c.ResponseText, "response.completed") {
+	})
+	reportTestFailure(t, !strings.Contains(c.ResponseText, "response.completed"), func() {
 		t.Error("raw SSE text was not captured")
-	}
+	})
 }
 
 // TestWebSocketCaptureIsBidirectional verifies that a WebSocket exchange records
 // both directions, which is what makes the full round trip replayable.
 func TestWebSocketCaptureIsBidirectional(t *testing.T) {
-	cap := &upstreamCapture{}
-	h := newHarness(t, wsUpstream(t, cap), "passthrough")
+	captureRecord := &upstreamCapture{}
+	h := newHarness(t, wsUpstream(t, captureRecord), "passthrough")
 
 	wsURL := "ws" + strings.TrimPrefix(h.server.URL, "http") + "/v1/responses"
 	dialer := websocket.Dialer{HandshakeTimeout: 5 * time.Second}
 	conn, _, err := dialer.Dial(wsURL, http.Header{"Authorization": []string{"Bearer " + h.key}})
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatalf("dial failed: %v", err)
-	}
+	})
 	defer conn.Close()
 
-	if err := conn.WriteMessage(websocket.TextMessage,
-		[]byte(`{"type":"response.create","model":"gpt-5.1-codex","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`)); err != nil {
-		t.Fatalf("write failed: %v", err)
+	{
+		err := conn.WriteMessage(websocket.TextMessage,
+			[]byte(`{"type":"response.create","model":"gpt-5.1-codex","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`))
+		reportTestFailure(t, err != nil, func() {
+			t.Fatalf("write failed: %v", err)
+		})
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	for {
 		_, payload, err := conn.ReadMessage()
-		if err != nil {
+		reportTestFailure(t, err != nil, func() {
 			t.Fatalf("read failed: %v", err)
-		}
+		})
 		var ev map[string]any
-		if err := json.Unmarshal(payload, &ev); err != nil {
-			t.Fatalf("decode: %v", err)
+		{
+			err := json.Unmarshal(payload, &ev)
+			reportTestFailure(t, err != nil, func() {
+				t.Fatalf("decode: %v", err)
+			})
 		}
 		if ev["type"] == "response.completed" {
 			break
@@ -667,9 +715,9 @@ func TestWebSocketCaptureIsBidirectional(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if len(captures) == 0 {
+	reportTestFailure(t, len(captures) == 0, func() {
 		t.Fatal("no capture recorded for the websocket exchange")
-	}
+	})
 	c := captures[0]
 
 	var outbound, inbound int
@@ -686,31 +734,34 @@ func TestWebSocketCaptureIsBidirectional(t *testing.T) {
 			inbound++
 		}
 	}
-	if outbound == 0 {
+	reportTestFailure(t, outbound == 0, func() {
 		t.Error("no outbound frame captured for the websocket exchange")
-	}
-	if inbound == 0 {
+	})
+	reportTestFailure(t, inbound == 0, func() {
 		t.Error("no inbound frame captured for the websocket exchange")
-	}
-	if c.ClientTransport != "ws" {
+	})
+	reportTestFailure(t, c.ClientTransport != "ws", func() {
 		t.Errorf("client transport = %q, want ws", c.ClientTransport)
-	}
-	if c.RequestBody == "" {
+	})
+	reportTestFailure(t, c.RequestBody == "", func() {
 		t.Error("outbound frame bytes were not captured")
-	}
-	if outboundEnvelope == nil {
+	})
+	reportTestFailure(t, outboundEnvelope == nil, func() {
 		t.Fatal("captured outbound WS frame envelope is missing")
-	}
-	if outboundEnvelope["type"] != "response.create" || outboundEnvelope["model"] != "gpt-5.1-codex" {
+	})
+	reportTestFailure(t, outboundEnvelope["type"] != "response.create" || outboundEnvelope["model"] != "gpt-5.1-codex", func() {
 		t.Fatalf("captured outbound frame envelope = %#v", outboundEnvelope)
-	}
+	})
 	var sentEnvelope map[string]any
-	if err := json.Unmarshal(cap.getWS(), &sentEnvelope); err != nil {
-		t.Fatalf("decode actual upstream envelope: %v", err)
+	{
+		err := json.Unmarshal(captureRecord.getWS(), &sentEnvelope)
+		reportTestFailure(t, err != nil, func() {
+			t.Fatalf("decode actual upstream envelope: %v", err)
+		})
 	}
-	if !reflect.DeepEqual(outboundEnvelope, sentEnvelope) {
+	reportTestFailure(t, !reflect.DeepEqual(outboundEnvelope, sentEnvelope), func() {
 		t.Fatalf("captured envelope = %#v, upstream received %#v", outboundEnvelope, sentEnvelope)
-	}
+	})
 }
 
 // TestWebSocketQueueOverflowReturnsExplicitErrors verifies that burst requests
@@ -724,17 +775,20 @@ func TestWebSocketQueueOverflowReturnsExplicitErrors(t *testing.T) {
 	defer releaseUpstream()
 	wsURL := "ws" + strings.TrimPrefix(h.server.URL, "http") + "/v1/responses"
 	conn, _, err := (&websocket.Dialer{HandshakeTimeout: 5 * time.Second}).Dial(wsURL, http.Header{"Authorization": []string{"Bearer " + h.key}})
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatalf("dial failed: %v", err)
-	}
+	})
 	defer conn.Close()
 
 	const sent = 6
 	writeFrame := func(i int) {
 		t.Helper()
 		frame := fmt.Sprintf(`{"type":"response.create","event_id":"burst-%d","prompt_cache_key":"burst-%d","model":"gpt-5.1-codex","input":"hi"}`, i, i)
-		if err := conn.WriteMessage(websocket.TextMessage, []byte(frame)); err != nil {
-			t.Fatalf("write frame %d: %v", i, err)
+		{
+			err := conn.WriteMessage(websocket.TextMessage, []byte(frame))
+			reportTestFailure(t, err != nil, func() {
+				t.Fatalf("write frame %d: %v", i, err)
+			})
 		}
 	}
 	writeFrame(0)
@@ -750,8 +804,11 @@ func TestWebSocketQueueOverflowReturnsExplicitErrors(t *testing.T) {
 	readFrame := func() map[string]any {
 		t.Helper()
 		var frame map[string]any
-		if err := conn.ReadJSON(&frame); err != nil {
-			t.Fatalf("read response: %v", err)
+		{
+			err := conn.ReadJSON(&frame)
+			reportTestFailure(t, err != nil, func() {
+				t.Fatalf("read response: %v", err)
+			})
 		}
 		return frame
 	}
@@ -762,9 +819,9 @@ func TestWebSocketQueueOverflowReturnsExplicitErrors(t *testing.T) {
 		frame := readFrame()
 		inner, _ := frame["error"].(map[string]any)
 		wantID := fmt.Sprintf("burst-%d", i)
-		if frame["type"] != "error" || frame["status"] != float64(http.StatusTooManyRequests) || inner["code"] != "too_many_requests" || frame["event_id"] != wantID {
+		reportTestFailure(t, frame["type"] != "error" || frame["status"] != float64(http.StatusTooManyRequests) || inner["code"] != "too_many_requests" || frame["event_id"] != wantID, func() {
 			t.Fatalf("rejection for %s = %#v", wantID, frame)
-		}
+		})
 		settled[wantID] = "rejected"
 	}
 	releaseUpstream()
@@ -773,9 +830,9 @@ func TestWebSocketQueueOverflowReturnsExplicitErrors(t *testing.T) {
 		for _, wantType := range []string{"response.created", "response.completed"} {
 			frame := readFrame()
 			response, _ := frame["response"].(map[string]any)
-			if frame["type"] != wantType || response["id"] != wantID {
+			reportTestFailure(t, frame["type"] != wantType || response["id"] != wantID, func() {
 				t.Fatalf("response for %s = %#v, want %s", wantID, frame, wantType)
-			}
+			})
 		}
 	}
 	for i := 0; i < 2; i++ {
@@ -783,9 +840,9 @@ func TestWebSocketQueueOverflowReturnsExplicitErrors(t *testing.T) {
 		readCompleted(id)
 		settled[id] = "completed"
 	}
-	if len(settled) != sent {
+	reportTestFailure(t, len(settled) != sent, func() {
 		t.Fatalf("settled requests = %#v, want all %d unique IDs", settled, sent)
-	}
+	})
 	// Rejection does not terminate the reader or poison future exchanges.
 	writeFrame(sent)
 	readCompleted(fmt.Sprintf("burst-%d", sent))
@@ -794,32 +851,35 @@ func TestWebSocketQueueOverflowReturnsExplicitErrors(t *testing.T) {
 // TestSSEClientUsesAccountWebSocketUpstream verifies the client/upstream protocol
 // matrix: an SSE client still reaches a WS backend when the account says ws.
 func TestSSEClientUsesAccountWebSocketUpstream(t *testing.T) {
-	cap := &upstreamCapture{}
-	h := newHarness(t, wsUpstream(t, cap), "sse")
+	captureRecord := &upstreamCapture{}
+	h := newHarness(t, wsUpstream(t, captureRecord), "sse")
 	account, err := h.store.GetAccount(context.Background(), h.accountID)
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatalf("load account: %v", err)
-	}
+	})
 	account.UpstreamProtocol = "ws"
-	if err := h.store.UpdateAccount(context.Background(), account); err != nil {
-		t.Fatalf("set account upstream protocol: %v", err)
+	{
+		err := h.store.UpdateAccount(context.Background(), account)
+		reportTestFailure(t, err != nil, func() {
+			t.Fatalf("set account upstream protocol: %v", err)
+		})
 	}
 
 	req, _ := http.NewRequest(http.MethodPost, h.server.URL+"/v1/responses",
 		strings.NewReader(`{"model":"gpt-5.1-codex","input":"hi","stream":true}`))
 	req.Header.Set("Authorization", "Bearer "+h.key)
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatalf("request failed: %v", err)
-	}
+	})
 	raw, readErr := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if readErr != nil {
+	reportTestFailure(t, readErr != nil, func() {
 		t.Fatalf("read response: %v", readErr)
-	}
-	if resp.StatusCode != http.StatusOK {
+	})
+	reportTestFailure(t, resp.StatusCode != http.StatusOK, func() {
 		t.Fatalf("status = %d, body = %s", resp.StatusCode, raw)
-	}
+	})
 
 	reader := upstream.ParseSSE(strings.NewReader(string(raw)))
 	var types []string
@@ -828,40 +888,43 @@ func TestSSEClientUsesAccountWebSocketUpstream(t *testing.T) {
 		if err == io.EOF {
 			break
 		}
-		if err != nil {
+		reportTestFailure(t, err != nil, func() {
 			t.Fatalf("parse relayed SSE: %v; body=%s", err, raw)
-		}
+		})
 		if event != nil {
 			types = append(types, event.Type)
 		}
 	}
 	wantTypes := []string{"response.created", "response.output_text.delta", "response.completed"}
-	if strings.Join(types, ",") != strings.Join(wantTypes, ",") {
+	reportTestFailure(t, strings.Join(types, ",") != strings.Join(wantTypes, ","), func() {
 		t.Fatalf("event types = %v, want %v", types, wantTypes)
-	}
+	})
 
-	headers, _ := cap.get()
-	if !strings.EqualFold(headers.Get("Upgrade"), "websocket") || !strings.Contains(strings.ToLower(headers.Get("Connection")), "upgrade") {
+	headers, _ := captureRecord.get()
+	reportTestFailure(t, !strings.EqualFold(headers.Get("Upgrade"), "websocket") || !strings.Contains(strings.ToLower(headers.Get("Connection")), "upgrade"), func() {
 		t.Fatalf("upstream handshake headers = Upgrade %q, Connection %q", headers.Get("Upgrade"), headers.Get("Connection"))
-	}
-	frame := cap.getWS()
-	if len(frame) == 0 {
+	})
+	frame := captureRecord.getWS()
+	reportTestFailure(t, len(frame) == 0, func() {
 		t.Fatal("upstream did not receive a response.create frame")
-	}
+	})
 	var envelope map[string]any
-	if err := json.Unmarshal(frame, &envelope); err != nil {
-		t.Fatalf("decode upstream response.create frame: %v", err)
+	{
+		err := json.Unmarshal(frame, &envelope)
+		reportTestFailure(t, err != nil, func() {
+			t.Fatalf("decode upstream response.create frame: %v", err)
+		})
 	}
-	if envelope["type"] != "response.create" {
+	reportTestFailure(t, envelope["type"] != "response.create", func() {
 		t.Fatalf("upstream frame type = %#v, want response.create", envelope["type"])
-	}
+	})
 }
 
 // TestEnvironmentContextIsDropped verifies the Codex environment block never
 // reaches the backend, matching Pi's behaviour.
 func TestEnvironmentContextIsDropped(t *testing.T) {
-	cap := &upstreamCapture{}
-	h := newHarness(t, sseUpstream(cap), "passthrough")
+	captureRecord := &upstreamCapture{}
+	h := newHarness(t, sseUpstream(captureRecord), "passthrough")
 
 	body := `{
 		"model": "gpt-5.1-codex",
@@ -878,71 +941,80 @@ func TestEnvironmentContextIsDropped(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, h.server.URL+"/v1/responses", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+h.key)
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatalf("request failed: %v", err)
-	}
+	})
 	_, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	_, sentBody := cap.get()
+	_, sentBody := captureRecord.get()
 	sent := string(sentBody)
 
-	if strings.Contains(sent, "<environment_context>") {
+	reportTestFailure(t, strings.Contains(sent, "<environment_context>"), func() {
 		t.Errorf("environment_context leaked upstream:\n%s", sent)
-	}
-	if strings.Contains(sent, "Europe/Berlin") {
+	})
+	reportTestFailure(t, strings.Contains(sent, "Europe/Berlin"), func() {
 		t.Errorf("environment timezone leaked upstream:\n%s", sent)
-	}
-	if strings.Contains(sent, "environments.environment_context") {
+	})
+	reportTestFailure(t, strings.Contains(sent, "environments.environment_context"), func() {
 		t.Errorf("environment content-item metadata leaked upstream:\n%s", sent)
-	}
+	})
 
 	var decoded struct {
 		Input []map[string]any `json:"input"`
 	}
-	if err := json.Unmarshal(sentBody, &decoded); err != nil {
-		t.Fatalf("decode: %v", err)
+	{
+		err := json.Unmarshal(sentBody, &decoded)
+		reportTestFailure(t, err != nil, func() {
+			t.Fatalf("decode: %v", err)
+		})
 	}
-	if len(decoded.Input) != 2 {
+	reportTestFailure(t, len(decoded.Input) != 2, func() {
 		t.Errorf("input items = %d, want 2 (the environment item removed)", len(decoded.Input))
-	}
+	})
 	for _, item := range decoded.Input {
 		raw, _ := json.Marshal(item)
-		if strings.Contains(string(raw), "environment_context") {
+		reportTestFailure(t, strings.Contains(string(raw), "environment_context"), func() {
 			t.Errorf("input item still references environment_context: %s", raw)
-		}
+		})
 	}
 }
 
 // TestWebSocketClientAndUpstream verifies the WS->WS path end to end.
 func TestWebSocketClientAndUpstream(t *testing.T) {
-	cap := &upstreamCapture{}
-	h := newHarness(t, wsUpstream(t, cap), "passthrough")
+	captureRecord := &upstreamCapture{}
+	h := newHarness(t, wsUpstream(t, captureRecord), "passthrough")
 
 	wsURL := "ws" + strings.TrimPrefix(h.server.URL, "http") + "/v1/responses"
 	dialer := websocket.Dialer{HandshakeTimeout: 5 * time.Second}
 	conn, _, err := dialer.Dial(wsURL, http.Header{"Authorization": []string{"Bearer " + h.key}})
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatalf("client websocket dial failed: %v", err)
-	}
+	})
 	defer conn.Close()
 
 	// Pi sends the response.create envelope.
 	frame := `{"type":"response.create","model":"gpt-5.1-codex","instructions":"hi","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`
-	if err := conn.WriteMessage(websocket.TextMessage, []byte(frame)); err != nil {
-		t.Fatalf("client write failed: %v", err)
+	{
+		err := conn.WriteMessage(websocket.TextMessage, []byte(frame))
+		reportTestFailure(t, err != nil, func() {
+			t.Fatalf("client write failed: %v", err)
+		})
 	}
 
 	var events []map[string]any
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	for {
 		_, payload, err := conn.ReadMessage()
-		if err != nil {
+		reportTestFailure(t, err != nil, func() {
 			t.Fatalf("client read failed after %d events: %v", len(events), err)
-		}
+		})
 		var ev map[string]any
-		if err := json.Unmarshal(payload, &ev); err != nil {
-			t.Fatalf("event is not JSON: %v", err)
+		{
+			err := json.Unmarshal(payload, &ev)
+			reportTestFailure(t, err != nil, func() {
+				t.Fatalf("event is not JSON: %v", err)
+			})
 		}
 		events = append(events, ev)
 		if ev["type"] == "response.completed" {
@@ -950,56 +1022,62 @@ func TestWebSocketClientAndUpstream(t *testing.T) {
 		}
 	}
 
-	if len(events) < 3 {
+	reportTestFailure(t, len(events) < 3, func() {
 		t.Fatalf("got %d events, want at least 3", len(events))
-	}
-	if events[0]["type"] != "response.created" {
+	})
+	reportTestFailure(t, events[0]["type"] != "response.created", func() {
 		t.Errorf("first event = %v, want response.created", events[0]["type"])
-	}
-	if events[len(events)-1]["type"] != "response.completed" {
+	})
+	reportTestFailure(t, events[len(events)-1]["type"] != "response.completed", func() {
 		t.Errorf("last event = %v, want response.completed", events[len(events)-1]["type"])
-	}
+	})
 
 	// The upstream frame must carry the response.create envelope with Pi's body.
-	cap.mu.Lock()
-	sentFrame := string(cap.wsFrame)
-	cap.mu.Unlock()
-	if !strings.HasPrefix(sentFrame, `{"type":"response.create","model":"gpt-5.1-codex","input":`) {
+	captureRecord.mu.Lock()
+	sentFrame := string(captureRecord.wsFrame)
+	captureRecord.mu.Unlock()
+	reportTestFailure(t, !strings.HasPrefix(sentFrame, `{"type":"response.create","model":"gpt-5.1-codex","input":`), func() {
 		t.Errorf("upstream websocket frame is not Pi-shaped:\n%s", sentFrame)
-	}
-	if !strings.Contains(sentFrame, `"stream":true,`) || !strings.Contains(sentFrame, `"store":false`) || !strings.Contains(sentFrame, `"instructions":"hi"`) {
+	})
+	reportTestFailure(t, !strings.Contains(sentFrame, `"stream":true,`) || !strings.Contains(sentFrame, `"store":false`) || !strings.Contains(sentFrame, `"instructions":"hi"`), func() {
 		t.Errorf("upstream websocket frame lacks Pi's field order:\n%s", sentFrame)
-	}
+	})
 }
 
 // TestWebSocketClientWithSSEUpstream verifies the cross-transport bridge.
 func TestWebSocketClientWithSSEUpstream(t *testing.T) {
-	cap := &upstreamCapture{}
-	h := newHarness(t, sseUpstream(cap), "sse") // force the upstream to SSE
+	captureRecord := &upstreamCapture{}
+	h := newHarness(t, sseUpstream(captureRecord), "sse") // force the upstream to SSE
 
 	wsURL := "ws" + strings.TrimPrefix(h.server.URL, "http") + "/v1/responses"
 	dialer := websocket.Dialer{HandshakeTimeout: 5 * time.Second}
 	conn, _, err := dialer.Dial(wsURL, http.Header{"Authorization": []string{"Bearer " + h.key}})
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatalf("client websocket dial failed: %v", err)
-	}
+	})
 	defer conn.Close()
 
-	if err := conn.WriteMessage(websocket.TextMessage,
-		[]byte(`{"type":"response.create","model":"gpt-5.1-codex","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)); err != nil {
-		t.Fatalf("write failed: %v", err)
+	{
+		err := conn.WriteMessage(websocket.TextMessage,
+			[]byte(`{"type":"response.create","model":"gpt-5.1-codex","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`))
+		reportTestFailure(t, err != nil, func() {
+			t.Fatalf("write failed: %v", err)
+		})
 	}
 
 	var types []string
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	for {
 		_, payload, err := conn.ReadMessage()
-		if err != nil {
+		reportTestFailure(t, err != nil, func() {
 			t.Fatalf("read failed after %d events: %v", len(types), err)
-		}
+		})
 		var ev map[string]any
-		if err := json.Unmarshal(payload, &ev); err != nil {
-			t.Fatalf("event is not JSON: %v", err)
+		{
+			err := json.Unmarshal(payload, &ev)
+			reportTestFailure(t, err != nil, func() {
+				t.Fatalf("event is not JSON: %v", err)
+			})
 		}
 		evType, _ := ev["type"].(string)
 		types = append(types, evType)
@@ -1007,69 +1085,78 @@ func TestWebSocketClientWithSSEUpstream(t *testing.T) {
 			break
 		}
 	}
-	if len(types) == 0 || types[len(types)-1] != "response.completed" {
+	reportTestFailure(t, len(types) == 0 || types[len(types)-1] != "response.completed", func() {
 		t.Fatalf("event types = %v, want a response.completed terminator", types)
-	}
+	})
 }
 
 // TestMiddlewareCanDropRequest verifies a middleware can refuse a request before
 // it reaches the backend.
 func TestMiddlewareCanDropRequest(t *testing.T) {
-	cap := &upstreamCapture{}
-	h := newHarness(t, sseUpstream(cap), "passthrough")
+	captureRecord := &upstreamCapture{}
+	h := newHarness(t, sseUpstream(captureRecord), "passthrough")
 
 	// Enable block_prompt with a pattern matching the payload.
 	err := h.store.UpsertMiddleware(context.Background(), &store.MiddlewareRow{
 		Name: "block_prompt", Enabled: true, OrderIndex: 5, Config: `{"pattern":"forbidden-token"}`,
 	})
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatalf("configure middleware: %v", err)
-	}
+	})
 
 	req, _ := http.NewRequest(http.MethodPost, h.server.URL+"/v1/responses",
 		strings.NewReader(`{"model":"gpt-5.1-codex","input":"please use forbidden-token"}`))
 	req.Header.Set("Authorization", "Bearer "+h.key)
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatalf("request failed: %v", err)
-	}
+	})
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusForbidden {
+	reportTestFailure(t, resp.StatusCode != http.StatusForbidden, func() {
 		t.Fatalf("status = %d, want 403 (request should have been dropped)", resp.StatusCode)
-	}
-	if headers, _ := cap.get(); headers != nil {
-		t.Errorf("request reached the upstream despite being blocked")
+	})
+	{
+		headers, _ := captureRecord.get()
+		reportTestFailure(t, headers != nil, func() {
+			t.Errorf("request reached the upstream despite being blocked")
+		})
 	}
 }
 
 // TestNonStreamingResponseAggregation verifies stream:false returns one object.
 func TestNonStreamingResponseAggregation(t *testing.T) {
-	cap := &upstreamCapture{}
-	h := newHarness(t, sseUpstream(cap), "passthrough")
+	captureRecord := &upstreamCapture{}
+	h := newHarness(t, sseUpstream(captureRecord), "passthrough")
 
 	req, _ := http.NewRequest(http.MethodPost, h.server.URL+"/v1/responses",
 		strings.NewReader(`{"model":"gpt-5.1-codex","stream":false,"input":"hi"}`))
 	req.Header.Set("Authorization", "Bearer "+h.key)
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatalf("request failed: %v", err)
-	}
+	})
 	defer resp.Body.Close()
 
-	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "application/json") {
-		t.Errorf("content-type = %q, want JSON for stream:false", ct)
+	{
+		ct := resp.Header.Get("Content-Type")
+		reportTestFailure(t, !strings.Contains(ct, "application/json"), func() {
+			t.Errorf("content-type = %q, want JSON for stream:false", ct)
+		})
 	}
 	var payload map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		t.Fatalf("decode: %v", err)
+	{
+		err := json.NewDecoder(resp.Body).Decode(&payload)
+		reportTestFailure(t, err != nil, func() {
+			t.Fatalf("decode: %v", err)
+		})
 	}
-	if payload["id"] != "resp_test_1" {
+	reportTestFailure(t, payload["id"] != "resp_test_1", func() {
 		t.Errorf("id = %v, want resp_test_1", payload["id"])
-	}
-	if payload["status"] != "completed" {
+	})
+	reportTestFailure(t, payload["status"] != "completed", func() {
 		t.Errorf("status = %v", payload["status"])
-	}
+	})
 }
 
 // TestUpstreamErrorIsReported verifies a backend failure becomes an HTTP error.
@@ -1084,18 +1171,18 @@ func TestUpstreamErrorIsReported(t *testing.T) {
 		strings.NewReader(`{"model":"gpt-5.1-codex","input":"hi"}`))
 	req.Header.Set("Authorization", "Bearer "+h.key)
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatalf("request failed: %v", err)
-	}
+	})
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusTooManyRequests {
+	reportTestFailure(t, resp.StatusCode != http.StatusTooManyRequests, func() {
 		t.Fatalf("status = %d, want 429", resp.StatusCode)
-	}
+	})
 	raw, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(raw), "usage limit") {
+	reportTestFailure(t, !strings.Contains(string(raw), "usage limit"), func() {
 		t.Errorf("error body = %s, want a friendly usage-limit message", raw)
-	}
+	})
 }
 
 // TestInvalidKeyRejected verifies auth.
@@ -1109,13 +1196,13 @@ func TestInvalidKeyRejected(t *testing.T) {
 			req.Header.Set("Authorization", "Bearer "+key)
 		}
 		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
+		reportTestFailure(t, err != nil, func() {
 			t.Fatalf("request failed: %v", err)
-		}
+		})
 		resp.Body.Close()
-		if resp.StatusCode != http.StatusUnauthorized {
+		reportTestFailure(t, resp.StatusCode != http.StatusUnauthorized, func() {
 			t.Errorf("key %q: status = %d, want 401", key, resp.StatusCode)
-		}
+		})
 	}
 }
 
@@ -1127,10 +1214,10 @@ const usageTerminalSSE = `data: {"type":"response.completed","response":{"id":"r
 // finished usage_records row carrying tokens, cached tokens, TTFT, latency and
 // the calculated cost.
 func TestUsageRecordCapturesMetricsOnTheWire(t *testing.T) {
-	cap := &upstreamCapture{}
+	captureRecord := &upstreamCapture{}
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
-		cap.set(r, nil)
+		captureRecord.set(r, nil)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		flusher, _ := w.(http.Flusher)
@@ -1153,9 +1240,9 @@ func TestUsageRecordCapturesMetricsOnTheWire(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+h.key)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatalf("request failed: %v", err)
-	}
+	})
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
@@ -1166,18 +1253,18 @@ func TestUsageRecordCapturesMetricsOnTheWire(t *testing.T) {
 
 	rec := waitForUsageRecord(t, h.store)
 
-	if rec.Outcome != "succeeded" {
+	reportTestFailure(t, rec.Outcome != "succeeded", func() {
 		t.Errorf("outcome = %q, want succeeded", rec.Outcome)
-	}
-	if rec.Model != "gpt-5.5" {
+	})
+	reportTestFailure(t, rec.Model != "gpt-5.5", func() {
 		t.Errorf("model = %q, want gpt-5.5", rec.Model)
-	}
-	if rec.APIKeyName != "test-key" || rec.AccountName != "test-account" {
+	})
+	reportTestFailure(t, rec.APIKeyName != "test-key" || rec.AccountName != "test-account", func() {
 		t.Errorf("attribution = %q/%q", rec.APIKeyName, rec.AccountName)
-	}
-	if rec.ClientTransport != "sse" {
+	})
+	reportTestFailure(t, rec.ClientTransport != "sse", func() {
 		t.Errorf("client transport = %q, want sse", rec.ClientTransport)
-	}
+	})
 	for _, tc := range []struct {
 		name string
 		got  *int64
@@ -1193,23 +1280,25 @@ func TestUsageRecordCapturesMetricsOnTheWire(t *testing.T) {
 			t.Errorf("%s is NULL, want %d", tc.name, tc.want)
 			continue
 		}
-		if *tc.got != tc.want {
+		reportTestFailure(t, *tc.got != tc.want, func() {
 			t.Errorf("%s = %d, want %d", tc.name, *tc.got, tc.want)
-		}
+		})
 	}
-	if rec.FirstTokenMS <= 0 {
+	reportTestFailure(t, rec.FirstTokenMS <= 0, func() {
 		t.Errorf("first_token_ms = %d, want > 0 (TTFT must be measured)", rec.FirstTokenMS)
-	}
-	if rec.LatencyMS <= 0 {
+	})
+	reportTestFailure(t, rec.LatencyMS <= 0, func() {
 		t.Errorf("latency_ms = %d, want > 0", rec.LatencyMS)
-	}
-	if rec.FirstTokenMS > rec.LatencyMS {
+	})
+	reportTestFailure(t, rec.FirstTokenMS > rec.LatencyMS, func() {
 		t.Errorf("first_token_ms (%d) must not exceed latency_ms (%d)", rec.FirstTokenMS, rec.LatencyMS)
-	}
+	})
 	if rec.CostMicros == nil || *rec.CostMicros <= 0 {
 		t.Errorf("cost_micros = %v, want a positive calculated cost", rec.CostMicros)
-	} else if rec.CostSource != "builtin" && rec.CostSource != "override" {
-		t.Errorf("cost_source = %q, want builtin/override", rec.CostSource)
+	} else {
+		reportTestFailure(t, rec.CostSource != "builtin" && rec.CostSource != "override", func() {
+			t.Errorf("cost_source = %q, want builtin/override", rec.CostSource)
+		})
 	}
 }
 
@@ -1220,17 +1309,17 @@ func waitForUsageRecord(t *testing.T, st *store.Store) store.UsageRecord {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		records, total, err := st.ListUsageRecords(context.Background(), store.UsageFilter{Limit: 20})
-		if err != nil {
+		reportTestFailure(t, err != nil, func() {
 			t.Fatalf("list usage records: %v", err)
-		}
+		})
 		for _, r := range records {
 			if r.Outcome != "running" {
 				return r
 			}
 		}
-		if time.Now().After(deadline) {
+		reportTestFailure(t, time.Now().After(deadline), func() {
 			t.Fatalf("no finalised usage record; total = %d", total)
-		}
+		})
 		time.Sleep(20 * time.Millisecond)
 	}
 }

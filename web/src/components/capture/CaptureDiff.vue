@@ -25,7 +25,24 @@ const open = ref(props.initialOpen)
 const complete = computed(() => props.before.available && props.after.available)
 const same = computed(() => complete.value && equalPayloads(props.before.value, props.after.value))
 const diff = computed(() => open.value && complete.value ? diffPayloads(props.before.value, props.after.value) : null)
-const state = computed(() => !complete.value ? 'unavailable' : props.partial ? 'partial' : same.value ? 'unchanged' : !diff.value ? 'inspectDiff' : diff.value.limited ? 'previewLimited' : 'changed')
+const state = computed(() => (() => {
+    if (!complete.value) {
+        return 'unavailable'
+    }
+    if (props.partial) {
+        return 'partial'
+    }
+    if (same.value) {
+        return 'unchanged'
+    }
+    if (!diff.value) {
+        return 'inspectDiff'
+    }
+    if (diff.value.limited) {
+        return 'previewLimited'
+    }
+    return 'changed'
+})())
 const single = computed(() => props.after.available ? props.after : props.before)
 const singleLabel = computed(() => props.after.available ? props.afterLabel : props.beforeLabel)
 </script>
@@ -34,7 +51,7 @@ const singleLabel = computed(() => props.after.available ? props.afterLabel : pr
 	<details class="capture-diff card" :data-state="state" :open="open" @toggle="open = ($event.target as HTMLDetailsElement).open">
 		<summary class="diff-summary">
 			<strong>{{ title }}</strong>
-			<Badge :tone="state === 'changed' ? 'warn' : state === 'unchanged' ? 'success' : 'neutral'">{{ c(state === 'partial' ? 'partial' : state) }}</Badge>
+			<Badge :tone="(() => { if (state === 'changed') { return 'warn'; } if (state === 'unchanged') { return 'success'; } return 'neutral'; })()">{{ c(state === 'partial' ? 'partial' : state) }}</Badge>
 			<ChevronDown :size="15" class="diff-chevron" :class="{ rotated: open }" />
 		</summary>
 		<div class="diff-directions"><span>{{ beforeLabel }}</span><span aria-hidden="true">→</span><span>{{ afterLabel }}</span></div>
@@ -52,11 +69,11 @@ const singleLabel = computed(() => props.after.available ? props.afterLabel : pr
 			</template>
 			<template v-else-if="diff">
 				<div v-if="!same" class="diff-legend"><span class="removed-label">{{ c('removed') }} · {{ beforeLabel }}</span><span class="added-label">{{ c('added') }} · {{ afterLabel }}</span><code>{{ c('changes', { added: diff.added, removed: diff.removed }) }}</code></div>
-				<p v-if="diff.limited" class="capture-note" role="status">{{ c('limited') }}</p>
+				<output v-if="diff.limited" class="capture-note" >{{ c('limited') }}</output>
 				<p v-if="partial" class="capture-note">{{ c('partial') }}</p>
 				<div class="diff-lines" :aria-label="title" tabindex="0">
 					<div v-for="(line, index) in diff.lines" :key="index" class="diff-line" :class="`diff-${line.kind}`">
-						<span class="line-number" aria-hidden="true">{{ line.beforeLine ?? '' }}</span><span class="line-number" aria-hidden="true">{{ line.afterLine ?? '' }}</span><span class="line-sign">{{ line.kind === 'added' ? '+' : line.kind === 'removed' ? '−' : ' ' }}</span><code>{{ line.text || ' ' }}</code>
+						<span class="line-number" aria-hidden="true">{{ line.beforeLine ?? '' }}</span><span class="line-number" aria-hidden="true">{{ line.afterLine ?? '' }}</span><span class="line-sign">{{ (() => { if (line.kind === 'added') { return '+'; } if (line.kind === 'removed') { return '−'; } return ' '; })() }}</span><code>{{ line.text || ' ' }}</code>
 					</div>
 				</div>
 				<details v-if="!same" class="recorded-values"><summary>{{ c('rawValues') }}</summary><div class="recorded-grid"><JsonViewer :value="preview(before.value).text" :label="beforeLabel" max-height="24rem" /><JsonViewer :value="preview(after.value).text" :label="afterLabel" max-height="24rem" /></div><p v-if="preview(before.value).limited || preview(after.value).limited" class="capture-note">{{ c('limited') }}</p></details>

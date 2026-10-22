@@ -10,7 +10,7 @@ const initial = computed(() => displayTitle.value.slice(0, 1).toUpperCase())
 const tone = computed(() => {
 	const tones = ['info', 'success', 'warn', 'danger'] as const
 	let hash = 0
-	for (const char of displayTitle.value) hash = (hash * 31 + char.charCodeAt(0)) >>> 0
+	for (const char of displayTitle.value) hash = (hash * 31 + char.codePointAt(0)!) >>> 0
 	return tones[hash % tones.length]
 })
 </script>

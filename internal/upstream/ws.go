@@ -72,43 +72,14 @@ func (c *Client) streamWS(ctx context.Context, req *Request, onEvent func(*Event
 	explicit := req.PreviousResponseID != ""
 	if explicit {
 		r := req.Continuation
-		if !c.cfg.Pool || !c.validRecord(r, req.ClientKeyID, req.PreviousResponseID) || r.AccountID != req.AccountID || r.IdentityHash != c.identityHash(req) || r.CodexBridge != req.CodexBridge || !c.pool.matches(r) {
+		if !c.validWSContinuation(req, r) {
 			return nil, continuationMismatch()
 		}
 		key = r.SessionID // trusted opaque original pool scope, not this downstream's ID
 	}
-	conn, acquireErr := c.pool.acquire(ctx, key)
-	if acquireErr != nil {
-		return nil, acquireErr
-	}
-	result := &StreamResult{Transport: "websocket"}
-	emitted := false
-
-	// A waiter may acquire the lane after another request advanced its parent.
-	// Never dial a replacement for an explicit connection-local continuation.
-	if explicit && (conn == nil || conn.id != req.Continuation.ConnectionID || !c.pool.matches(req.Continuation)) {
-		if conn != nil {
-			c.pool.put(key, conn)
-		} else {
-			c.pool.release(key)
-		}
-		return result, continuationMismatch()
-	}
-	reused := conn != nil
-	if conn == nil {
-		fresh, resp, err := c.dialWS(ctx, req)
-		if resp != nil {
-			result.Status = resp.StatusCode
-		}
-		if err != nil {
-			c.pool.release(key)
-			return result, &transportError{err: err, transport: "websocket", requestNotSent: true}
-		}
-		conn = &wsConn{socket: fresh, id: newConnectionID(), createdAt: time.Now(), busy: true}
-		if !c.pool.register(key, conn) {
-			c.pool.discard(key, conn)
-			return nil, fmt.Errorf("upstream: pool closed")
-		}
+	conn, reused, result, err := c.acquireWSConnection(ctx, req, key, explicit)
+	if err != nil {
+		return result, err
 	}
 
 	// On a reused socket with cached conversation state, send only the new input
@@ -118,16 +89,7 @@ func (c *Client) streamWS(ctx context.Context, req *Request, onEvent func(*Event
 	conn.socket.SetReadLimit(maxWSFrameBytes)
 
 	if usePool && !explicit && reused && conn.continuation != nil {
-		continued := false
-		if deltaBody, ok := buildDeltaBody(req.Body, conn.continuation, req.CodexBridge); ok {
-			if deltaFrame, err := buildWSFrame(deltaBody); err == nil {
-				frame = deltaFrame
-				continued = true
-			}
-		}
-		if !continued {
-			c.pool.setBaseline(key, conn, nil, 0, nil)
-		}
+		frame = c.continuedWSFrame(req, conn, key, frame)
 	}
 
 	keep := true
@@ -153,180 +115,20 @@ func (c *Client) streamWS(ctx context.Context, req *Request, onEvent func(*Event
 		}
 		close(watchDone)
 		<-watchExited // Never let a previous request's watcher close a reused socket.
-		if ctx.Err() != nil {
-			keep = false
-		}
-		if keep && key != "" && !conn.isDead() {
-			c.pool.put(key, conn)
-			return
-		}
-		c.pool.discard(key, conn)
+		c.releaseWSConnection(ctx, key, conn, keep)
 	}()
 
 	// Record the WebSocket handshake request side once per exchange.
-	if req.Sink != nil {
-		req.Sink.OnRequestHeaders(c.cfg.WSURL, req.WSHeaders)
-		req.Sink.OnRequestBody(frame, false)
-		req.Sink.OnFrame("out", "ws_frame", "response.create", frame, nil)
+	c.observeWSRequest(req, frame)
+
+	if err := writeWSRequest(conn, frame); err != nil {
+		return result, err
 	}
 
-	if err := conn.socket.SetWriteDeadline(time.Now().Add(StreamWriteTimeout)); err != nil {
-		conn.markDead()
-		return result, &transportError{err: fmt.Errorf("upstream: ws write deadline: %w", err), transport: "websocket", requestNotSent: true}
-	}
-	// A failed write can still have sent some or all of response.create. From this
-	// point on, requestNotSent must remain false, regardless of observed events.
-	if err := conn.socket.WriteMessage(websocket.TextMessage, frame); err != nil {
-		conn.markDead()
-		return result, &transportError{err: fmt.Errorf("upstream: ws send: %w", err), transport: "websocket"}
-	}
-
-	idle := c.cfg.IdleTimeout
-	for {
-		if err := ctx.Err(); err != nil {
-			keep = false
-			return result, err
-		}
-		_ = conn.socket.SetReadDeadline(time.Now().Add(idle))
-
-		messageType, payload, err := conn.socket.ReadMessage()
-		if control != nil {
-			control.flush(req.Sink)
-		}
-		if err != nil {
-			conn.markDead()
-			if errors.Is(err, websocket.ErrReadLimit) {
-				return result, &transportError{
-					err:           &WSFrameTooLargeError{Limit: maxWSFrameBytes},
-					eventsEmitted: emitted,
-					transport:     "websocket",
-				}
-			}
-			if ctx.Err() != nil {
-				keep = false
-				return result, ctx.Err()
-			}
-			if time.Since(conn.createdAt) >= c.pool.maxAge {
-				return result, &transportError{err: ErrWSMaxAge, eventsEmitted: emitted, transport: "websocket"}
-			}
-			var networkError net.Error
-			if errors.As(err, &networkError) && networkError.Timeout() {
-				return result, &transportError{
-					err:           &IdleTimeoutError{Timeout: idle},
-					eventsEmitted: emitted,
-					transport:     "websocket",
-				}
-			}
-			var closeErr *websocket.CloseError
-			if errors.As(err, &closeErr) {
-				if req.Sink != nil {
-					req.Sink.OnFrame("in", "ws_close", fmt.Sprintf("%d", closeErr.Code), []byte(closeErr.Text), nil)
-				}
-				return result, &transportError{
-					err:           fmt.Errorf("upstream: websocket stream truncated before a terminal event: %w", closeErr),
-					eventsEmitted: emitted,
-					transport:     "websocket",
-				}
-			}
-			return result, &transportError{
-				err:           fmt.Errorf("upstream: websocket stream truncated before a terminal event: %w", err),
-				eventsEmitted: emitted,
-				transport:     "websocket",
-			}
-		}
-
-		var decoded map[string]any
-		if err := json.Unmarshal(payload, &decoded); err != nil {
-			conn.markDead()
-			return result, &transportError{
-				err:           fmt.Errorf("upstream: invalid websocket JSON: %w", err),
-				eventsEmitted: emitted,
-				transport:     "websocket",
-			}
-		}
-		eventType, _ := decoded["type"].(string)
-		event := &Event{Type: eventType, Raw: payload, Data: decoded, At: time.Now()}
-		failure := FailureFromEvent(event)
-		deliveryEvent := failureEventForDelivery(event, failure)
-
-		responseID := ExtractResponseID(decoded)
-		if control != nil {
-			if IsTerminal(eventType) || failure != nil {
-				control.clear()
-				control.flush(req.Sink)
-			} else if responseID != "" {
-				control.bind(conn, responseID)
-			}
-		}
-		if req.Sink != nil {
-			kind := "ws_frame"
-			if messageType == websocket.BinaryMessage {
-				kind = "ws_binary"
-			}
-			req.Sink.OnFrame("in", kind, eventType, payload, decoded)
-			if responseID != "" {
-				req.Sink.OnResponseID(responseID)
-			}
-			if IsTerminal(eventType) {
-				req.Sink.OnUsage(ExtractUsage(decoded))
-			}
-		}
-		ready := failure == nil && (successfulTerminal(event) || interruptedTerminal(event)) && responseID != "" && ctx.Err() == nil && !conn.isDead()
-		var record *session.Record
-		if ready {
-			record = c.completedRecord(req, conn, key, responseID)
-			// Bound the shared write before terminal delivery. A late shared record
-			// alone can never pass the live socket's post-callback ready check.
-			c.commitShared(ctx, record)
-		}
-		if err := ctx.Err(); err != nil {
-			keep = false
-			return result, err
-		}
-		if conn.isDead() {
-			keep = false
-			return result, &transportError{err: ErrWSMaxAge, eventsEmitted: emitted, transport: "websocket"}
-		}
-		if err := onEvent(deliveryEvent); err != nil {
-			// A callback error may follow a partial downstream write, so it always
-			// prevents transparent retry.
-			emitted = true
-			keep = false
-			return result, &transportError{err: err, eventsEmitted: emitted, transport: "websocket"}
-		}
-		if failure != nil {
-			// This failure reached the callback, so retry is no longer safe.
-			emitted = true
-			// A logical failure poisons the conversation state on this socket.
-			conn.continuation = nil
-			conn.markDead()
-			keep = false
-			return result, &transportError{err: failure, eventsEmitted: emitted, transport: "websocket"}
-		}
-		emitted = true
-		if IsTerminal(eventType) {
-			if ready && ctx.Err() == nil && !conn.isDead() {
-				// Only a successfully delivered terminal may advance local readiness.
-				conn.lastResponseID = responseID
-				var baseline *wsContinuation
-				var size int64
-				// Explicit input is already a delta, not a full-history baseline.
-				if usePool && !explicit && int64(len(req.Body)) <= c.cfg.MaxBaselineBytes {
-					if exceptInput, input, ok := bodyExceptInput(req.Body); ok {
-						baseline = &wsContinuation{bodyExceptInput: exceptInput, lastInput: input,
-							lastResponseItems: responseItemsFromTerminal(decoded), lastResponseID: responseID, codexBridge: req.CodexBridge}
-						size = baseline.size()
-					}
-				}
-				c.pool.setBaseline(key, conn, baseline, size, record)
-			} else {
-				// incomplete/done-with-failed-status must never retain a ready parent.
-				keep = false
-				conn.markDead()
-			}
-			return result, nil
-		}
-	}
+	exchange := wsExchange{client: c, request: req, onEvent: onEvent, connection: conn, key: key, usePool: usePool, explicit: explicit, result: result, control: control, keep: true}
+	result, err = exchange.readLoop(ctx)
+	keep = exchange.keep
+	return result, err
 }
 
 // dialWS opens a WebSocket connection with the Pi handshake headers, honouring the
@@ -365,27 +167,14 @@ func (c *Client) dialWS(ctx context.Context, req *Request) (*websocket.Conn, *ht
 		return conn, nil
 	}
 
-	header := http.Header{}
-	for name, values := range req.WSHeaders {
-		if strings.EqualFold(name, "Proxy-Authorization") {
-			continue // Proxy credentials belong only to CONNECT, never the target.
-		}
-		for _, v := range values {
-			header.Add(name, v)
-		}
-	}
+	header := wsHandshakeHeaders(req.WSHeaders)
 
 	conn, resp, err := dialer.DialContext(ctx, c.cfg.WSURL, header)
 	if stop != nil && !stop() {
 		<-closed // A canceled handshake must not race with pool registration.
 	}
 	if ctx.Err() != nil {
-		if conn != nil {
-			_ = conn.Close()
-		}
-		if resp != nil && resp.Body != nil {
-			_ = resp.Body.Close()
-		}
+		closeWSHandshake(conn, resp)
 		return nil, nil, fmt.Errorf("upstream: websocket handshake failed: %w", ctx.Err())
 	}
 	if resp != nil && req.Sink != nil {
@@ -395,29 +184,7 @@ func (c *Client) dialWS(ctx context.Context, req *Request) (*websocket.Conn, *ht
 	}
 	if err != nil {
 		if resp != nil && resp.StatusCode != http.StatusSwitchingProtocols {
-			payload, truncated := readErrorBody(resp)
-			if resp.ContentLength < 0 && len(payload) == 1024 && (resp.Header.Get("Content-Encoding") == "" || strings.EqualFold(resp.Header.Get("Content-Encoding"), "identity")) {
-				// Gorilla retains at most 1024 handshake bytes. With chunked
-				// responses at that boundary completeness cannot be established.
-				truncated = true
-			}
-			if resp.Body != nil {
-				_ = resp.Body.Close()
-			}
-			observeErrorBody(req.Sink, payload, truncated)
-			var data map[string]any
-			_ = jsonUnmarshalBytes(payload, &data)
-			code, _ := extractErrorFields(data)
-			if code == "" {
-				code = fmt.Sprintf("http_%d", resp.StatusCode)
-			}
-			return nil, resp, &FailureError{
-				Status:    resp.StatusCode,
-				Code:      code,
-				RequestID: resp.Header.Get("x-request-id"),
-				Message:   formatUpstreamError(resp.StatusCode, payload),
-				Payload:   payload,
-			}
+			return nil, resp, rejectedWSHandshake(resp, req.Sink)
 		}
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
@@ -429,3 +196,326 @@ func (c *Client) dialWS(ctx context.Context, req *Request) (*websocket.Conn, *ht
 
 // PoolSize exposes the pooled connection count for the admin UI.
 func (c *Client) PoolSize() int { return c.pool.Size() }
+
+// wsExchange owns the mutable state for exactly one response.create exchange.
+type wsExchange struct {
+	client                           *Client
+	request                          *Request
+	onEvent                          func(*Event) error
+	connection                       *wsConn
+	key                              string
+	usePool, explicit, keep, emitted bool
+	result                           *StreamResult
+	control                          *ResponseControl
+}
+
+func (x *wsExchange) readLoop(ctx context.Context) (*StreamResult, error) {
+	idle := x.client.cfg.IdleTimeout
+	for {
+		if err := ctx.Err(); err != nil {
+			x.keep = false
+			return x.result, err
+		}
+		_ = x.connection.socket.SetReadDeadline(time.Now().Add(idle))
+
+		messageType, payload, err := x.connection.socket.ReadMessage()
+		if x.control != nil {
+			x.control.flush(x.request.Sink)
+		}
+		if err != nil {
+			return x.result, x.readError(ctx, err, idle)
+		}
+
+		var decoded map[string]any
+		if err := json.Unmarshal(payload, &decoded); err != nil {
+			x.connection.markDead()
+			return x.result, &transportError{
+				err:           fmt.Errorf("upstream: invalid websocket JSON: %w", err),
+				eventsEmitted: x.emitted,
+				transport:     "websocket",
+			}
+		}
+		eventType, _ := decoded["type"].(string)
+		event := &Event{Type: eventType, Raw: payload, Data: decoded, At: time.Now()}
+		failure := FailureFromEvent(event)
+		deliveryEvent := failureEventForDelivery(event, failure)
+
+		responseID := ExtractResponseID(decoded)
+		x.observeEvent(event, failure, responseID, messageType)
+		ready := x.readyToCommit(ctx, event, failure, responseID)
+		var record *session.Record
+		if ready {
+			record = x.client.completedRecord(x.request, x.connection, x.key, responseID)
+			// Bound the shared write before terminal delivery. A late shared record
+			// alone can never pass the live socket's post-callback ready check.
+			x.client.commitShared(ctx, record)
+		}
+		if err := x.deliverEvent(ctx, deliveryEvent, failure); err != nil {
+			return x.result, err
+		}
+		x.emitted = true
+		if IsTerminal(eventType) {
+			x.finishTerminal(ctx, ready, responseID, decoded, record)
+			return x.result, nil
+		}
+	}
+}
+
+func (x *wsExchange) readError(ctx context.Context, err error, idle time.Duration) error {
+	x.connection.markDead()
+	if errors.Is(err, websocket.ErrReadLimit) {
+		return &transportError{
+			err:           &WSFrameTooLargeError{Limit: maxWSFrameBytes},
+			eventsEmitted: x.emitted,
+			transport:     "websocket",
+		}
+	}
+	if ctx.Err() != nil {
+		x.keep = false
+		return ctx.Err()
+	}
+	if time.Since(x.connection.createdAt) >= x.client.pool.maxAge {
+		return &transportError{err: ErrWSMaxAge, eventsEmitted: x.emitted, transport: "websocket"}
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) && networkError.Timeout() {
+		return &transportError{
+			err:           &IdleTimeoutError{Timeout: idle},
+			eventsEmitted: x.emitted,
+			transport:     "websocket",
+		}
+	}
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) {
+		if x.request.Sink != nil {
+			x.request.Sink.OnFrame("in", "ws_close", fmt.Sprintf("%d", closeErr.Code), []byte(closeErr.Text), nil)
+		}
+		return &transportError{
+			err:           fmt.Errorf("upstream: websocket stream truncated before a terminal event: %w", closeErr),
+			eventsEmitted: x.emitted,
+			transport:     "websocket",
+		}
+	}
+	return &transportError{
+		err:           fmt.Errorf("upstream: websocket stream truncated before a terminal event: %w", err),
+		eventsEmitted: x.emitted,
+		transport:     "websocket",
+	}
+}
+
+func (x *wsExchange) observeEvent(event *Event, failure error, responseID string, messageType int) {
+	if x.control != nil {
+		if IsTerminal(event.Type) || failure != nil {
+			x.control.clear()
+			x.control.flush(x.request.Sink)
+		} else if responseID != "" {
+			x.control.bind(x.connection, responseID)
+		}
+	}
+	if x.request.Sink != nil {
+		kind := "ws_frame"
+		if messageType == websocket.BinaryMessage {
+			kind = "ws_binary"
+		}
+		x.request.Sink.OnFrame("in", kind, event.Type, event.Raw, event.Data)
+		if responseID != "" {
+			x.request.Sink.OnResponseID(responseID)
+		}
+		if IsTerminal(event.Type) {
+			x.request.Sink.OnUsage(ExtractUsage(event.Data))
+		}
+	}
+}
+
+func (x *wsExchange) finishTerminal(ctx context.Context, ready bool, responseID string, decoded map[string]any, record *session.Record) {
+	if ready && ctx.Err() == nil && !x.connection.isDead() {
+		// Only a successfully delivered terminal may advance local readiness.
+		x.connection.lastResponseID = responseID
+		var baseline *wsContinuation
+		var size int64
+		// Explicit input is already a delta, not a full-history baseline.
+		if x.usePool && !x.explicit && int64(len(x.request.Body)) <= x.client.cfg.MaxBaselineBytes {
+			if exceptInput, input, ok := bodyExceptInput(x.request.Body); ok {
+				baseline = &wsContinuation{bodyExceptInput: exceptInput, lastInput: input,
+					lastResponseItems: responseItemsFromTerminal(decoded), lastResponseID: responseID, codexBridge: x.request.CodexBridge}
+				size = baseline.size()
+			}
+		}
+		x.client.pool.setBaseline(x.key, x.connection, baseline, size, record)
+	} else {
+		// incomplete/done-with-failed-status must never retain a ready parent.
+		x.keep = false
+		x.connection.markDead()
+	}
+}
+
+func (c *Client) acquireWSConnection(ctx context.Context, req *Request, key string, explicit bool) (*wsConn, bool, *StreamResult, error) {
+	conn, acquireErr := c.pool.acquire(ctx, key)
+	if acquireErr != nil {
+		return nil, false, nil, acquireErr
+	}
+	result := &StreamResult{Transport: "websocket"}
+
+	// A waiter may acquire the lane after another request advanced its parent.
+	// Never dial a replacement for an explicit connection-local continuation.
+	if explicit && (conn == nil || conn.id != req.Continuation.ConnectionID || !c.pool.matches(req.Continuation)) {
+		if conn != nil {
+			c.pool.put(key, conn)
+		} else {
+			c.pool.release(key)
+		}
+		return nil, false, result, continuationMismatch()
+	}
+	reused := conn != nil
+	if conn == nil {
+		fresh, resp, err := c.dialWS(ctx, req)
+		if resp != nil {
+			result.Status = resp.StatusCode
+		}
+		if err != nil {
+			c.pool.release(key)
+			return nil, false, result, &transportError{err: err, transport: "websocket", requestNotSent: true}
+		}
+		conn = &wsConn{socket: fresh, id: newConnectionID(), createdAt: time.Now(), busy: true}
+		if !c.pool.register(key, conn) {
+			c.pool.discard(key, conn)
+			return nil, false, nil, fmt.Errorf("upstream: pool closed")
+		}
+	}
+
+	return conn, reused, result, nil
+}
+
+func (c *Client) continuedWSFrame(req *Request, conn *wsConn, key string, frame []byte) []byte {
+	continued := false
+	if deltaBody, ok := buildDeltaBody(req.Body, conn.continuation, req.CodexBridge); ok {
+		if deltaFrame, err := buildWSFrame(deltaBody); err == nil {
+			frame = deltaFrame
+			continued = true
+		}
+	}
+	if !continued {
+		c.pool.setBaseline(key, conn, nil, 0, nil)
+	}
+
+	return frame
+}
+
+func (x *wsExchange) deliverEvent(ctx context.Context, deliveryEvent *Event, failure error) error {
+	if err := ctx.Err(); err != nil {
+		x.keep = false
+		return err
+	}
+	if x.connection.isDead() {
+		x.keep = false
+		return &transportError{err: ErrWSMaxAge, eventsEmitted: x.emitted, transport: "websocket"}
+	}
+	if err := x.onEvent(deliveryEvent); err != nil {
+		// A callback error may follow a partial downstream write, so it always
+		// prevents transparent retry.
+		x.emitted = true
+		x.keep = false
+		return &transportError{err: err, eventsEmitted: x.emitted, transport: "websocket"}
+	}
+	if failure != nil {
+		// This failure reached the callback, so retry is no longer safe.
+		x.emitted = true
+		// A logical failure poisons the conversation state on this socket.
+		x.connection.continuation = nil
+		x.connection.markDead()
+		x.keep = false
+		return &transportError{err: failure, eventsEmitted: x.emitted, transport: "websocket"}
+	}
+	return nil
+}
+
+func rejectedWSHandshake(resp *http.Response, sink Sink) error {
+	payload, truncated := readErrorBody(resp)
+	if resp.ContentLength < 0 && len(payload) == 1024 && (resp.Header.Get("Content-Encoding") == "" || strings.EqualFold(resp.Header.Get("Content-Encoding"), "identity")) {
+		// Gorilla retains at most 1024 handshake bytes. With chunked
+		// responses at that boundary completeness cannot be established.
+		truncated = true
+	}
+	if resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	observeErrorBody(sink, payload, truncated)
+	var data map[string]any
+	_ = jsonUnmarshalBytes(payload, &data)
+	code, _ := extractErrorFields(data)
+	if code == "" {
+		code = fmt.Sprintf("http_%d", resp.StatusCode)
+	}
+	return &FailureError{
+		Status:    resp.StatusCode,
+		Code:      code,
+		RequestID: resp.Header.Get("x-request-id"),
+		Message:   formatUpstreamError(resp.StatusCode, payload),
+		Payload:   payload,
+	}
+}
+
+func (c *Client) validWSContinuation(req *Request, r *session.Record) bool {
+	return c.cfg.Pool && c.validRecord(r, req.ClientKeyID, req.PreviousResponseID) && r.AccountID == req.AccountID && r.IdentityHash == c.identityHash(req) && r.CodexBridge == req.CodexBridge && c.pool.matches(r)
+}
+
+func (x *wsExchange) readyToCommit(ctx context.Context, event *Event, failure error, responseID string) bool {
+	return failure == nil && (successfulTerminal(event) || interruptedTerminal(event)) && responseID != "" && ctx.Err() == nil && !x.connection.isDead()
+}
+
+func wsHandshakeHeaders(source http.Header) http.Header {
+	header := http.Header{}
+	for name, values := range source {
+		if strings.EqualFold(name, "Proxy-Authorization") {
+			continue // Proxy credentials belong only to CONNECT, never the target.
+		}
+		for _, v := range values {
+			header.Add(name, v)
+		}
+	}
+
+	return header
+}
+
+func closeWSHandshake(conn *websocket.Conn, resp *http.Response) {
+	if conn != nil {
+		_ = conn.Close()
+	}
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+}
+
+func (c *Client) releaseWSConnection(ctx context.Context, key string, conn *wsConn, keep bool) {
+	if ctx.Err() != nil {
+		keep = false
+	}
+	if keep && key != "" && !conn.isDead() {
+		c.pool.put(key, conn)
+		return
+	}
+	c.pool.discard(key, conn)
+}
+
+func writeWSRequest(conn *wsConn, frame []byte) error {
+	if err := conn.socket.SetWriteDeadline(time.Now().Add(StreamWriteTimeout)); err != nil {
+		conn.markDead()
+		return &transportError{err: fmt.Errorf("upstream: ws write deadline: %w", err), transport: "websocket", requestNotSent: true}
+	}
+	// A failed write can still have sent some or all of response.create. From this
+	// point on, requestNotSent must remain false, regardless of observed events.
+	if err := conn.socket.WriteMessage(websocket.TextMessage, frame); err != nil {
+		conn.markDead()
+		return &transportError{err: fmt.Errorf("upstream: ws send: %w", err), transport: "websocket"}
+	}
+
+	return nil
+}
+
+func (c *Client) observeWSRequest(req *Request, frame []byte) {
+	if req.Sink != nil {
+		req.Sink.OnRequestHeaders(c.cfg.WSURL, req.WSHeaders)
+		req.Sink.OnRequestBody(frame, false)
+		req.Sink.OnFrame("out", "ws_frame", "response.create", frame, nil)
+	}
+}

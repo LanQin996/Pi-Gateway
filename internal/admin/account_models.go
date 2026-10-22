@@ -14,6 +14,7 @@ import (
 
 	"pi-gateway/internal/accounts"
 	"pi-gateway/internal/piwire"
+	"pi-gateway/internal/store"
 	"pi-gateway/internal/upstream"
 )
 
@@ -54,7 +55,7 @@ func (s *Server) handleAccountModels(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := pathInt(r, "id")
 	if err != nil || id <= 0 {
-		writeErr(w, http.StatusBadRequest, "invalid account id")
+		writeErr(w, http.StatusBadRequest, invalidAccountIDMessage)
 		return
 	}
 	catalog, err := s.store.GetAccountModelCatalog(r.Context(), id)
@@ -63,7 +64,7 @@ func (s *Server) handleAccountModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if catalog == nil {
-		writeErr(w, http.StatusNotFound, "account not found")
+		writeErr(w, http.StatusNotFound, accountNotFoundMessage)
 		return
 	}
 	writeJSON(w, http.StatusOK, catalog)
@@ -76,7 +77,7 @@ func (s *Server) handleRefreshAccountModels(w http.ResponseWriter, r *http.Reque
 	}
 	id, err := pathInt(r, "id")
 	if err != nil || id <= 0 {
-		writeErr(w, http.StatusBadRequest, "invalid account id")
+		writeErr(w, http.StatusBadRequest, invalidAccountIDMessage)
 		return
 	}
 	account, err := s.store.GetAccount(r.Context(), id)
@@ -85,7 +86,7 @@ func (s *Server) handleRefreshAccountModels(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if account == nil {
-		writeErr(w, http.StatusNotFound, "account not found")
+		writeErr(w, http.StatusNotFound, accountNotFoundMessage)
 		return
 	}
 	if s.accounts == nil || s.cfg == nil {
@@ -98,13 +99,7 @@ func (s *Server) handleRefreshAccountModels(w http.ResponseWriter, r *http.Reque
 	}
 	catalog, refreshErr := s.accounts.RefreshModelCatalog(r.Context(), account, s.cfg, userAgent)
 	if catalog == nil {
-		status, message := http.StatusInternalServerError, "could not refresh account model catalog"
-		if errors.Is(refreshErr, accounts.ErrModelCatalogAccountMissing) {
-			status, message = http.StatusNotFound, "account no longer exists"
-		}
-		// A failed write must not return an uncommitted snapshot that the UI
-		// could mistake for the new stored catalog or for an empty success.
-		writeErr(w, status, message)
+		writeModelCatalogRefreshFailure(w, refreshErr)
 		return
 	}
 	status := http.StatusOK
@@ -130,25 +125,8 @@ func (s *Server) handleTestAccountModel(w http.ResponseWriter, r *http.Request) 
 	redactor := &modelTestRedactor{}
 	var accountID int64
 	upstreamStarted := false
-	finish := func(status int, message string) {
-		result.Error, _ = redactor.bounded(message, maxModelTestDiagnostic, result.UpstreamBodyTruncated)
-		result.Model, _ = redactor.bounded(result.Model, 256, false)
-		result.LatencyMS = time.Since(started).Milliseconds()
-		auditError := result.Error
-		if upstreamStarted {
-			// Detailed messages can themselves contain the entire upstream body.
-			// Keep diagnostics in the response only, never in persisted audit data.
-			auditError = ""
-			if !result.OK {
-				auditError = http.StatusText(status)
-			}
-		}
-		s.recordModelDiagnostic(r.Context(), "account.model_test", map[string]any{
-			"account_id": accountID, "model": result.Model, "transport": result.Transport,
-			"ok": result.OK, "latency_ms": result.LatencyMS, "error": auditError,
-		})
-		writeJSON(w, status, result)
-	}
+	completion := &modelTestCompletion{server: s, writer: w, request: r, started: started, result: &result, redactor: redactor, accountID: &accountID, upstreamStarted: &upstreamStarted}
+	finish := completion.finish
 	if r.Method != http.MethodPost {
 		finish(http.StatusMethodNotAllowed, "POST required")
 		return
@@ -156,34 +134,14 @@ func (s *Server) handleTestAccountModel(w http.ResponseWriter, r *http.Request) 
 	var err error
 	accountID, err = pathInt(r, "id")
 	if err != nil || accountID <= 0 {
-		finish(http.StatusBadRequest, "invalid account id")
+		finish(http.StatusBadRequest, invalidAccountIDMessage)
 		return
 	}
-	var body struct {
-		Model   string `json:"model"`
-		Message string `json:"message"`
-	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, 128<<10)
 	defer r.Body.Close()
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&body); err != nil {
-		finish(http.StatusBadRequest, "invalid model test JSON body")
-		return
-	}
-	var extra any
-	if err := decoder.Decode(&extra); err != io.EOF {
-		finish(http.StatusBadRequest, "model test body must contain one JSON object")
-		return
-	}
-	result.Model = strings.TrimSpace(body.Model)
-	if result.Model == "" || len(result.Model) > 256 || strings.ContainsAny(result.Model, "\r\n\x00") {
-		result.Model = ""
-		finish(http.StatusBadRequest, "a valid model is required")
-		return
-	}
-	if strings.TrimSpace(body.Message) == "" || len(body.Message) > maxModelTestMessage {
-		finish(http.StatusBadRequest, "message is required and must not exceed 16384 bytes")
+	body, valid := decodeModelTestInput(r, &result, finish)
+	if !valid {
 		return
 	}
 	if s.accounts == nil || s.upstream == nil || s.cfg == nil {
@@ -198,30 +156,18 @@ func (s *Server) handleTestAccountModel(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if account == nil {
-		finish(http.StatusNotFound, "account not found")
+		finish(http.StatusNotFound, accountNotFoundMessage)
 		return
 	}
 	redactor.addAccount(account)
-	disabled, err := s.store.DisabledModelsForAccount(ctx, accountID, nil)
-	if err != nil {
-		finish(http.StatusInternalServerError, "could not check account model restrictions")
+	if !s.modelTestAllowed(ctx, accountID, result.Model, finish) {
 		return
-	}
-	for _, model := range disabled {
-		if model == result.Model {
-			finish(http.StatusForbidden, "model is disabled for this account or its groups")
-			return
-		}
 	}
 	// This reservation never rotates/falls back to a different account and also
 	// rechecks current policy, health, enabled state, cooldown and concurrency.
 	account, release, err := s.accounts.AcquireSpecific(ctx, accountID, result.Model)
 	if err != nil {
-		if ctx.Err() != nil {
-			finish(http.StatusRequestTimeout, modelTestSafeError(ctx.Err()))
-		} else {
-			finish(http.StatusConflict, "account is unavailable, busy, or the model is disabled")
-		}
+		finishModelTestPreparationError(ctx, finish, http.StatusConflict, "account is unavailable, busy, or the model is disabled")
 		return
 	}
 	defer release()
@@ -251,27 +197,15 @@ func (s *Server) handleTestAccountModel(w http.ResponseWriter, r *http.Request) 
 	redactor.addAccount(account)
 	redactor.add(token)
 	if err != nil {
-		if ctx.Err() != nil {
-			finish(http.StatusRequestTimeout, modelTestSafeError(ctx.Err()))
-		} else {
-			finish(http.StatusBadGateway, "could not obtain the account's primary ChatGPT credential")
-		}
+		finishModelTestPreparationError(ctx, finish, http.StatusBadGateway, "could not obtain the account's primary ChatGPT credential")
 		return
 	}
 	// Credential rotation can wait behind a background refresh. Recheck policy
 	// after that wait so a restriction change cannot escape via the old snapshot.
-	disabled, err = s.store.DisabledModelsForAccount(ctx, accountID, nil)
-	if err != nil {
-		finish(http.StatusInternalServerError, "could not check account model restrictions")
+	if !s.modelTestAllowed(ctx, accountID, result.Model, finish) {
 		return
 	}
-	for _, model := range disabled {
-		if model == result.Model {
-			finish(http.StatusForbidden, "model is disabled for this account or its groups")
-			return
-		}
-	}
-	if !account.Enabled || account.CooldownUntil > time.Now().UnixMilli() || account.Status == "expired" || account.Status == "invalid" || account.Status == "banned" || account.Status == "quota_exhausted" {
+	if modelTestAccountUnavailable(account) {
 		finish(http.StatusConflict, "account is unavailable")
 		return
 	}
@@ -286,38 +220,18 @@ func (s *Server) handleTestAccountModel(w http.ResponseWriter, r *http.Request) 
 	req.Sink = &collector
 	upstreamStarted = true
 	streamResult, streamErr := s.upstream.Stream(ctx, req, collector.onEvent)
-	if streamResult != nil && streamResult.Transport != "" {
-		if streamResult.Transport != "websocket" || result.Transport != "websocket-cached" {
-			result.Transport = streamResult.Transport
-		}
-	}
-	result.Output, _ = redactor.bounded(collector.output.String(), maxModelTestOutput, errors.Is(streamErr, errModelTestOutput))
-	if !collector.completed || !errors.Is(streamErr, errModelTestComplete) {
-		collector.diagnostics(redactor, streamErr)
-	}
-	if ctx.Err() != nil {
-		finish(http.StatusRequestTimeout, modelTestSafeError(ctx.Err()))
-		return
-	}
-	// The private completion sentinel deliberately closes the single-use WS
-	// session instead of keeping diagnostic connections/conversations in the pool.
-	if !collector.completed || !errors.Is(streamErr, errModelTestComplete) {
-		finish(http.StatusBadGateway, modelTestDiagnosticError(streamErr, result.UpstreamBody))
-		return
-	}
-	result.OK = true
-	finish(http.StatusOK, "")
+	finishModelTest(ctx, &result, &collector, redactor, streamResult, streamErr, finish)
 }
 
 func diagnosticTransport(account, global string) string {
 	switch strings.ToLower(strings.TrimSpace(account)) {
-	case "ws", "websocket", "websocket-cached":
-		return "websocket-cached"
+	case "ws", "websocket", cachedWebSocketTransport:
+		return cachedWebSocketTransport
 	case "sse":
 		return "sse"
 	}
 	switch strings.ToLower(strings.TrimSpace(global)) {
-	case "websocket", "websocket-cached", "auto":
+	case "websocket", cachedWebSocketTransport, "auto":
 		return strings.ToLower(strings.TrimSpace(global))
 	default: // The management HTTP caller uses SSE for passthrough.
 		return "sse"
@@ -417,10 +331,8 @@ func (c *modelTestCollector) onEvent(event *upstream.Event) error {
 		return c.failEvent(event, failure)
 	}
 	response, _ := event.Data["response"].(map[string]any)
-	if response != nil {
-		if e := response["error"]; e != nil && e != false && e != "" {
-			return c.failEvent(event, errModelTestFailure)
-		}
+	if modelResponseHasError(response) {
+		return c.failEvent(event, errModelTestFailure)
 	}
 	switch event.Type {
 	case "response.output_text.delta", "response.refusal.delta":
@@ -435,26 +347,11 @@ func (c *modelTestCollector) onEvent(event *upstream.Event) error {
 		if response == nil || status != "completed" {
 			return c.failEvent(event, errModelTestIncomplete)
 		}
-		if actual, ok := response["model"].(string); ok && strings.TrimSpace(actual) != "" && len(actual) <= 256 && !strings.ContainsAny(actual, "\r\n\x00") {
+		if actual, ok := response["model"].(string); ok && validDiagnosticModel(actual) {
 			c.result.Model = actual
 		}
-		if c.output.Len() == 0 {
-			items, _ := response["output"].([]any)
-			for _, item := range items {
-				object, _ := item.(map[string]any)
-				content, _ := object["content"].([]any)
-				for _, part := range content {
-					block, _ := part.(map[string]any)
-					field := "text"
-					if block["type"] == "refusal" {
-						field = "refusal"
-					}
-					text, _ := block[field].(string)
-					if err := c.appendText(text); err != nil {
-						return err
-					}
-				}
-			}
+		if err := c.appendCompletedOutput(response); err != nil {
+			return err
 		}
 		c.completed = true
 		return errModelTestComplete
@@ -490,4 +387,163 @@ func (s *Server) recordModelDiagnostic(ctx context.Context, action string, detai
 	defer cancel()
 	// Diagnostics are audit-only: no API-key usage record, charge or fake cost.
 	_ = s.store.RecordAudit(auditCtx, action, string(raw))
+}
+
+func (c *modelTestCollector) appendCompletedOutput(response map[string]any) error {
+	if c.output.Len() == 0 {
+		items, _ := response["output"].([]any)
+		for _, item := range items {
+			object, _ := item.(map[string]any)
+			content, _ := object["content"].([]any)
+			for _, part := range content {
+				block, _ := part.(map[string]any)
+				field := "text"
+				if block["type"] == "refusal" {
+					field = "refusal"
+				}
+				text, _ := block[field].(string)
+				if err := c.appendText(text); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+type modelTestInput struct {
+	Model   string `json:"model"`
+	Message string `json:"message"`
+}
+
+func decodeModelTestInput(r *http.Request, result *accountModelTestResult, finish func(int, string)) (modelTestInput, bool) {
+	var body modelTestInput
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		finish(http.StatusBadRequest, "invalid model test JSON body")
+		return body, false
+	}
+	var extra any
+	if decoder.Decode(&extra) != io.EOF {
+		finish(http.StatusBadRequest, "model test body must contain one JSON object")
+		return body, false
+	}
+	result.Model = strings.TrimSpace(body.Model)
+	if result.Model == "" || len(result.Model) > 256 || strings.ContainsAny(result.Model, "\r\n\x00") {
+		result.Model = ""
+		finish(http.StatusBadRequest, "a valid model is required")
+		return body, false
+	}
+	if strings.TrimSpace(body.Message) == "" || len(body.Message) > maxModelTestMessage {
+		finish(http.StatusBadRequest, "message is required and must not exceed 16384 bytes")
+		return body, false
+	}
+	return body, true
+}
+
+func (s *Server) modelTestAllowed(ctx context.Context, accountID int64, model string, finish func(int, string)) bool {
+	disabled, err := s.store.DisabledModelsForAccount(ctx, accountID, nil)
+	if err != nil {
+		finish(http.StatusInternalServerError, "could not check account model restrictions")
+		return false
+	}
+	for _, disabledModel := range disabled {
+		if disabledModel == model {
+			finish(http.StatusForbidden, "model is disabled for this account or its groups")
+			return false
+		}
+	}
+	return true
+}
+
+func finishModelTest(ctx context.Context, result *accountModelTestResult, collector *modelTestCollector, redactor *modelTestRedactor, streamResult *upstream.StreamResult, streamErr error, finish func(int, string)) {
+	if streamResult != nil && streamResult.Transport != "" {
+		if streamResult.Transport != "websocket" || result.Transport != cachedWebSocketTransport {
+			result.Transport = streamResult.Transport
+		}
+	}
+	result.Output, _ = redactor.bounded(collector.output.String(), maxModelTestOutput, errors.Is(streamErr, errModelTestOutput))
+	if !collector.completed || !errors.Is(streamErr, errModelTestComplete) {
+		collector.diagnostics(redactor, streamErr)
+	}
+	if ctx.Err() != nil {
+		finish(http.StatusRequestTimeout, modelTestSafeError(ctx.Err()))
+		return
+	}
+	// The private completion sentinel deliberately closes the single-use WS
+	// session instead of keeping diagnostic connections/conversations in the pool.
+	if !collector.completed || !errors.Is(streamErr, errModelTestComplete) {
+		finish(http.StatusBadGateway, modelTestDiagnosticError(streamErr, result.UpstreamBody))
+		return
+	}
+	result.OK = true
+	finish(http.StatusOK, "")
+}
+
+type modelTestCompletion struct {
+	server          *Server
+	writer          http.ResponseWriter
+	request         *http.Request
+	started         time.Time
+	result          *accountModelTestResult
+	redactor        *modelTestRedactor
+	accountID       *int64
+	upstreamStarted *bool
+}
+
+func (completion *modelTestCompletion) finish(status int, message string) {
+
+	completion.result.Error, _ = completion.redactor.bounded(message, maxModelTestDiagnostic, completion.result.UpstreamBodyTruncated)
+	completion.result.Model, _ = completion.redactor.bounded(completion.result.Model, 256, false)
+	completion.result.LatencyMS = time.Since(completion.started).Milliseconds()
+	auditError := completion.result.Error
+	if *completion.upstreamStarted {
+		// Detailed messages can themselves contain the entire upstream body.
+		// Keep diagnostics in the response only, never in persisted audit data.
+		auditError = ""
+		if !completion.result.OK {
+			auditError = http.StatusText(status)
+		}
+	}
+	completion.server.recordModelDiagnostic(completion.request.Context(), "account.model_test", map[string]any{
+		"account_id": *completion.accountID, "model": completion.result.Model, "transport": completion.result.Transport,
+		"ok": completion.result.OK, "latency_ms": completion.result.LatencyMS, "error": auditError,
+	})
+	writeJSON(completion.writer, status, completion.result)
+
+}
+
+func finishModelTestPreparationError(ctx context.Context, finish func(int, string), status int, message string) {
+	if ctx.Err() != nil {
+		finish(http.StatusRequestTimeout, modelTestSafeError(ctx.Err()))
+	} else {
+		finish(status, message)
+	}
+}
+
+func modelTestAccountUnavailable(account *store.Account) bool {
+	return !account.Enabled || account.CooldownUntil > time.Now().UnixMilli() || account.Status == "expired" || account.Status == "invalid" || account.Status == "banned" || account.Status == "quota_exhausted"
+}
+
+func validDiagnosticModel(actual string) bool {
+	return strings.TrimSpace(actual) != "" && len(actual) <= 256 && !strings.ContainsAny(actual, "\r\n\x00")
+}
+
+func modelResponseHasError(response map[string]any) bool {
+	if response == nil {
+		return false
+	}
+	e := response["error"]
+	return e != nil && e != false && e != ""
+}
+
+func writeModelCatalogRefreshFailure(w http.ResponseWriter, refreshErr error) {
+	status, message := http.StatusInternalServerError, "could not refresh account model catalog"
+	if errors.Is(refreshErr, accounts.ErrModelCatalogAccountMissing) {
+		status, message = http.StatusNotFound, "account no longer exists"
+	}
+	// A failed write must not return an uncommitted snapshot that the UI
+	// could mistake for the new stored catalog or for an empty success.
+	writeErr(w, status, message)
 }

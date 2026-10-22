@@ -23,7 +23,7 @@ test('黑盒组保留入口连线，多端口可命名，组内修改、保存�
     const groupID = await box.getAttribute('data-group-id'), tailID = await actions.first().getAttribute('data-node-id')
     const boundary = page.locator(`.vue-flow__edge[aria-label="Edge from ${groupID} to ${tailID}"]`)
     await expect(boundary).toHaveCount(1)
-    await boundary.locator('.vue-flow__edge-interaction').click({force: true})
+    await boundary.locator('.vue-flow__edge-interaction').click()
     await page.getByTestId('rule-canvas').press('Delete')
     await expect(boundary).toHaveCount(0)
     await page.getByTestId('canvas-fit').click()

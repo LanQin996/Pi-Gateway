@@ -27,9 +27,9 @@ func strictObject(data []byte, allowed map[string]bool, path string) (map[string
 	}
 	var extra any
 	if err := dec.Decode(&extra); err == nil {
-		return nil, invalid(path, "trailing JSON value")
+		return nil, invalid(path, trailingJSONValueMessage)
 	} else if err != io.EOF {
-		return nil, invalid(path, "trailing JSON value")
+		return nil, invalid(path, trailingJSONValueMessage)
 	}
 	for k := range raw {
 		if !allowed[k] {
@@ -126,9 +126,9 @@ func ParseRules(data []byte) ([]Rule, error) {
 	}
 	var extra any
 	if err := dec.Decode(&extra); err == nil {
-		return nil, invalid("", "trailing JSON value")
+		return nil, invalid("", trailingJSONValueMessage)
 	} else if err != io.EOF {
-		return nil, invalid("", "trailing JSON value")
+		return nil, invalid("", trailingJSONValueMessage)
 	}
 	out := make([]Rule, 0, len(raws))
 	for i, raw := range raws {
@@ -245,7 +245,7 @@ func decodeJSON(raw json.RawMessage, path string, out any) error {
 	}
 	var extra any
 	if err := dec.Decode(&extra); err == nil {
-		return invalid(path, "trailing JSON value")
+		return invalid(path, trailingJSONValueMessage)
 	} else if err != io.EOF {
 		return invalid(path, "invalid value: %v", err)
 	}
@@ -294,13 +294,13 @@ func normalizeNumber(s, path string) (any, error) {
 			return nil, invalid(path, "number must be finite")
 		}
 		if math.Trunc(f) == f && math.Abs(f) > float64(MaxSafeInteger) {
-			return nil, invalid(path, "integer exceeds JavaScript safe range")
+			return nil, invalid(path, unsafeIntegerMessage)
 		}
 		return f, nil
 	}
 	i, e := strconv.ParseInt(s, 10, 64)
 	if e != nil || i > MaxSafeInteger || i < -MaxSafeInteger {
-		return nil, invalid(path, "integer exceeds JavaScript safe range")
+		return nil, invalid(path, unsafeIntegerMessage)
 	}
 	return i, nil
 }
@@ -325,7 +325,7 @@ func decodeInt64(raw json.RawMessage, path string) (int64, error) {
 	}
 	i, e := strconv.ParseInt(s, 10, 64)
 	if e != nil || i > MaxSafeInteger || i < -MaxSafeInteger {
-		return 0, invalid(path, "integer exceeds JavaScript safe range")
+		return 0, invalid(path, unsafeIntegerMessage)
 	}
 	return i, nil
 }
@@ -373,23 +373,11 @@ func pointerSegments(path string) ([]string, error) {
 	}
 	out := make([]string, len(parts))
 	for i, p := range parts {
-		var b strings.Builder
-		for j := 0; j < len(p); j++ {
-			if p[j] != '~' {
-				b.WriteByte(p[j])
-				continue
-			}
-			if j+1 >= len(p) || (p[j+1] != '0' && p[j+1] != '1') {
-				return nil, invalid(path, "invalid ~ escape")
-			}
-			j++
-			if p[j] == '0' {
-				b.WriteByte('~')
-			} else {
-				b.WriteByte('/')
-			}
+		value, err := decodePointerSegment(p, path)
+		if err != nil {
+			return nil, err
 		}
-		out[i] = b.String()
+		out[i] = value
 	}
 	return out, nil
 }
@@ -409,4 +397,24 @@ func validRegex(pattern string, ci, dot, multi bool) (*regexp.Regexp, error) {
 		return nil, err
 	}
 	return re, nil
+}
+
+func decodePointerSegment(p, path string) (string, error) {
+	var b strings.Builder
+	for j := 0; j < len(p); j++ {
+		if p[j] != '~' {
+			b.WriteByte(p[j])
+			continue
+		}
+		if j+1 >= len(p) || (p[j+1] != '0' && p[j+1] != '1') {
+			return "", invalid(path, "invalid ~ escape")
+		}
+		j++
+		if p[j] == '0' {
+			b.WriteByte('~')
+		} else {
+			b.WriteByte('/')
+		}
+	}
+	return b.String(), nil
 }

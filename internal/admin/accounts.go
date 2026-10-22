@@ -53,7 +53,7 @@ func (s *Server) handleUnlinkCodex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if account == nil {
-		writeErr(w, http.StatusNotFound, "account not found")
+		writeErr(w, http.StatusNotFound, accountNotFoundMessage)
 		return
 	}
 	if err := s.accounts.UnlinkCodexCredential(r.Context(), account); err != nil {
@@ -139,27 +139,13 @@ func (s *Server) handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 	// Absence means keep. An explicit empty URL or null proxy_id means direct.
 	keepProxy := body.ProxyURL == nil && len(body.ProxyID) == 0
 	accountRef := strings.TrimSpace(body.AccountID)
-	if accountRef != "" {
-		id, parseErr := strconv.ParseInt(accountRef, 10, 64)
-		if parseErr != nil || id <= 0 {
-			writeErr(w, 400, "account_id must be a positive integer")
-			return
-		}
-		account, loadErr := s.store.GetAccount(r.Context(), id)
-		if loadErr != nil {
-			writeErr(w, 500, "could not load OAuth target account")
-			return
-		}
-		if account == nil {
-			writeErr(w, 404, "OAuth target account not found")
-			return
-		}
-		if keepProxy {
-			proxyURL = account.ProxyURL
-		}
+	var targetOK bool
+	proxyURL, targetOK = s.oauthTargetProxy(w, r, accountRef, keepProxy, proxyURL)
+	if !targetOK {
+		return
 	}
 	if err := egress.Validate(proxyURL); err != nil {
-		writeErr(w, http.StatusBadRequest, "proxy_url: "+err.Error())
+		writeErr(w, http.StatusBadRequest, proxyURLPrefix+err.Error())
 		return
 	}
 
@@ -287,7 +273,7 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 		body.ProxyURL = selectedProxy.URL
 	}
 	if err := egress.Validate(body.ProxyURL); err != nil {
-		writeErr(w, http.StatusBadRequest, "proxy_url: "+err.Error())
+		writeErr(w, http.StatusBadRequest, proxyURLPrefix+err.Error())
 		return
 	}
 	credentialType := strings.ToLower(strings.TrimSpace(body.CredentialType))
@@ -362,91 +348,24 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if acc == nil {
-		writeErr(w, http.StatusNotFound, "account not found")
+		writeErr(w, http.StatusNotFound, accountNotFoundMessage)
 		return
 	}
 
-	var body struct {
-		Name               *string         `json:"name"`
-		Enabled            *bool           `json:"enabled"`
-		ProxyURL           *string         `json:"proxy_url"`
-		ProxyID            json.RawMessage `json:"proxy_id"`
-		Cooldown429Seconds *int            `json:"cooldown_429_seconds"`
-		Concurrency        *int            `json:"concurrency"`
-		Weight             *int            `json:"weight"`
-		UpstreamProtocol   *string         `json:"upstream_protocol"`
-		GroupIDs           []int64         `json:"group_ids"`
-		DisabledModels     []string        `json:"disabled_models"`
-		SupplementalModels []string        `json:"supplemental_models"`
-	}
+	var body accountManagementMutation
 	if err := decodeJSON(r, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	if body.Name != nil {
-		acc.Name = strings.TrimSpace(*body.Name)
+	if !applyAccountIdentity(w, acc, &body) {
+		return
 	}
-	if body.Enabled != nil {
-		if *body.Enabled && acc.AccessToken == "" {
-			writeErr(w, http.StatusBadRequest, "link ChatGPT before enabling this account")
-			return
-		}
-		acc.Enabled = *body.Enabled
+	proxyChange, proxyOK := s.applyAccountProxy(w, r, acc, &body)
+	if !proxyOK {
+		return
 	}
-	var proxyChange []*int64
-	if len(body.ProxyID) > 0 {
-		selected, err := s.resolveProxySelection(r.Context(), body.ProxyID)
-		if err != nil {
-			writeErr(w, 400, err.Error())
-			return
-		}
-		acc.ProxyID = nil
-		acc.ProxyURL = ""
-		if selected != nil {
-			acc.ProxyID = &selected.ID
-			acc.ProxyURL = selected.URL
-		}
-		proxyChange = append(proxyChange, acc.ProxyID)
-	}
-	if body.ProxyURL != nil && (len(body.ProxyID) == 0 || acc.ProxyID == nil) {
-		endpoint := strings.TrimSpace(*body.ProxyURL)
-		// A redacted value from a legacy editor means unchanged, never a secret.
-		if endpoint != egress.Redact(acc.ProxyURL) {
-			if err := egress.Validate(endpoint); err != nil {
-				writeErr(w, 400, "proxy_url: "+err.Error())
-				return
-			}
-			acc.ProxyURL = endpoint
-			acc.ProxyID = nil
-			proxyChange = []*int64{nil}
-		}
-	}
-	if body.Concurrency != nil {
-		if *body.Concurrency < 1 {
-			writeErr(w, http.StatusBadRequest, "concurrency must be at least 1")
-			return
-		}
-		acc.Concurrency = *body.Concurrency
-	}
-	if body.Weight != nil {
-		if *body.Weight < 1 {
-			writeErr(w, http.StatusBadRequest, "weight must be at least 1")
-			return
-		}
-		acc.Weight = *body.Weight
-	}
-	if body.UpstreamProtocol != nil {
-		protocol := strings.ToLower(strings.TrimSpace(*body.UpstreamProtocol))
-		// Empty clears the override and falls back to the global default.
-		if protocol != "" && protocol != "sse" && protocol != "ws" {
-			writeErr(w, http.StatusBadRequest, "upstream_protocol must be sse, ws or empty")
-			return
-		}
-		acc.UpstreamProtocol = protocol
-	}
-	if acc.Name == "" {
-		writeErr(w, http.StatusBadRequest, "name cannot be empty")
+	if !applyAccountScheduling(w, acc, &body) {
 		return
 	}
 
@@ -470,7 +389,7 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if fresh == nil {
-		writeErr(w, http.StatusNotFound, "account not found")
+		writeErr(w, http.StatusNotFound, accountNotFoundMessage)
 		return
 	}
 	acc = fresh
@@ -509,7 +428,7 @@ func (s *Server) handleRecoverAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if acc == nil {
-		writeErr(w, 404, "account not found")
+		writeErr(w, 404, accountNotFoundMessage)
 		return
 	}
 	if err := s.store.RecoverAccount(r.Context(), id); err != nil {
@@ -522,7 +441,7 @@ func (s *Server) handleRecoverAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if updated == nil {
-		writeErr(w, 404, "account not found")
+		writeErr(w, 404, accountNotFoundMessage)
 		return
 	}
 	_ = s.store.RecordAudit(r.Context(), "account.recovered", acc.Name)
@@ -541,7 +460,7 @@ func (s *Server) handleRefreshAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if acc == nil {
-		writeErr(w, http.StatusNotFound, "account not found")
+		writeErr(w, http.StatusNotFound, accountNotFoundMessage)
 		return
 	}
 	if acc.RefreshToken == "" {
@@ -573,7 +492,7 @@ func (s *Server) handleTestProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if acc == nil {
-		writeErr(w, http.StatusNotFound, "account not found")
+		writeErr(w, http.StatusNotFound, accountNotFoundMessage)
 		return
 	}
 
@@ -596,4 +515,121 @@ func (s *Server) handleTestProxy(w http.ResponseWriter, r *http.Request) {
 		"latency_ms": result.LatencyMS,
 		"proxy":      egress.Redact(proxyURL),
 	})
+}
+
+func (s *Server) oauthTargetProxy(w http.ResponseWriter, r *http.Request, accountRef string, keepProxy bool, proxyURL string) (string, bool) {
+	if accountRef != "" {
+		id, parseErr := strconv.ParseInt(accountRef, 10, 64)
+		if parseErr != nil || id <= 0 {
+			writeErr(w, 400, "account_id must be a positive integer")
+			return "", false
+		}
+		account, loadErr := s.store.GetAccount(r.Context(), id)
+		if loadErr != nil {
+			writeErr(w, 500, "could not load OAuth target account")
+			return "", false
+		}
+		if account == nil {
+			writeErr(w, 404, "OAuth target account not found")
+			return "", false
+		}
+		if keepProxy {
+			proxyURL = account.ProxyURL
+		}
+	}
+	return proxyURL, true
+}
+
+type accountManagementMutation struct {
+	Name               *string         `json:"name"`
+	Enabled            *bool           `json:"enabled"`
+	ProxyURL           *string         `json:"proxy_url"`
+	ProxyID            json.RawMessage `json:"proxy_id"`
+	Cooldown429Seconds *int            `json:"cooldown_429_seconds"`
+	Concurrency        *int            `json:"concurrency"`
+	Weight             *int            `json:"weight"`
+	UpstreamProtocol   *string         `json:"upstream_protocol"`
+	GroupIDs           []int64         `json:"group_ids"`
+	DisabledModels     []string        `json:"disabled_models"`
+	SupplementalModels []string        `json:"supplemental_models"`
+}
+
+func applyAccountIdentity(w http.ResponseWriter, acc *store.Account, body *accountManagementMutation) bool {
+	if body.Name != nil {
+		acc.Name = strings.TrimSpace(*body.Name)
+	}
+	if body.Enabled != nil {
+		if *body.Enabled && acc.AccessToken == "" {
+			writeErr(w, http.StatusBadRequest, "link ChatGPT before enabling this account")
+			return false
+		}
+		acc.Enabled = *body.Enabled
+	}
+
+	return true
+}
+
+func (s *Server) applyAccountProxy(w http.ResponseWriter, r *http.Request, acc *store.Account, body *accountManagementMutation) ([]*int64, bool) {
+	var proxyChange []*int64
+	if len(body.ProxyID) > 0 {
+		selected, err := s.resolveProxySelection(r.Context(), body.ProxyID)
+		if err != nil {
+			writeErr(w, 400, err.Error())
+			return nil, false
+		}
+		acc.ProxyID = nil
+		acc.ProxyURL = ""
+		if selected != nil {
+			acc.ProxyID = &selected.ID
+			acc.ProxyURL = selected.URL
+		}
+		proxyChange = append(proxyChange, acc.ProxyID)
+	}
+	if body.ProxyURL != nil && (len(body.ProxyID) == 0 || acc.ProxyID == nil) {
+		endpoint := strings.TrimSpace(*body.ProxyURL)
+		// A redacted value from a legacy editor means unchanged, never a secret.
+		if endpoint != egress.Redact(acc.ProxyURL) {
+			if err := egress.Validate(endpoint); err != nil {
+				writeErr(w, 400, proxyURLPrefix+err.Error())
+				return nil, false
+			}
+			acc.ProxyURL = endpoint
+			acc.ProxyID = nil
+			proxyChange = []*int64{nil}
+		}
+	}
+
+	return proxyChange, true
+}
+
+func applyAccountScheduling(w http.ResponseWriter, acc *store.Account, body *accountManagementMutation) bool {
+	if body.Concurrency != nil {
+		if *body.Concurrency < 1 {
+			writeErr(w, http.StatusBadRequest, "concurrency must be at least 1")
+			return false
+		}
+		acc.Concurrency = *body.Concurrency
+	}
+	if body.Weight != nil {
+		if *body.Weight < 1 {
+			writeErr(w, http.StatusBadRequest, "weight must be at least 1")
+			return false
+		}
+		acc.Weight = *body.Weight
+	}
+	if body.UpstreamProtocol != nil {
+		protocol := strings.ToLower(strings.TrimSpace(*body.UpstreamProtocol))
+		// Empty clears the override and falls back to the global default.
+		if protocol != "" && protocol != "sse" && protocol != "ws" {
+			writeErr(w, http.StatusBadRequest, "upstream_protocol must be sse, ws or empty")
+			return false
+		}
+		acc.UpstreamProtocol = protocol
+	}
+	if acc.Name == "" {
+		writeErr(w, http.StatusBadRequest, "name cannot be empty")
+		return false
+	}
+
+	return true
 }

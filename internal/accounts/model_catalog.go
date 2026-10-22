@@ -108,35 +108,7 @@ func (m *Manager) RefreshModelCatalog(ctx context.Context, account *store.Accoun
 	if snapshot == nil {
 		return nil, ErrModelCatalogAccountMissing
 	}
-	succeeded, published := 0, 0
-	var failures, discarded []string
-	for _, source := range sources {
-		result := results[source].Catalog
-		if result.Error != "" {
-			failures = append(failures, modelCatalogSourceName(source)+": "+result.Error)
-		}
-		if !applied[source] {
-			discarded = append(discarded, modelCatalogSourceName(source)+": refresh superseded or credential changed")
-			continue
-		}
-		published++
-		if !result.Skipped && result.Error == "" && result.FetchedAt > 0 {
-			succeeded++
-		}
-	}
-	if succeeded > 0 {
-		if len(discarded) > 0 {
-			if snapshot.Error != "" {
-				discarded = append([]string{snapshot.Error}, discarded...)
-			}
-			snapshot.Error = strings.Join(discarded, "; ")
-		}
-		return snapshot, nil
-	}
-	if published == 0 || len(failures) == 0 {
-		return snapshot, ErrModelCatalogSuperseded
-	}
-	return snapshot, errors.New(strings.Join(failures, "; "))
+	return summarizeCatalogRefresh(snapshot, sources, results, applied)
 }
 
 var (
@@ -257,12 +229,8 @@ func (m *Manager) fetchModelCatalogRequest(ctx context.Context, a *store.Account
 	if (req.URL.Scheme != "https" && req.URL.Scheme != "http") || req.URL.Hostname() == "" || req.URL.User != nil || req.URL.Fragment != "" {
 		return nil, errors.New("configured model catalog URL is invalid")
 	}
-	host := strings.ToLower(strings.TrimRight(req.URL.Hostname(), "."))
-	if source == store.ModelSourceCodex && host == "api.openai.com" {
-		return nil, errors.New("Codex model credentials cannot be sent to the primary model API")
-	}
-	if source == store.ModelSourceChatGPT && host == "chatgpt.com" && strings.HasPrefix(req.URL.Path, "/backend-api/") {
-		return nil, errors.New("primary ChatGPT credentials cannot be sent to the Codex backend")
+	if err := validateCatalogCredentialTarget(req, source); err != nil {
+		return nil, err
 	}
 	req.Header = headers.Clone()
 	req.Header.Set("Accept", "application/json")
@@ -311,53 +279,12 @@ func parseModelCatalog(raw []byte) ([]store.CatalogModel, error) {
 	out := make([]store.CatalogModel, 0, len(entries))
 	seen := make(map[string]int, len(entries))
 	for _, entry := range entries {
-		var model store.CatalogModel
-		entry = bytes.TrimSpace(entry)
-		switch entry[0] {
-		case '"':
-			var id string
-			if err := json.Unmarshal(entry, &id); err != nil {
-				return nil, errors.New("model catalog contains an invalid model")
-			}
-			model.ID = strings.TrimSpace(id)
-		case '{':
-			var item map[string]json.RawMessage
-			if err := json.Unmarshal(entry, &item); err != nil {
-				return nil, errors.New("model catalog contains an invalid model")
-			}
-			model.ID = catalogString(item, "id", "slug", "model", "name")
-			model.Name = catalogString(item, "display_name", "displayName", "title", "name")
-			model.Description = catalogString(item, "description")
-			model.Metadata = item
-		default:
-			return nil, errors.New("model catalog contains an invalid model")
+		model, err := parseCatalogModel(entry)
+		if err != nil {
+			return nil, err
 		}
-		if model.ID == "" || len(model.ID) > 256 || strings.ContainsAny(model.ID, "\r\n\x00") {
-			return nil, errors.New("model catalog contains an invalid model identifier")
-		}
-		if model.Name == "" {
-			model.Name = model.ID
-		}
-		model.Name = catalogTruncate(model.Name, 512)
-		model.Description = catalogTruncate(model.Description, 4096)
 		if index, exists := seen[model.ID]; exists {
-			// Repeated IDs can contribute additional fields without overriding
-			// the first entry's explicit null/false/empty or conflicting values.
-			previous := &out[index]
-			if catalogString(previous.Metadata, "display_name", "displayName", "title", "name") == "" {
-				previous.Name = model.Name
-			}
-			if _, hasDescription := previous.Metadata["description"]; !hasDescription {
-				previous.Description = model.Description
-			}
-			if previous.Metadata == nil && len(model.Metadata) > 0 {
-				previous.Metadata = make(map[string]json.RawMessage, len(model.Metadata))
-			}
-			for field, value := range model.Metadata {
-				if _, exists := previous.Metadata[field]; !exists {
-					previous.Metadata[field] = value
-				}
-			}
+			mergeCatalogModel(&out[index], model)
 			continue
 		}
 		seen[model.ID] = len(out)
@@ -383,20 +310,10 @@ func catalogEntries(value json.RawMessage, depth int) ([]json.RawMessage, bool) 
 		if err := json.Unmarshal(value, &fields); err != nil {
 			return nil, false
 		}
-		if e, exists := fields["error"]; exists {
-			switch string(bytes.TrimSpace(e)) {
-			case "null", "false", `""`:
-			default:
-				return nil, false
-			}
+		if catalogHasError(fields) {
+			return nil, false
 		}
-		for _, key := range []string{"models", "data"} {
-			if nested, exists := fields[key]; exists {
-				if entries, ok := catalogEntries(nested, depth+1); ok {
-					return entries, true
-				}
-			}
-		}
+		return nestedCatalogEntries(fields, depth)
 	}
 	return nil, false
 }
@@ -420,4 +337,127 @@ func catalogTruncate(s string, limit int) string {
 		s = s[:len(s)-1]
 	}
 	return s
+}
+
+func parseCatalogModel(entry json.RawMessage) (store.CatalogModel, error) {
+	var model store.CatalogModel
+	entry = bytes.TrimSpace(entry)
+	switch entry[0] {
+	case '"':
+		var id string
+		if err := json.Unmarshal(entry, &id); err != nil {
+			return store.CatalogModel{}, errors.New("model catalog contains an invalid model")
+		}
+		model.ID = strings.TrimSpace(id)
+	case '{':
+		var item map[string]json.RawMessage
+		if err := json.Unmarshal(entry, &item); err != nil {
+			return store.CatalogModel{}, errors.New("model catalog contains an invalid model")
+		}
+		model.ID = catalogString(item, "id", "slug", "model", "name")
+		model.Name = catalogString(item, "display_name", "displayName", "title", "name")
+		model.Description = catalogString(item, "description")
+		model.Metadata = item
+	default:
+		return store.CatalogModel{}, errors.New("model catalog contains an invalid model")
+	}
+	if model.ID == "" || len(model.ID) > 256 || strings.ContainsAny(model.ID, "\r\n\x00") {
+		return store.CatalogModel{}, errors.New("model catalog contains an invalid model identifier")
+	}
+	if model.Name == "" {
+		model.Name = model.ID
+	}
+	model.Name = catalogTruncate(model.Name, 512)
+	model.Description = catalogTruncate(model.Description, 4096)
+	return model, nil
+}
+
+func mergeCatalogModel(previous *store.CatalogModel, model store.CatalogModel) {
+	// Repeated IDs can contribute additional fields without overriding
+	// the first entry's explicit null/false/empty or conflicting values.
+
+	if catalogString(previous.Metadata, "display_name", "displayName", "title", "name") == "" {
+		previous.Name = model.Name
+	}
+	if _, hasDescription := previous.Metadata["description"]; !hasDescription {
+		previous.Description = model.Description
+	}
+	if previous.Metadata == nil && len(model.Metadata) > 0 {
+		previous.Metadata = make(map[string]json.RawMessage, len(model.Metadata))
+	}
+	for field, value := range model.Metadata {
+		if _, exists := previous.Metadata[field]; !exists {
+			previous.Metadata[field] = value
+		}
+	}
+}
+
+func catalogHasError(fields map[string]json.RawMessage) bool {
+	if e, exists := fields["error"]; exists {
+		switch string(bytes.TrimSpace(e)) {
+		case "null", "false", `""`:
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+func summarizeCatalogRefresh(snapshot *store.ModelCatalog, sources []string, results map[string]store.ModelCatalogSourceResult, applied map[string]bool) (*store.ModelCatalog, error) {
+	succeeded, published := 0, 0
+	var failures, discarded []string
+	for _, source := range sources {
+		result := results[source].Catalog
+		if result.Error != "" {
+			failures = append(failures, modelCatalogSourceName(source)+": "+result.Error)
+		}
+		if !applied[source] {
+			discarded = append(discarded, modelCatalogSourceName(source)+": refresh superseded or credential changed")
+			continue
+		}
+		published++
+		if !result.Skipped && result.Error == "" && result.FetchedAt > 0 {
+			succeeded++
+		}
+	}
+	if succeeded > 0 {
+		return catalogRefreshSucceeded(snapshot, discarded), nil
+	}
+	if published == 0 || len(failures) == 0 {
+		return snapshot, ErrModelCatalogSuperseded
+	}
+	return snapshot, errors.New(strings.Join(failures, "; "))
+}
+
+func nestedCatalogEntries(fields map[string]json.RawMessage, depth int) ([]json.RawMessage, bool) {
+	for _, key := range []string{"models", "data"} {
+		if nested, exists := fields[key]; exists {
+			if entries, ok := catalogEntries(nested, depth+1); ok {
+				return entries, true
+			}
+		}
+	}
+	return nil, false
+}
+
+func validateCatalogCredentialTarget(req *http.Request, source string) error {
+	host := strings.ToLower(strings.TrimRight(req.URL.Hostname(), "."))
+	if source == store.ModelSourceCodex && host == "api.openai.com" {
+		return errors.New("Codex model credentials cannot be sent to the primary model API")
+	}
+	if source == store.ModelSourceChatGPT && host == "chatgpt.com" && strings.HasPrefix(req.URL.Path, "/backend-api/") {
+		return errors.New("primary ChatGPT credentials cannot be sent to the Codex backend")
+	}
+	return nil
+}
+
+func catalogRefreshSucceeded(snapshot *store.ModelCatalog, discarded []string) *store.ModelCatalog {
+
+	if len(discarded) > 0 {
+		if snapshot.Error != "" {
+			discarded = append([]string{snapshot.Error}, discarded...)
+		}
+		snapshot.Error = strings.Join(discarded, "; ")
+	}
+	return snapshot
 }

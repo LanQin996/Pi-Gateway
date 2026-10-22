@@ -7,7 +7,8 @@ import {ruleFieldLabel, ruleOptionLabel} from '../../utils/ruleLabels'
 const props=defineProps<{field:RuleField}>()
 const {t,locale}=useI18n()
 const pinned=ref(false)
-const plain=computed(()=>`${localHelp(props.field.description,locale.value)}\n${t('rules.default')}: ${props.field.default===undefined?t('rules.none'):JSON.stringify(props.field.default)}\n${(props.field.examples??[]).map(v=>`${t('rules.examples')}: ${JSON.stringify(v)}`).join('\n')}`)
+const exampleText=computed(()=>(props.field.examples??[]).map(v=>`${t('rules.examples')}: ${JSON.stringify(v)}`).join('\n'))
+const plain=computed(()=>`${localHelp(props.field.description,locale.value)}\n${t('rules.default')}: ${props.field.default===undefined?t('rules.none'):JSON.stringify(props.field.default)}\n${exampleText.value}`)
 </script>
 <template>
   <span class="parameter-help" :class="{pinned}" @keydown.esc="pinned=false">

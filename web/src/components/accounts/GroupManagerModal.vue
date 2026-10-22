@@ -26,7 +26,7 @@ const enabled = ref(true)
 const members = ref<number[]>([])
 const disabledModels = ref<string[]>([])
 const search = ref('')
-const error = ref('')
+const formError = ref('')
 const saving = ref(false)
 const deleting = ref<AccountGroup | null>(null)
 const deleteBusy = ref(false)
@@ -36,13 +36,13 @@ const visibleAccounts = computed(() => {
 	return props.accounts.filter(account => !query || `${account.name} ${account.email}`.toLowerCase().includes(query))
 })
 const sources = computed(() => props.accounts.filter(account => {
-	if (members.value.includes(account.id)) return true
+	if (members.value.includes(account.id)) { return true }
 	// Preview membership after saving: removing the last group makes an account public.
 	return !localGroups.value.some(group => group.id !== editingId.value && group.account_ids?.includes(account.id))
 		&& !(account.group_ids ?? []).some(id => id !== editingId.value && !localGroups.value.some(group => group.id === id))
 }))
 watch(() => props.groups, value => { localGroups.value = [...value] }, { immediate: true })
-watch(() => props.open, open => { if (open) { editing.value = false; deleting.value = null; error.value = ''; search.value = '' } })
+watch(() => props.open, open => { if (open) { editing.value = false; deleting.value = null; formError.value = ''; search.value = '' } })
 function startEdit(group?: AccountGroup) {
 	editingId.value = group?.id ?? null
 	name.value = group?.name ?? ''
@@ -52,7 +52,7 @@ function startEdit(group?: AccountGroup) {
 	members.value = [...(group?.account_ids ?? [])]
 	disabledModels.value = [...(group?.disabled_models ?? [])]
 	search.value = ''
-	error.value = ''
+	formError.value = ''
 	deleting.value = null
 	editing.value = true
 }
@@ -60,12 +60,12 @@ function setMember(id: number, checked: boolean) {
 	members.value = checked ? [...new Set([...members.value, id])] : members.value.filter(value => value !== id)
 }
 async function save() {
-	if (saving.value) return
+	if (saving.value) { return }
 	const trimmed = name.value.trim()
-	if (!trimmed) { error.value = c('requiredName'); return }
-	if (localGroups.value.some(group => group.id !== editingId.value && group.name.trim().toLocaleLowerCase() === trimmed.toLocaleLowerCase())) { error.value = c('duplicateName'); return }
+	if (!trimmed) { formError.value = c('requiredName'); return }
+	if (localGroups.value.some(group => group.id !== editingId.value && group.name.trim().toLocaleLowerCase() === trimmed.toLocaleLowerCase())) { formError.value = c('duplicateName'); return }
 	saving.value = true
-	error.value = ''
+	formError.value = ''
 	try {
 		const payload = { switch_on_429: switchOn429.value, name: trimmed, notes: notes.value.trim(), enabled: enabled.value, account_ids: [...members.value], disabled_models: [...disabledModels.value] }
 		const { group } = editingId.value === null ? await api.createAccountGroup(payload) : await api.updateAccountGroup(editingId.value, payload)
@@ -74,23 +74,31 @@ async function save() {
 		toast.success(c('groupSaved'))
 		emit('changed')
 	} catch (err) {
-		error.value = err instanceof ApiError && (err.status === 409 || /already exists|unique|duplicate/i.test(err.message)) ? c('duplicateName') : err instanceof Error ? err.message : c('requestFailed')
+		formError.value = (() => {
+    if (err instanceof ApiError && (err.status === 409 || /already exists|unique|duplicate/i.test(err.message))) {
+        return c('duplicateName')
+    }
+    if (err instanceof Error) {
+        return err.message
+    }
+    return c('requestFailed')
+})()
 	} finally { saving.value = false }
 }
 async function remove() {
-	if (!deleting.value || deleteBusy.value) return
+	if (!deleting.value || deleteBusy.value) { return }
 	deleteBusy.value = true
-	error.value = ''
+	formError.value = ''
 	try {
 		await api.deleteAccountGroup(deleting.value.id)
 		localGroups.value = localGroups.value.filter(group => group.id !== deleting.value!.id)
 		deleting.value = null
 		toast.success(c('groupDeleted'))
 		emit('changed')
-	} catch (err) { error.value = err instanceof Error ? err.message : c('requestFailed') }
+	} catch (err) { formError.value = err instanceof Error ? err.message : c('requestFailed') }
 	finally { deleteBusy.value = false }
 }
-function close() { if (!saving.value && !deleteBusy.value) emit('close') }
+function close() { if (!saving.value && !deleteBusy.value) { emit('close') } }
 </script>
 
 <template>
@@ -99,13 +107,13 @@ function close() { if (!saving.value && !deleteBusy.value) emit('close') }
 			<p class="group-rule">{{ c('groupsHint') }}</p>
 			<p class="group-rule">{{ c('rules') }}</p>
 			<p v-if="props.error" class="group-error" role="alert">{{ props.error }}</p>
-			<p v-if="error" class="group-error" role="alert">{{ error }}</p>
+			<p v-if="formError" class="group-error" role="alert">{{ formError }}</p>
 			<template v-if="!editing">
 				<button type="button" class="btn btn-primary new-group" :disabled="!loaded || deleteBusy" @click="startEdit()"><Plus :size="15" />{{ c('newGroup') }}</button>
 				<p v-if="loaded && !localGroups.length" class="group-hint">{{ c('noGroups') }}</p>
 				<article v-for="group in localGroups" :key="group.id" class="group-row">
 					<div class="group-copy"><strong>{{ group.name }}</strong><span v-if="group.notes">{{ group.notes }}</span><small>{{ c('groupCounts', { members: group.account_ids?.length ?? 0, models: group.disabled_models?.length ?? 0 }) }}</small><Badge :tone="group.enabled ? 'success' : 'neutral'">{{ c(group.enabled ? 'enabled' : 'disabled') }}</Badge></div>
-					<div class="group-actions"><button type="button" class="btn btn-ghost" :disabled="deleteBusy" :aria-label="`${c('edit')} ${group.name}`" @click="startEdit(group)"><Pencil :size="14" />{{ c('edit') }}</button><button type="button" class="btn btn-ghost delete-group" :disabled="deleteBusy" :aria-label="`${c('deleteGroup')} ${group.name}`" @click="deleting = group; error = ''"><Trash2 :size="14" /></button></div>
+					<div class="group-actions"><button type="button" class="btn btn-ghost" :disabled="deleteBusy" :aria-label="`${c('edit')} ${group.name}`" @click="startEdit(group)"><Pencil :size="14" />{{ c('edit') }}</button><button type="button" class="btn btn-ghost delete-group" :disabled="deleteBusy" :aria-label="`${c('deleteGroup')} ${group.name}`" @click="deleting = group; formError = ''"><Trash2 :size="14" /></button></div>
 				</article>
 				<section v-if="deleting" class="delete-confirm" role="alert"><p>{{ c('deleteImpact', { name: deleting.name }) }}</p><div><button type="button" class="btn" :disabled="deleteBusy" @click="deleting = null">{{ c('cancel') }}</button><button type="button" class="btn btn-danger" :disabled="deleteBusy" @click="remove">{{ c('deleteGroup') }}</button></div></section>
 			</template>
@@ -117,7 +125,7 @@ function close() { if (!saving.value && !deleteBusy.value) emit('close') }
 				<fieldset class="members-field" :disabled="saving"><legend><Users :size="15" />{{ c('members') }} · {{ members.length }}</legend><label class="search-field"><Search :size="16" aria-hidden="true" /><input v-model="search" class="input" :placeholder="c('memberSearch')" :aria-label="c('memberSearch')" /></label><div class="members-list"><label v-for="account in visibleAccounts" :key="account.id" class="member-choice"><input type="checkbox" :checked="members.includes(account.id)" @change="setMember(account.id, ($event.target as HTMLInputElement).checked)" /><span><strong>{{ accountName(account) }}</strong><small v-if="account.email && account.email !== account.name">{{ account.email }}</small><small v-if="!account.enabled">{{ c('disabled') }}</small></span></label><p v-if="!visibleAccounts.length" class="group-hint">{{ c('noMatches') }}</p></div><p v-if="!members.length" class="group-hint">{{ c('noMembers') }}</p></fieldset>
 				<ModelRestrictionSelector :key="editingId ?? 'new'" v-model="disabledModels" :sources="sources" group-mode :disabled="saving" />
 				<p class="group-hint">{{ c('saveFirst') }}</p>
-				<div class="editor-actions"><button type="button" class="btn" :disabled="saving" @click="editing = false; error = ''">{{ c('cancel') }}</button><button type="submit" class="btn btn-primary" :disabled="saving">{{ saving ? c('saving') : c('save') }}</button></div>
+				<div class="editor-actions"><button type="button" class="btn" :disabled="saving" @click="editing = false; formError = ''">{{ c('cancel') }}</button><button type="submit" class="btn btn-primary" :disabled="saving">{{ saving ? c('saving') : c('save') }}</button></div>
 			</form>
 		</div>
 		<template v-if="!editing" #footer><button type="button" class="btn" :disabled="deleteBusy" @click="close">{{ c('close') }}</button></template>

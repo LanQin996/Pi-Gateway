@@ -649,46 +649,7 @@ func parseWindows(limitID, limitName string, primary, secondary json.RawMessage)
 		if wire.UsedPercent == nil {
 			continue
 		}
-		percent := *wire.UsedPercent
-		if percent < 0 {
-			percent = 0
-		}
-		if percent > 100 {
-			percent = 100
-		}
-
-		seconds := int64(0)
-		switch {
-		case wire.LimitWindowSecond != nil && *wire.LimitWindowSecond > 0:
-			seconds = *wire.LimitWindowSecond
-		case wire.WindowSeconds != nil && *wire.WindowSeconds > 0:
-			seconds = *wire.WindowSeconds
-		case wire.WindowMinutes != nil && *wire.WindowMinutes > 0:
-			seconds = *wire.WindowMinutes * 60
-		}
-
-		limitReached := false
-		if wire.LimitReached != nil {
-			limitReached = *wire.LimitReached
-		} else if percent >= 100 {
-			limitReached = true
-		}
-
-		resetAt := int64(0)
-		if wire.ResetAt != nil && *wire.ResetAt > 0 {
-			resetAt = *wire.ResetAt * 1000
-		}
-
-		out = append(out, Window{
-			LimitID:       limitID,
-			LimitName:     limitName,
-			Role:          slot.role,
-			Kind:          ClassifyWindow(seconds),
-			UsedPercent:   percent,
-			ResetAt:       resetAt,
-			WindowSeconds: seconds,
-			LimitReached:  limitReached,
-		})
+		out = append(out, decodeQuotaWindow(limitID, limitName, slot.role, wire))
 	}
 	return out
 }
@@ -774,4 +735,47 @@ func FindWindow(windows []Window, limitID, kind string) *Window {
 		}
 	}
 	return nil
+}
+
+func decodeQuotaWindow(limitID, limitName, role string, wire wireWindow) Window {
+	percent := *wire.UsedPercent
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 100 {
+		percent = 100
+	}
+
+	seconds := int64(0)
+	switch {
+	case wire.LimitWindowSecond != nil && *wire.LimitWindowSecond > 0:
+		seconds = *wire.LimitWindowSecond
+	case wire.WindowSeconds != nil && *wire.WindowSeconds > 0:
+		seconds = *wire.WindowSeconds
+	case wire.WindowMinutes != nil && *wire.WindowMinutes > 0:
+		seconds = *wire.WindowMinutes * 60
+	}
+
+	limitReached := false
+	if wire.LimitReached != nil {
+		limitReached = *wire.LimitReached
+	} else if percent >= 100 {
+		limitReached = true
+	}
+
+	resetAt := int64(0)
+	if wire.ResetAt != nil && *wire.ResetAt > 0 {
+		resetAt = *wire.ResetAt * 1000
+	}
+
+	return Window{
+		LimitID:       limitID,
+		LimitName:     limitName,
+		Role:          role,
+		Kind:          ClassifyWindow(seconds),
+		UsedPercent:   percent,
+		ResetAt:       resetAt,
+		WindowSeconds: seconds,
+		LimitReached:  limitReached,
+	}
 }

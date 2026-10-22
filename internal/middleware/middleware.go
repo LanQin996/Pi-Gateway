@@ -214,12 +214,7 @@ func (m *DropEnvironmentContext) Apply(_ context.Context, req *Request, cfg map[
 		filtered, removed, cleaned := stripEnvironmentItems(arr, kind)
 		if removed > 0 || cleaned > 0 {
 			req.Body.Set("input", filtered)
-			if removed > 0 {
-				res.Changes = append(res.Changes, fmt.Sprintf("removed %d environment_context item(s)", removed))
-			}
-			if cleaned > 0 {
-				res.Changes = append(res.Changes, fmt.Sprintf("stripped inline environment_context from %d item(s)", cleaned))
-			}
+			appendEnvironmentChanges(&res, removed, cleaned)
 		}
 	} else if s, ok := input.(string); ok && envContextTagRE.MatchString(s) {
 		// Response inputs may be a bare string as well as an array. Without this
@@ -230,12 +225,7 @@ func (m *DropEnvironmentContext) Apply(_ context.Context, req *Request, cfg map[
 	}
 
 	if alsoInstructions {
-		if v, ok := req.Body.Get("instructions"); ok {
-			if s, ok := v.(string); ok && envContextTagRE.MatchString(s) {
-				req.Body.Set("instructions", strings.TrimSpace(envContextTagRE.ReplaceAllString(s, "")))
-				res.Changes = append(res.Changes, "stripped environment_context from instructions")
-			}
-		}
+		stripEnvironmentInstructions(req, &res)
 	}
 	return res, nil
 }
@@ -246,66 +236,85 @@ func stripEnvironmentItems(items []any, kind string) ([]any, int, int) {
 	out := make([]any, 0, len(items))
 	removed, cleaned := 0, 0
 	for _, item := range items {
-		obj, ok := item.(map[string]any)
-		if !ok {
-			out = append(out, item)
-			continue
-		}
-
-		// Codex marks the content item kind via internal metadata.
-		kinds := contentItemKinds(obj)
-		content, contentOK := obj["content"].([]any)
-		if !contentOK {
-			if text, ok := obj["content"].(string); ok {
-				if envContextTagRE.MatchString(text) {
-					trimmed := strings.TrimSpace(envContextTagRE.ReplaceAllString(text, ""))
-					if trimmed == "" {
-						removed++
-						continue
-					}
-					obj["content"] = trimmed
-					cleaned++
-				}
-			}
-			if dropFullyEmptyContentItem(obj, kind, kinds) {
-				removed++
-				continue
-			}
-			out = append(out, obj)
-			continue
-		}
-
-		kept := make([]any, 0, len(content))
-		itemRemoved := false
-		for i, part := range content {
-			if i < len(kinds) && kinds[i] == kind {
-				continue
-			}
-			if partObj, ok := part.(map[string]any); ok {
-				if t, ok := partObj["text"].(string); ok && envContextTagRE.MatchString(t) {
-					trimmed := strings.TrimSpace(envContextTagRE.ReplaceAllString(t, ""))
-					if trimmed == "" {
-						continue
-					}
-					partObj["text"] = trimmed
-					cleaned++
-				}
-			}
-			kept = append(kept, part)
-		}
-		if len(kept) == 0 {
-			itemRemoved = true
-		} else if len(kept) != len(content) {
-			obj["content"] = kept
-		}
-		if itemRemoved {
+		include, count := stripEnvironmentItem(item, kind)
+		cleaned += count
+		if !include {
 			removed++
 			continue
 		}
-		stripKindMetadata(obj, len(kept))
-		out = append(out, obj)
+		out = append(out, item)
 	}
 	return out, removed, cleaned
+}
+
+func stripEnvironmentItem(item any, kind string) (bool, int) {
+	obj, ok := item.(map[string]any)
+	if !ok {
+		return true, 0
+	}
+	kinds := contentItemKinds(obj)
+	content, contentOK := obj["content"].([]any)
+	if !contentOK {
+		return stripEnvironmentTextItem(obj, kind, kinds)
+	}
+	kept, cleaned := stripEnvironmentParts(content, kind, kinds)
+	if len(kept) == 0 {
+		return false, cleaned
+	}
+	if len(kept) != len(content) {
+		obj["content"] = kept
+	}
+	stripKindMetadata(obj, len(kept))
+	return true, cleaned
+}
+
+func stripEnvironmentTextItem(obj map[string]any, kind string, kinds []string) (bool, int) {
+	cleaned := 0
+	if text, ok := obj["content"].(string); ok && envContextTagRE.MatchString(text) {
+		trimmed := strings.TrimSpace(envContextTagRE.ReplaceAllString(text, ""))
+		if trimmed == "" {
+			return false, 0
+		}
+		obj["content"] = trimmed
+		cleaned++
+	}
+	return !dropFullyEmptyContentItem(obj, kind, kinds), cleaned
+}
+
+func stripEnvironmentParts(content []any, kind string, kinds []string) ([]any, int) {
+	kept := make([]any, 0, len(content))
+	cleaned := 0
+	for i, part := range content {
+		if i < len(kinds) && kinds[i] == kind {
+			continue
+		}
+		include, changed := stripEnvironmentPart(part)
+		if !include {
+			continue
+		}
+		if changed {
+			cleaned++
+		}
+		kept = append(kept, part)
+	}
+	return kept, cleaned
+}
+
+func stripEnvironmentPart(part any) (bool, bool) {
+	obj, ok := part.(map[string]any)
+	if !ok {
+		return true, false
+	}
+	text, ok := obj["text"].(string)
+	if !ok || !envContextTagRE.MatchString(text) {
+		return true, false
+	}
+	trimmed := strings.TrimSpace(envContextTagRE.ReplaceAllString(text, ""))
+	if trimmed == "" {
+		return false, false
+	}
+	obj["text"] = trimmed
+	return true, true
 }
 
 func dropFullyEmptyContentItem(obj map[string]any, kind string, kinds []string) bool {
@@ -399,21 +408,9 @@ func (m *DropInputItems) Apply(_ context.Context, req *Request, cfg map[string]a
 	kept := make([]any, 0, len(arr))
 	dropped := 0
 	for _, item := range arr {
-		obj, isObj := item.(map[string]any)
-		if isObj {
-			if t, _ := obj["type"].(string); t != "" && containsString(types, t) {
-				dropped++
-				continue
-			}
-			if re != nil && re.MatchString(mustJSON(obj)) {
-				dropped++
-				continue
-			}
-		} else if re != nil {
-			if s, ok := item.(string); ok && re.MatchString(s) {
-				dropped++
-				continue
-			}
+		if inputItemMatches(item, types, re) {
+			dropped++
+			continue
 		}
 		kept = append(kept, item)
 	}
@@ -459,37 +456,9 @@ func (m *DropTools) Apply(_ context.Context, req *Request, cfg map[string]any) (
 		return res, nil
 	}
 
-	removed := 0
-	var filter func([]any) []any
-	filter = func(items []any) []any {
-		kept := make([]any, 0, len(items))
-		for _, tool := range items {
-			obj, ok := tool.(map[string]any)
-			if ok {
-				name, _ := obj["name"].(string)
-				kind, _ := obj["type"].(string)
-				if containsString(names, name) || containsString(types, kind) {
-					removed++
-					continue
-				}
-				if children, ok := obj["tools"].([]any); ok && kind == "namespace" {
-					copy := make(map[string]any, len(obj))
-					for key, value := range obj {
-						copy[key] = value
-					}
-					copy["tools"] = filter(children)
-					if len(copy["tools"].([]any)) == 0 {
-						removed++
-						continue
-					}
-					tool = copy
-				}
-			}
-			kept = append(kept, tool)
-		}
-		return kept
-	}
-	kept := filter(arr)
+	filter := toolFilter{names: names, types: types}
+	kept := filter.apply(arr)
+	removed := filter.removed
 	if removed > 0 {
 		if len(kept) == 0 {
 			req.Body.Delete("tools")
@@ -498,21 +467,7 @@ func (m *DropTools) Apply(_ context.Context, req *Request, cfg map[string]any) (
 		}
 		res.Changes = append(res.Changes, fmt.Sprintf("dropped %d tool(s)", removed))
 	}
-	if choice, ok := req.Body.Get("tool_choice"); ok {
-		obj, isObject := choice.(map[string]any)
-		matched := false
-		if isObject {
-			kind, _ := obj["type"].(string)
-			name, _ := obj["name"].(string)
-			matched = containsString(types, kind) || containsString(names, name)
-		} else if value, ok := choice.(string); ok {
-			matched = containsString(types, value) || (value == "required" && removed > 0 && len(kept) == 0)
-		}
-		if matched {
-			req.Body.Delete("tool_choice")
-			res.Changes = append(res.Changes, "dropped excluded tool_choice")
-		}
-	}
+	removeExcludedToolChoice(req, &res, types, names, removed, len(kept))
 	return res, nil
 }
 
@@ -693,4 +648,97 @@ func mustJSON(v any) string {
 		return ""
 	}
 	return string(raw)
+}
+
+func removeExcludedToolChoice(req *Request, res *Result, types, names []string, removed, keptCount int) {
+	if choice, ok := req.Body.Get("tool_choice"); ok {
+		obj, isObject := choice.(map[string]any)
+		matched := false
+		if isObject {
+			kind, _ := obj["type"].(string)
+			name, _ := obj["name"].(string)
+			matched = containsString(types, kind) || containsString(names, name)
+		} else if value, ok := choice.(string); ok {
+			matched = containsString(types, value) || (value == "required" && removed > 0 && keptCount == 0)
+		}
+		if matched {
+			req.Body.Delete("tool_choice")
+			res.Changes = append(res.Changes, "dropped excluded tool_choice")
+		}
+	}
+}
+
+type toolFilter struct {
+	names, types []string
+	removed      int
+}
+
+func (f *toolFilter) apply(items []any) []any {
+	kept := make([]any, 0, len(items))
+	for _, tool := range items {
+		filtered, include := f.filterOne(tool)
+		if !include {
+			f.removed++
+			continue
+		}
+		kept = append(kept, filtered)
+	}
+	return kept
+}
+
+func (f *toolFilter) filterOne(tool any) (any, bool) {
+	obj, ok := tool.(map[string]any)
+	if !ok {
+		return tool, true
+	}
+	name, _ := obj["name"].(string)
+	kind, _ := obj["type"].(string)
+	if containsString(f.names, name) || containsString(f.types, kind) {
+		return nil, false
+	}
+	children, ok := obj["tools"].([]any)
+	if !ok || kind != "namespace" {
+		return tool, true
+	}
+	snapshot := make(map[string]any, len(obj))
+	for key, value := range obj {
+		snapshot[key] = value
+	}
+	filtered := f.apply(children)
+	if len(filtered) == 0 {
+		return nil, false
+	}
+	snapshot["tools"] = filtered
+	return snapshot, true
+}
+
+func inputItemMatches(item any, types []string, pattern *regexp.Regexp) bool {
+	if obj, ok := item.(map[string]any); ok {
+		kind, _ := obj["type"].(string)
+		if kind != "" && containsString(types, kind) {
+			return true
+		}
+		return pattern != nil && pattern.MatchString(mustJSON(obj))
+	}
+	text, ok := item.(string)
+	return ok && pattern != nil && pattern.MatchString(text)
+}
+
+func stripEnvironmentInstructions(req *Request, res *Result) {
+	value, _ := req.Body.Get("instructions")
+	text, ok := value.(string)
+	if !ok || !envContextTagRE.MatchString(text) {
+		return
+	}
+	req.Body.Set("instructions", strings.TrimSpace(envContextTagRE.ReplaceAllString(text, "")))
+	res.Changes = append(res.Changes, "stripped environment_context from instructions")
+}
+
+func appendEnvironmentChanges(res *Result, removed, cleaned int) {
+	if removed > 0 {
+		res.Changes = append(res.Changes, fmt.Sprintf("removed %d environment_context item(s)", removed))
+	}
+	if cleaned > 0 {
+		res.Changes = append(res.Changes, fmt.Sprintf("stripped inline environment_context from %d item(s)", cleaned))
+	}
 }

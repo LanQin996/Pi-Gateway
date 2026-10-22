@@ -48,13 +48,7 @@ func (m *Manager) RefreshOfficialUsage(ctx context.Context, account *store.Accou
 	if err == nil && !ok {
 		err = ErrCodexNotLinked
 	}
-	days := 7
-	if state.SyncedAt == 0 {
-		days = 84
-	}
-	now := time.Now().UTC()
-	end := now.Format(time.DateOnly)
-	start := now.AddDate(0, 0, -(days - 1)).Format(time.DateOnly)
+	start, end := officialUsageDateRange(state.SyncedAt == 0)
 	var records []store.OfficialUsageDay
 	if err == nil {
 		records, err = client.FetchDailyUsage(ctx, current, token, start, end)
@@ -79,30 +73,47 @@ func (m *Manager) StartOfficialUsageRefresher(ctx context.Context) {
 				return
 			case <-timer.C:
 			}
-			accounts, err := m.store.ListEnabledAccounts(ctx)
-			if err == nil {
-				seen := map[string]bool{}
-				for _, a := range accounts {
-					if ctx.Err() != nil {
-						return
-					}
-					key := store.OfficialUsageKey(a)
-					if !a.CodexLinked() || seen[key] {
-						continue
-					}
-					seen[key] = true
-					state, err := m.store.OfficialUsageSyncFor(ctx, key)
-					if err != nil || state.AttemptedAt > time.Now().Add(-time.Hour).UnixMilli() {
-						continue
-					}
-					fetchCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
-					if err := m.RefreshOfficialUsage(fetchCtx, a); err != nil {
-						m.logger.Debug("official usage sync failed", "account", a.Name, "error", err)
-					}
-					cancel()
-				}
-			}
+			m.refreshDueOfficialUsage(ctx)
 			timer.Reset(time.Hour)
 		}
 	}()
+}
+
+func (m *Manager) refreshDueOfficialUsage(ctx context.Context) {
+	accounts, err := m.store.ListEnabledAccounts(ctx)
+	if err != nil {
+		return
+	}
+
+	seen := map[string]bool{}
+	for _, a := range accounts {
+		if ctx.Err() != nil {
+			return
+		}
+		key := store.OfficialUsageKey(a)
+		if !a.CodexLinked() || seen[key] {
+			continue
+		}
+		seen[key] = true
+		state, err := m.store.OfficialUsageSyncFor(ctx, key)
+		if err != nil || state.AttemptedAt > time.Now().Add(-time.Hour).UnixMilli() {
+			continue
+		}
+		fetchCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+		if err := m.RefreshOfficialUsage(fetchCtx, a); err != nil {
+			m.logger.Debug("official usage sync failed", "account", a.Name, "error", err)
+		}
+		cancel()
+	}
+}
+
+func officialUsageDateRange(initial bool) (start, end string) {
+	days := 7
+	if initial {
+		days = 84
+	}
+	now := time.Now().UTC()
+	end = now.Format(time.DateOnly)
+	start = now.AddDate(0, 0, -(days - 1)).Format(time.DateOnly)
+	return start, end
 }

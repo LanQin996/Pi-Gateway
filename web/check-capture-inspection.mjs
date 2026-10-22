@@ -12,7 +12,7 @@ function compile(name) {
     }).outputText
 }
 
-const moduleURL = source => `data:text/javascript;base64,${Buffer.from(source.replace("from 'diff'", `from '${diffDependencyURL}'`)).toString('base64')}`
+const moduleURL = source => `data:text/javascript;base64,${Buffer.from(source.replace("from 'diff'", "from '" + diffDependencyURL + "'")).toString('base64')}`
 const diffURL = moduleURL(compile('captureDiff'))
 const {
     frameSnapshot,

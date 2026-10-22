@@ -4,11 +4,10 @@ import {Handle, Position, type NodeProps} from '@vue-flow/core'
 import type {Rule, RuleAction, RuleCondition, RuleFieldError, RulePhase, RuleSchema} from '../../api/rules'
 import {actionFlowPorts, graphValueInputs, type RuleGraphValue, type RuleGraphNode} from '../../utils/ruleGraph'
 import {useI18n} from '../../i18n'
-import {ruleLabel, ruleDisplayName} from '../../utils/ruleLabels'
+import {ruleLabel, ruleDisplayName, ruleOptionLabel} from '../../utils/ruleLabels'
 import {localHelp} from '../../utils/ruleSchema'
 import RuleNodeFields from './RuleNodeFields.vue'
 import RuleValueNodeFields from './RuleValueNodeFields.vue'
-import {ruleOptionLabel} from '../../utils/ruleLabels'
 
 type Data = {
     kind: RuleGraphNode['kind']
@@ -40,38 +39,52 @@ const flowPorts = computed(() => props.data.kind === 'action' ? actionFlowPorts(
 function flowLabel(port: string) { return port.startsWith('functions/') ? port.slice(10).replace(/~1/g,'/').replace(/~0/g,'~') : t(`rules.canvas.flow.${port}`) }
 const group = computed(() => props.data.kind === 'condition' && ['all', 'any', 'not'].includes((item.value as RuleCondition).op))
 const childCount = computed(() => (item.value as RuleCondition).conditions?.length ?? 0)
-const title = computed(() => props.data.kind === 'value' ? (item.value as RuleGraphValue).mode === 'computed' ? ruleOptionLabel(((item.value as RuleGraphValue).value as {$expr:{op:string}}).$expr.op,locale.value) : t(`rules.canvas.value.${(item.value as RuleGraphValue).mode}`) : props.data.kind === 'rule' ? ruleDisplayName(item.value as Rule, locale.value) || t('rules.add') : props.data.kind === 'condition' ? ruleLabel('condition', (item.value as RuleCondition).op, locale.value) : ruleLabel('action', (item.value as RuleAction).type, locale.value))
+const title = computed(() => (() => {
+    if (props.data.kind === 'value') {
+        if ((item.value as RuleGraphValue).mode === 'computed') {
+            return ruleOptionLabel(((item.value as RuleGraphValue).value as {$expr:{op:string}}).$expr.op,locale.value)
+        }
+        return t(`rules.canvas.value.${(item.value as RuleGraphValue).mode}`)
+    }
+    if (props.data.kind === 'rule') {
+        return ruleDisplayName(item.value as Rule, locale.value) || t('rules.add')
+    }
+    if (props.data.kind === 'condition') {
+        return ruleLabel('condition', (item.value as RuleCondition).op, locale.value)
+    }
+    return ruleLabel('action', (item.value as RuleAction).type, locale.value)
+})())
 const summary = computed(() => {
-    if (props.data.kind === 'value') return title.value
-    if (props.data.kind === 'rule') return ruleLabel('phase', (item.value as Rule).phase, locale.value)
-    if (props.data.kind === 'condition') return (item.value as RuleCondition).path ? String((item.value as RuleCondition).path) : t('rules.when')
+    if (props.data.kind === 'value') { return title.value }
+    if (props.data.kind === 'rule') { return ruleLabel('phase', (item.value as Rule).phase, locale.value) }
+    if (props.data.kind === 'condition') { return (item.value as RuleCondition).path ? String((item.value as RuleCondition).path) : t('rules.when') }
     const action = item.value as RuleAction
     return String(action.params.path ?? action.params.model ?? localHelp(props.data.schema.actions.find(c => c.id === action.type)?.description, locale.value))
 })
 const status = computed(() => props.data.diagnostics?.[props.data.path])
 const editing = ref(false)
 function startEditing() {
-    if (editing.value) return
+    if (editing.value) { return }
     editing.value = true
     emit('edit-start')
 }
 function endEditing() {
-    if (!editing.value) return
+    if (!editing.value) { return }
     editing.value = false
     emit('edit-end')
 }
 function focusOut(event: FocusEvent) {
     const area = event.currentTarget as HTMLElement
-    if (event.relatedTarget instanceof Node && area.contains(event.relatedTarget)) return
+    if (event.relatedTarget instanceof Node && area.contains(event.relatedTarget)) { return }
     endEditing()
 }
 function keyboard(event: KeyboardEvent) {
     event.stopPropagation()
     // IME confirmation and textarea newlines must retain their native behavior.
-    if (event.isComposing || event.keyCode === 229) return
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'd') event.preventDefault()
+    if (event.isComposing || event.keyCode === 229) { return }
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'd') { event.preventDefault() }
     const target = event.target as HTMLElement
-    if (event.key === 'Enter' && !target.closest('textarea,button,summary,[contenteditable="true"]')) event.preventDefault()
+    if (event.key === 'Enter' && !target.closest('textarea,button,summary,[contenteditable="true"]')) { event.preventDefault() }
 }
 onBeforeUnmount(endEditing)
 </script>
@@ -83,12 +96,12 @@ onBeforeUnmount(endEditing)
     <Handle v-if="data.kind === 'value'" id="value-out" type="source" :position="Position.Right" :title="t('rules.canvas.valuePort')" />
     <Handle v-if="data.kind === 'rule' || data.kind === 'action'" id="action-out" type="source" :position="Position.Right" />
     <div class="rule-node-header rule-node-drag-handle" :title="summary">
-      <span class="rule-node-kind">{{ data.kind === 'value' ? t('rules.canvas.valuePort') : data.kind === 'rule' ? t('rules.canvas.rule') : data.kind === 'condition' ? t('rules.when') : t('rules.canvas.action') }}</span>
+      <span class="rule-node-kind">{{ (() => { if (data.kind === 'value') { return t('rules.canvas.valuePort'); } if (data.kind === 'rule') { return t('rules.canvas.rule'); } if (data.kind === 'condition') { return t('rules.when'); } return t('rules.canvas.action'); })() }}</span>
       <span class="rule-graph-node-title">{{ title }}</span>
     </div>
     <div class="rule-node-ports">
-      <span>{{ data.kind === 'action' ? t('rules.canvas.actionPort') : data.kind === 'rule' || group ? t('rules.canvas.booleanPort') : '' }}</span>
-      <span>{{ data.kind === 'value' ? t('rules.canvas.valuePort') : data.kind === 'condition' ? t('rules.canvas.booleanPort') : t('rules.canvas.actionPort') }}</span>
+      <span>{{ (() => { if (data.kind === 'action') { return t('rules.canvas.actionPort'); } if (data.kind === 'rule' || group) { return t('rules.canvas.booleanPort'); } return ''; })() }}</span>
+      <span>{{ (() => { if (data.kind === 'value') { return t('rules.canvas.valuePort'); } if (data.kind === 'condition') { return t('rules.canvas.booleanPort'); } return t('rules.canvas.actionPort'); })() }}</span>
     </div>
 
     <div v-if="status" class="rule-graph-node-status">{{ status }}</div>

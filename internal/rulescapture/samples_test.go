@@ -51,31 +51,37 @@ func TestRequestUsesCheckpointOrClientNormalizationNeverUpstream(t *testing.T) {
 			}
 			c := &store.Capture{Model: "already-rewritten", ClientTransport: "ws", APIKeyID: 7, RequestBody: `{"model":"incorrect-upstream","input":[]}`, Outcome: store.OutcomeOK, ResponseFrames: []store.Frame{frame(2, "client_in", kind, "", payload)}}
 			sample, err := Request(c, rt)
-			if err != nil {
+			reportTestFailure(t, err != nil, func() {
 				t.Fatal(err)
-			}
-			if sample.Source != "reconstructed" || sample.Input.Model != "mapped" || object(t, sample.Input.Body)["model"] != "mapped" {
+			})
+			reportTestFailure(t, sample.Source != "reconstructed" || sample.Input.Model != "mapped" || object(t, sample.Input.Body)["model"] != "mapped", func() {
 				t.Fatalf("sample=%+v", sample)
-			}
+			})
 			expected, err := piwire.BuildRequest(client, piwire.BuildOptions{DefaultModel: rt.DefaultModel, ModelMappings: rt.ModelMappings, DefaultReasoningEffort: rt.ReasoningEffort, SessionID: "explicit"})
-			if err != nil {
+			reportTestFailure(t, err != nil, func() {
 				t.Fatal(err)
-			}
+			})
 			actual, _ := json.Marshal(sample.Input.Body)
 			want, _ := json.Marshal(expected.Body)
-			if string(actual) != string(want) {
+			reportTestFailure(t, string(actual) != string(want), func() {
 				t.Fatalf("normalization diverged: %s != %s", actual, want)
-			}
-			if sample.Input.Context["api_key_id"] != int64(7) {
+			})
+			reportTestFailure(t, sample.Input.Context["api_key_id"] != int64(7), func() {
 				t.Fatalf("identity=%v", sample.Input.Context)
-			}
+			})
 			c.Truncated = true
-			if _, err := Request(c, rt); err != nil {
-				t.Fatalf("complete client frame rejected solely due to global truncation: %v", err)
+			{
+				_, err := Request(c, rt)
+				reportTestFailure(t, err != nil, func() {
+					t.Fatalf("complete client frame rejected solely due to global truncation: %v", err)
+				})
 			}
 			c.ResponseFrames = nil
-			if _, err := Request(c, rt); err == nil {
-				t.Fatal("used final upstream request as original")
+			{
+				_, err := Request(c, rt)
+				reportTestFailure(t, err == nil, func() {
+					t.Fatal("used final upstream request as original")
+				})
 			}
 		})
 	}
@@ -83,14 +89,17 @@ func TestRequestUsesCheckpointOrClientNormalizationNeverUpstream(t *testing.T) {
 	recorder.OnRuleInput(rules.PhaseRequest, &rules.Input{Body: map[string]any{"model": "checkpoint", "x": nil}, Model: "checkpoint", Context: map[string]any{"request_path": "/actual"}}, false)
 	c := recorder.Finalize(store.OutcomeError, "")
 	sample, err := Request(c, rt)
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatal(err)
-	}
-	if sample.Source != "checkpoint" || sample.Input.Model != "checkpoint" || sample.Input.Context["request_path"] != "/actual" {
+	})
+	reportTestFailure(t, sample.Source != "checkpoint" || sample.Input.Model != "checkpoint" || sample.Input.Context["request_path"] != "/actual", func() {
 		t.Fatalf("sample=%+v", sample)
-	}
-	if v, exists := object(t, sample.Input.Body)["x"]; !exists || v != nil {
-		t.Fatal("lost explicit null")
+	})
+	{
+		v, exists := object(t, sample.Input.Body)["x"]
+		reportTestFailure(t, !exists || v != nil, func() {
+			t.Fatal("lost explicit null")
+		})
 	}
 }
 

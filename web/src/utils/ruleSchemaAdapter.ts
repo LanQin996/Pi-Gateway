@@ -32,7 +32,7 @@ export interface BackendRuleSchema {
     actions: BackendCapability[]
     value_expressions: BackendCapability[];
     context_fields: BackendField[];
-    examples?: RuleSchema['examples'];
+    examples?: NonNullable<RuleSchema['examples']>;
     limits?: Record<string, number>
 }
 

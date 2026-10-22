@@ -21,7 +21,7 @@ function resize() {
 	resizeFrame = requestAnimationFrame(() => chart?.resize())
 }
 onMounted(() => {
-	if (!container.value) return
+	if (!container.value) { return }
 	chart = init(container.value, undefined, { renderer: 'canvas' })
 	render()
 	observer = new ResizeObserver(resize)
@@ -35,7 +35,7 @@ onBeforeUnmount(() => { disposed = true; cancelAnimationFrame(resizeFrame); obse
 </script>
 
 <template>
-	<div ref="container" role="img" :aria-label="label" class="base-chart" :style="{ height: `${height}px` }" />
+	<figure class="m-0 min-w-0"><div ref="container" aria-hidden="true" class="base-chart" :style="{ height: `${height}px` }" /><figcaption class="sr-only">{{ label }}</figcaption></figure>
 </template>
 
 <style scoped>

@@ -16,30 +16,33 @@ func TestRuleInputCheckpointBudgetsAndIndependence(t *testing.T) {
 		recorder.OnRuleInput(rules.PhaseRequest, &rules.Input{Body: body, ClientBody: map[string]any{"model": "client"}, Model: "original", Context: map[string]any{"request_path": "/responses"}, Trace: true, ConditionTrace: true}, false)
 		body["model"] = "mutated"
 		c := recorder.Finalize(store.OutcomeOK, "")
-		if len(c.ResponseFrames) != 1 {
+		reportTestFailure(t, len(c.ResponseFrames) != 1, func() {
 			t.Fatalf("frames=%+v", c.ResponseFrames)
-		}
+		})
 		f := c.ResponseFrames[0]
-		if f.Kind != KindRuleInput || f.Dir != "internal" || f.Type != rules.PhaseRequest {
+		reportTestFailure(t, f.Kind != KindRuleInput || f.Dir != "internal" || f.Type != rules.PhaseRequest, func() {
 			t.Fatalf("checkpoint=%+v", f)
-		}
-		if recorder.seenBytes > budget {
+		})
+		reportTestFailure(t, recorder.seenBytes > budget, func() {
 			t.Fatal("checkpoint escaped record budget")
-		}
+		})
 		if budget == 32 {
-			if f.Data != nil || f.Text != "" || !c.Truncated {
+			reportTestFailure(t, f.Data != nil || f.Text != "" || !c.Truncated, func() {
 				t.Fatal("incomplete checkpoint retained payload")
-			}
+			})
 			continue
 		}
 		raw, _ := json.Marshal(f.Data)
 		var input rules.Input
-		if err := json.Unmarshal(raw, &input); err != nil {
-			t.Fatal(err)
+		{
+			err := json.Unmarshal(raw, &input)
+			reportTestFailure(t, err != nil, func() {
+				t.Fatal(err)
+			})
 		}
-		if input.Body.(map[string]any)["model"] != "original" || input.Trace || input.ConditionTrace {
+		reportTestFailure(t, input.Body.(map[string]any)["model"] != "original" || input.Trace || input.ConditionTrace, func() {
 			t.Fatalf("snapshot=%s", raw)
-		}
+		})
 	}
 }
 

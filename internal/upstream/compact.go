@@ -65,68 +65,27 @@ func (c *Client) streamCompact(ctx context.Context, req *Request, onEvent func(*
 		req.Sink.OnResponseHeaders(resp.StatusCode, resp.Header)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		raw, truncated := readErrorBody(resp)
-		observeErrorBody(req.Sink, raw, truncated)
-		var payload map[string]any
-		_ = json.Unmarshal(raw, &payload)
-		code, _ := extractErrorFields(payload)
-		if code == "" {
-			code = fmt.Sprintf("http_%d", resp.StatusCode)
-		}
-		failure := &FailureError{Code: code, Status: resp.StatusCode,
-			RequestID: resp.Header.Get("x-request-id"), Message: formatUpstreamError(resp.StatusCode, raw), Payload: raw}
-		if req.CompactionMode != "off" && compactFallbackAllowed(failure) {
-			c.cfg.Logger.Warn("native compaction unavailable; using model summary", "status", resp.StatusCode, "code", code)
-			return c.streamSummaryCompact(ctx, req, onEvent)
-		}
-		// A compact-specific rejection is not evidence the account is banned.
-		failure.OperationDenied = resp.StatusCode == http.StatusForbidden && (code == "compact_denied" || compactFallbackAllowed(failure))
-		return result, failure
+		return c.compactHTTPFailure(ctx, req, onEvent, resp, result)
 	}
 	reader, err := egress.DecodeBody(resp)
 	if err != nil {
 		return result, err
 	}
 	defer reader.Close()
-	raw, err := io.ReadAll(io.LimitReader(reader, maxCompactionResponseBytes+1))
+	raw, payload, err := readCompactionPayload(reader)
 	if err != nil {
-		return result, fmt.Errorf("upstream: read compaction response: %w", err)
-	}
-	if len(raw) > maxCompactionResponseBytes {
-		return result, fmt.Errorf("upstream: compaction response exceeds byte limit")
-	}
-	var payload map[string]any
-	if err := json.Unmarshal(raw, &payload); err != nil || payload == nil {
-		return result, fmt.Errorf("upstream: invalid compaction JSON response")
+		return result, err
 	}
 	if req.Sink != nil {
-		req.Sink.OnFrame("in", "http_response", "response.compaction", raw, payload)
+		req.Sink.OnFrame("in", "http_response", compactionResponseType, raw, payload)
 		req.Sink.OnResponseID(ExtractResponseID(payload))
 		req.Sink.OnUsage(ExtractUsage(payload))
 	}
-	if failure := FailureFromEvent(&Event{Type: "response.compaction", Data: payload, Raw: raw}); failure != nil {
+	if failure := FailureFromEvent(&Event{Type: compactionResponseType, Data: payload, Raw: raw}); failure != nil {
 		return result, failure
 	}
-	items, ok := payload["output"].([]any)
-	if payload["object"] != "response.compaction" || !ok || len(items) == 0 {
-		return result, fmt.Errorf("upstream: expected response.compaction with a compacted output window")
-	}
-	found := false
-	for _, rawItem := range items {
-		item, ok := rawItem.(map[string]any)
-		if !ok {
-			return result, fmt.Errorf("upstream: invalid compaction output item")
-		}
-		if item["type"] == "compaction" {
-			encrypted, _ := item["encrypted_content"].(string)
-			if encrypted == "" {
-				return result, fmt.Errorf("upstream: compaction item has no encrypted_content")
-			}
-			found = true
-		}
-	}
-	if !found {
-		return result, fmt.Errorf("upstream: compacted output has no compaction item")
+	if err := validateCompactedOutput(payload); err != nil {
+		return result, err
 	}
 	return emitCompaction(req, result, payload, onEvent)
 }
@@ -181,4 +140,56 @@ func compactModel(body []byte) string {
 	}
 	_ = json.Unmarshal(body, &request)
 	return request.Model
+}
+
+func validateCompactedOutput(payload map[string]any) error {
+	items, ok := payload["output"].([]any)
+	if payload["object"] != compactionResponseType || !ok || len(items) == 0 {
+		return fmt.Errorf("upstream: expected response.compaction with a compacted output window")
+	}
+	found := false
+	for _, rawItem := range items {
+		item, ok := rawItem.(map[string]any)
+		if !ok {
+			return fmt.Errorf("upstream: invalid compaction output item")
+		}
+		if item["type"] == "compaction" {
+			encrypted, _ := item["encrypted_content"].(string)
+			if encrypted == "" {
+				return fmt.Errorf("upstream: compaction item has no encrypted_content")
+			}
+			found = true
+		}
+	}
+	if !found {
+		return fmt.Errorf("upstream: compacted output has no compaction item")
+	}
+	return nil
+}
+
+func readCompactionPayload(reader io.Reader) ([]byte, map[string]any, error) {
+	raw, err := io.ReadAll(io.LimitReader(reader, maxCompactionResponseBytes+1))
+	if err != nil {
+		return nil, nil, fmt.Errorf("upstream: read compaction response: %w", err)
+	}
+	if len(raw) > maxCompactionResponseBytes {
+		return nil, nil, fmt.Errorf("upstream: compaction response exceeds byte limit")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil || payload == nil {
+		return nil, nil, fmt.Errorf("upstream: invalid compaction JSON response")
+	}
+	return raw, payload, nil
+}
+
+func (c *Client) compactHTTPFailure(ctx context.Context, req *Request, onEvent func(*Event) error, resp *http.Response, result *StreamResult) (*StreamResult, error) {
+	failure := httpResponseFailure(resp, req.Sink)
+	code := failure.Code
+	if req.CompactionMode != "off" && compactFallbackAllowed(failure) {
+		c.cfg.Logger.Warn("native compaction unavailable; using model summary", "status", resp.StatusCode, "code", code)
+		return c.streamSummaryCompact(ctx, req, onEvent)
+	}
+	// A compact-specific rejection is not evidence the account is banned.
+	failure.OperationDenied = resp.StatusCode == http.StatusForbidden && (code == "compact_denied" || compactFallbackAllowed(failure))
+	return result, failure
 }

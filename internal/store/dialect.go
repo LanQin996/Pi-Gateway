@@ -54,56 +54,7 @@ func postgresPlaceholders(query string) string {
 	var out strings.Builder
 	n := 0
 	for i := 0; i < len(query); {
-		start := i
-		switch {
-		case query[i] == '\'' || query[i] == '"':
-			quote := query[i]
-			i++
-			for i < len(query) {
-				if query[i] == quote {
-					i++
-					if i < len(query) && query[i] == quote {
-						i++
-						continue
-					}
-					break
-				}
-				i++
-			}
-		case strings.HasPrefix(query[i:], "--"):
-			for i < len(query) && query[i] != '\n' {
-				i++
-			}
-		case strings.HasPrefix(query[i:], "/*"):
-			i += 2
-			depth := 1
-			for i < len(query) && depth > 0 {
-				if strings.HasPrefix(query[i:], "/*") {
-					depth++
-					i += 2
-				} else if strings.HasPrefix(query[i:], "*/") {
-					depth--
-					i += 2
-				} else {
-					i++
-				}
-			}
-		case query[i] == '$':
-			end := i + 1
-			for end < len(query) && ((query[end] >= 'a' && query[end] <= 'z') || (query[end] >= 'A' && query[end] <= 'Z') || query[end] == '_' || (end > i+1 && query[end] >= '0' && query[end] <= '9')) {
-				end++
-			}
-			if end < len(query) && query[end] == '$' {
-				tag := query[i : end+1]
-				if close := strings.Index(query[end+1:], tag); close >= 0 {
-					i = end + 1 + close + len(tag)
-				} else {
-					i++
-				}
-			} else {
-				i++
-			}
-		case query[i] == '?':
+		if query[i] == '?' {
 			if i+1 < len(query) && query[i+1] == '?' {
 				out.WriteByte('?')
 				i += 2
@@ -114,15 +65,88 @@ func postgresPlaceholders(query string) string {
 				i++
 			}
 			continue
-		default:
-			i++
 		}
-		out.WriteString(query[start:i])
+		end := postgresTokenEnd(query, i)
+		out.WriteString(query[i:end])
+		i = end
 	}
 	return out.String()
 }
 
+// postgresTokenEnd skips one SQL token without interpreting placeholders inside it.
+func postgresTokenEnd(query string, start int) int {
+	switch {
+	case query[start] == '\'' || query[start] == '"':
+		return postgresQuotedEnd(query, start)
+	case strings.HasPrefix(query[start:], "--"):
+		if newline := strings.IndexByte(query[start:], '\n'); newline >= 0 {
+			return start + newline
+		}
+		return len(query)
+	case strings.HasPrefix(query[start:], "/*"):
+		return postgresCommentEnd(query, start)
+	case query[start] == '$':
+		return postgresDollarQuoteEnd(query, start)
+	default:
+		return start + 1
+	}
+}
+
+func postgresQuotedEnd(query string, start int) int {
+	quote := query[start]
+	for i := start + 1; i < len(query); i++ {
+		if query[i] != quote {
+			continue
+		}
+		if i+1 < len(query) && query[i+1] == quote {
+			i++
+			continue
+		}
+		return i + 1
+	}
+	return len(query)
+}
+
+func postgresCommentEnd(query string, start int) int {
+	depth, i := 1, start+2
+	for i < len(query) && depth > 0 {
+		switch {
+		case strings.HasPrefix(query[i:], "/*"):
+			depth++
+			i += 2
+		case strings.HasPrefix(query[i:], "*/"):
+			depth--
+			i += 2
+		default:
+			i++
+		}
+	}
+	return i
+}
+
+func postgresDollarQuoteEnd(query string, start int) int {
+	end := start + 1
+	for end < len(query) && postgresDollarTagByte(query[end], end > start+1) {
+		end++
+	}
+	if end >= len(query) || query[end] != '$' {
+		return start + 1
+	}
+	tag := query[start : end+1]
+	closingOffset := strings.Index(query[end+1:], tag)
+	if closingOffset < 0 {
+		return start + 1
+	}
+	return end + 1 + closingOffset + len(tag)
+}
+
+func postgresDollarTagByte(value byte, allowDigit bool) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value == '_' || allowDigit && value >= '0' && value <= '9'
+}
+
 // ExecContext is the dialect-aware escape hatch for production callers.
+// Query values remain separate bound arguments. Rebind rewrites placeholder
+// syntax only and never interpolates values into SQL.
 func (s *Store) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
 	return s.db.ExecContext(ctx, s.Rebind(query), args...)
 }
@@ -138,6 +162,9 @@ type storeTx struct {
 	store *Store
 }
 
+// BeginTx transfers ownership of the live transaction to the caller. The caller
+// must defer Rollback and explicitly Commit; rolling back here would invalidate
+// the transaction before the caller could execute its first statement.
 func (s *Store) BeginTx(ctx context.Context, opts *sql.TxOptions) (*storeTx, error) {
 	// PostgreSQL READ COMMITTED gives each statement a different snapshot;
 	// read-only count/page transactions require the same snapshot as SQLite.
@@ -152,6 +179,8 @@ func (s *Store) BeginTx(ctx context.Context, opts *sql.TxOptions) (*storeTx, err
 	}
 	return &storeTx{Tx: tx, store: s}, nil
 }
+
+// Transaction wrappers preserve the same placeholder/value separation as Store.
 func (tx *storeTx) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
 	return tx.Tx.ExecContext(ctx, tx.store.Rebind(query), args...)
 }

@@ -18,6 +18,8 @@ import (
 var dist embed.FS
 
 // Handler serves the SPA, falling back to index.html for client-side routes.
+const cacheControlHeader = "Cache-Control"
+
 func Handler() http.Handler {
 	sub, err := fs.Sub(dist, "dist")
 	if err != nil {
@@ -34,7 +36,11 @@ func Handler() http.Handler {
 			return
 		}
 
-		requested := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
+		requested, valid := assetPath(r.URL.Path)
+		if !valid {
+			http.NotFound(w, r)
+			return
+		}
 		if requested == "" || requested == "." {
 			serveIndex(w, r, sub)
 			return
@@ -45,9 +51,9 @@ func Handler() http.Handler {
 			_ = f.Close()
 			if !strings.HasPrefix(requested, "assets/") {
 				// index.html must never be cached or the SPA will pin to an old build.
-				w.Header().Set("Cache-Control", "no-cache")
+				w.Header().Set(cacheControlHeader, "no-cache")
 			} else {
-				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+				w.Header().Set(cacheControlHeader, "public, max-age=31536000, immutable")
 			}
 			fileServer.ServeHTTP(w, r)
 			return
@@ -63,10 +69,25 @@ func serveIndex(w http.ResponseWriter, r *http.Request, sub fs.FS) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set(cacheControlHeader, "no-cache")
 	w.WriteHeader(http.StatusOK)
 	if r.Method == http.MethodHead {
 		return
 	}
 	_, _ = w.Write(raw)
+}
+
+// assetPath only admits paths within the embedded filesystem. Reject traversal
+// before cleaning rather than silently normalizing it into another asset.
+func assetPath(urlPath string) (string, bool) {
+	if strings.ContainsAny(urlPath, "\\\x00") {
+		return "", false
+	}
+	for _, segment := range strings.Split(urlPath, "/") {
+		if segment == ".." {
+			return "", false
+		}
+	}
+	name := strings.TrimPrefix(path.Clean(urlPath), "/")
+	return name, name == "" || fs.ValidPath(name)
 }

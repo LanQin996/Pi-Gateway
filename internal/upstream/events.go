@@ -156,54 +156,42 @@ func (e *SSEEventTooLargeError) Error() string {
 }
 func (e *SSEEventTooLargeError) Unwrap() error { return ErrSSEEventTooLarge }
 
+type sseFrame struct {
+	dataBuf   bytes.Buffer
+	sawData   bool
+	eventName string
+}
+
 func (s *SSEReader) Next() (*Event, error) {
-	var dataBuf bytes.Buffer
-	var lineBuf bytes.Buffer
-	sawData := false
+	frame := &sseFrame{}
 	frameBytes := 0
-	eventName := ""
-
-	processLine := func(line []byte) (*Event, error) {
-		trimmed := strings.TrimRight(string(line), "\r\n")
-
-		// A blank line terminates the frame.
-		if trimmed == "" {
-			if !sawData {
-				eventName = ""
-				return nil, nil
+	for {
+		line, err := s.readFrameLine(&frameBytes)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, err
+		}
+		if len(line) > 0 {
+			event, lineErr := frame.processLine(s, line)
+			if lineErr != nil || event != nil {
+				return event, lineErr
 			}
-			return s.buildEvent(dataBuf.String(), eventName)
 		}
-
-		if strings.HasPrefix(trimmed, ":") {
-			// Comment / keep-alive.
-			return nil, nil
-		}
-
-		if strings.HasPrefix(trimmed, "data:") {
-			payload := strings.TrimPrefix(trimmed, "data:")
-			payload = strings.TrimPrefix(payload, " ")
-			if dataBuf.Len() > 0 {
-				dataBuf.WriteByte('\n')
+		if errors.Is(err, io.EOF) {
+			if frame.sawData {
+				return s.buildEvent(frame.dataBuf.String(), frame.eventName)
 			}
-			dataBuf.WriteString(payload)
-			sawData = true
+			return nil, io.EOF
 		}
-		if strings.HasPrefix(trimmed, "event:") {
-			eventName = strings.TrimPrefix(strings.TrimPrefix(trimmed, "event:"), " ")
-		} else if trimmed == "event" {
-			// A field without a colon has an empty value.
-			eventName = ""
-		}
-		// Other fields (id:, retry:) carry no payload we need.
-		return nil, nil
 	}
+}
 
+func (s *SSEReader) readFrameLine(frameBytes *int) ([]byte, error) {
+	var lineBuf bytes.Buffer
 	for {
 		chunk, err := s.reader.ReadSlice('\n')
 		if len(chunk) > 0 {
-			frameBytes += len(chunk)
-			if frameBytes > maxSSEEventBytes {
+			*frameBytes += len(chunk)
+			if *frameBytes > maxSSEEventBytes {
 				return nil, &SSEEventTooLargeError{Limit: maxSSEEventBytes}
 			}
 			lineBuf.Write(chunk)
@@ -211,32 +199,51 @@ func (s *SSEReader) Next() (*Event, error) {
 				return nil, &SSEEventTooLargeError{Limit: maxSSEEventBytes}
 			}
 		}
+		// A physical line can span several bufio chunks without bypassing limits.
 		if errors.Is(err, bufio.ErrBufferFull) {
-			// The line is longer than bufio's internal buffer. Keep collecting it,
-			// but the explicit frame limit above prevents unbounded growth.
 			continue
 		}
 		if err != nil && !errors.Is(err, io.EOF) {
 			return nil, err
 		}
-		if lineBuf.Len() > 0 {
-			line := append([]byte(nil), lineBuf.Bytes()...)
-			lineBuf.Reset()
-			event, lineErr := processLine(line)
-			if lineErr != nil {
-				return nil, lineErr
-			}
-			if event != nil {
-				return event, nil
-			}
-		}
-		if errors.Is(err, io.EOF) {
-			if sawData {
-				return s.buildEvent(dataBuf.String(), eventName)
-			}
-			return nil, io.EOF
-		}
+		return lineBuf.Bytes(), err
 	}
+}
+
+func (f *sseFrame) processLine(s *SSEReader, line []byte) (*Event, error) {
+	trimmed := strings.TrimRight(string(line), "\r\n")
+
+	// A blank line terminates the frame.
+	if trimmed == "" {
+		if !f.sawData {
+			f.eventName = ""
+			return nil, nil
+		}
+		return s.buildEvent(f.dataBuf.String(), f.eventName)
+	}
+
+	if strings.HasPrefix(trimmed, ":") {
+		// Comment / keep-alive.
+		return nil, nil
+	}
+
+	if strings.HasPrefix(trimmed, "data:") {
+		payload := strings.TrimPrefix(trimmed, "data:")
+		payload = strings.TrimPrefix(payload, " ")
+		if f.dataBuf.Len() > 0 {
+			f.dataBuf.WriteByte('\n')
+		}
+		f.dataBuf.WriteString(payload)
+		f.sawData = true
+	}
+	if strings.HasPrefix(trimmed, "event:") {
+		f.eventName = strings.TrimPrefix(strings.TrimPrefix(trimmed, "event:"), " ")
+	} else if trimmed == "event" {
+		// A field without a colon has an empty value.
+		f.eventName = ""
+	}
+	// Other fields (id:, retry:) carry no payload we need.
+	return nil, nil
 }
 
 func (s *SSEReader) buildEvent(data, eventName string) (*Event, error) {
@@ -472,14 +479,7 @@ func extractRequestID(data map[string]any) string {
 			}
 		}
 	}
-	for key, value := range data {
-		if strings.EqualFold(key, "x-request-id") {
-			if id, ok := value.(string); ok && strings.TrimSpace(id) != "" {
-				return id
-			}
-		}
-	}
-	return ""
+	return requestIDHeaderValue(data)
 }
 
 func intValue(value any) int {
@@ -516,4 +516,15 @@ func intFrom(m map[string]any, key string) int64 {
 		return n
 	}
 	return 0
+}
+
+func requestIDHeaderValue(data map[string]any) string {
+	for key, value := range data {
+		if strings.EqualFold(key, "x-request-id") {
+			if id, ok := value.(string); ok && strings.TrimSpace(id) != "" {
+				return id
+			}
+		}
+	}
+	return ""
 }

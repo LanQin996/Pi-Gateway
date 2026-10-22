@@ -37,61 +37,11 @@ func TestPrepareSeparatesWireAndInternalSession(t *testing.T) {
 	}
 	var generated []string
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			r := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-			r.Header.Set("Authorization", "Bearer "+h.key)
-			if tc.header != "" {
-				r.Header.Set(tc.header, tc.hint)
-			}
-			p, apiErr := h.dataPlane.prepare(context.Background(), r, []byte(tc.body), "sse")
-			if apiErr != nil {
-				t.Fatal(apiErr)
-			}
-			defer p.Release()
-			if p.WireSessionID != tc.want || p.SessionID == "" {
-				t.Fatalf("wire/internal session = %q/%q, want wire %q and nonempty internal", p.WireSessionID, p.SessionID, tc.want)
-			}
-			if tc.want == "" {
-				if _, err := uuid.Parse(p.SessionID); err != nil {
-					t.Fatalf("generated internal session is not UUID: %v", err)
-				}
-				generated = append(generated, p.SessionID)
-			}
-			req, err := h.dataPlane.newUpstreamRequest(context.Background(), p)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if req.SessionID != p.SessionID {
-				t.Fatalf("pool session = %q, want internal %q", req.SessionID, p.SessionID)
-			}
-			for name, headers := range map[string]http.Header{"sse": req.SSEHeaders, "ws": req.WSHeaders} {
-				if got := headers.Get("x-client-request-id"); got != tc.want {
-					t.Errorf("%s x-client-request-id = %q, want %q", name, got, tc.want)
-				}
-				if tc.want == "" {
-					for _, key := range []string{"session_id", "session-id", "x-client-request-id"} {
-						if headers.Get(key) != "" {
-							t.Errorf("%s leaked %s = %q", name, key, headers.Get(key))
-						}
-					}
-				}
-			}
-			if got := req.SSEHeaders.Get("session_id"); got != tc.want {
-				t.Errorf("SSE session_id = %q, want %q", got, tc.want)
-			}
-			var body map[string]any
-			if err := json.Unmarshal(req.Body, &body); err != nil {
-				t.Fatal(err)
-			}
-			cacheKey, present := body["prompt_cache_key"]
-			if tc.want == "" && present || tc.want != "" && cacheKey != tc.want {
-				t.Errorf("prompt_cache_key = %#v (present %t), wire = %q", cacheKey, present, tc.want)
-			}
-		})
+		t.Run(tc.name, func(t *testing.T) { runPrepareSeparatesWireAndInternalSessionCase(t, &h, &generated, &tc) })
 	}
-	if len(generated) != 2 || generated[0] == generated[1] {
+	reportTestFailure(t, len(generated) != 2 || generated[0] == generated[1], func() {
 		t.Fatalf("independent no-session requests share pool key: %v", generated)
-	}
+	})
 }
 
 func TestNewUpstreamRequestUsesConfiguredPlatformAndExplicitTimeout(t *testing.T) {
@@ -104,17 +54,17 @@ func TestNewUpstreamRequestUsesConfiguredPlatformAndExplicitTimeout(t *testing.T
 	r := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
 	r.Header.Set("Authorization", "Bearer "+h.key)
 	p, apiErr := h.dataPlane.prepare(context.Background(), r, []byte(`{"model":"test","input":[]}`), "sse")
-	if apiErr != nil {
+	reportTestFailure(t, apiErr != nil, func() {
 		t.Fatal(apiErr)
-	}
+	})
 	defer p.Release()
 	for _, timeout := range []int{0, -1, 45} {
 		t.Run(strconv.Itoa(timeout), func(t *testing.T) {
 			cfg.Upstream.RequestTimeoutSeconds = timeout
 			req, err := h.dataPlane.newUpstreamRequest(context.Background(), p)
-			if err != nil {
+			reportTestFailure(t, err != nil, func() {
 				t.Fatal(err)
-			}
+			})
 			want := map[string]string{
 				"Accept":                      "application/json",
 				"X-Stainless-OS":              "MacOS",
@@ -123,19 +73,28 @@ func TestNewUpstreamRequestUsesConfiguredPlatformAndExplicitTimeout(t *testing.T
 				"X-Stainless-Runtime-Version": "v22.14.0",
 			}
 			for name, value := range want {
-				if got := req.SSEHeaders.Get(name); got != value {
-					t.Errorf("%s = %q, want %q", name, got, value)
+				{
+					got := req.SSEHeaders.Get(name)
+					reportTestFailure(t, got != value, func() {
+						t.Errorf("%s = %q, want %q", name, got, value)
+					})
 				}
 			}
 			wantTimeout := ""
 			if timeout > 0 {
 				wantTimeout = strconv.Itoa(timeout)
 			}
-			if got := req.SSEHeaders.Get("X-Stainless-Timeout"); got != wantTimeout {
-				t.Errorf("timeout = %q, want %q", got, wantTimeout)
+			{
+				got := req.SSEHeaders.Get("X-Stainless-Timeout")
+				reportTestFailure(t, got != wantTimeout, func() {
+					t.Errorf("timeout = %q, want %q", got, wantTimeout)
+				})
 			}
-			if got := req.WSHeaders.Get("originator"); got != "pi" {
-				t.Errorf("WS originator = %q, want pi", got)
+			{
+				got := req.WSHeaders.Get("originator")
+				reportTestFailure(t, got != "pi", func() {
+					t.Errorf("WS originator = %q, want pi", got)
+				})
 			}
 		})
 	}
@@ -153,13 +112,19 @@ func testRetryHeaders() http.Header {
 func assertRetryHeaders(t *testing.T, headers http.Header) {
 	t.Helper()
 	for name, values := range testRetryHeaders() {
-		if got := headers.Get(name); got != values[0] {
-			t.Errorf("%s = %q, want %q", name, got, values[0])
+		{
+			got := headers.Get(name)
+			reportTestFailure(t, got != values[0], func() {
+				t.Errorf("%s = %q, want %q", name, got, values[0])
+			})
 		}
 	}
 	for _, name := range []string{"Set-Cookie", "Authorization", "X-Upstream-Secret"} {
-		if got := headers.Get(name); got != "" {
-			t.Errorf("unsafe header %s = %q", name, got)
+		{
+			got := headers.Get(name)
+			reportTestFailure(t, got != "", func() {
+				t.Errorf("unsafe header %s = %q", name, got)
+			})
 		}
 	}
 }
@@ -180,28 +145,34 @@ func TestHTTPErrorPreservesRetryHeadersWithoutCapture(t *testing.T) {
 				}), "sse")
 				rt := h.dataPlane.settings.Get()
 				rt.CaptureEnabled = false
-				if err := h.dataPlane.settings.Set(context.Background(), rt); err != nil {
-					t.Fatal(err)
+				{
+					err := h.dataPlane.settings.Set(context.Background(), rt)
+					reportTestFailure(t, err != nil, func() {
+						t.Fatal(err)
+					})
 				}
 				r, _ := http.NewRequest(http.MethodPost, h.server.URL+"/v1/responses", strings.NewReader(fmt.Sprintf(`{"model":"test","input":[],"stream":%t}`, stream)))
 				r.Header.Set("Authorization", "Bearer "+h.key)
 				resp, err := http.DefaultClient.Do(r)
-				if err != nil {
+				reportTestFailure(t, err != nil, func() {
 					t.Fatal(err)
-				}
+				})
 				defer resp.Body.Close()
-				if resp.StatusCode != status {
+				reportTestFailure(t, resp.StatusCode != status, func() {
 					t.Errorf("status = %d, want %d", resp.StatusCode, status)
-				}
+				})
 				assertRetryHeaders(t, resp.Header)
 				var payload map[string]any
-				if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-					t.Fatal(err)
+				{
+					err := json.NewDecoder(resp.Body).Decode(&payload)
+					reportTestFailure(t, err != nil, func() {
+						t.Fatal(err)
+					})
 				}
 				inner, _ := payload["error"].(map[string]any)
-				if inner["request_id"] != "req-retry" {
+				reportTestFailure(t, inner["request_id"] != "req-retry", func() {
 					t.Errorf("missing error request_id: %#v", payload)
-				}
+				})
 			})
 		}
 	}
@@ -221,22 +192,25 @@ func TestSSEMidstreamFailureKeepsRetryMetadata(t *testing.T) {
 	r, _ := http.NewRequest(http.MethodPost, h.server.URL+"/v1/responses", strings.NewReader(`{"model":"test","input":[],"stream":true}`))
 	r.Header.Set("Authorization", "Bearer "+h.key)
 	resp, err := http.DefaultClient.Do(r)
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatal(err)
-	}
+	})
 	defer resp.Body.Close()
 	assertRetryHeaders(t, resp.Header)
 	reader := upstream.ParseSSE(resp.Body)
-	if _, err := reader.Next(); err != nil {
-		t.Fatal(err)
+	{
+		_, err := reader.Next()
+		reportTestFailure(t, err != nil, func() {
+			t.Fatal(err)
+		})
 	}
 	event, err := reader.Next()
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatal(err)
-	}
-	if event.Type != "error" {
+	})
+	reportTestFailure(t, event.Type != "error", func() {
 		t.Fatalf("event = %#v, want error", event)
-	}
+	})
 	assertRetryPayload(t, event.Data)
 }
 
@@ -244,16 +218,19 @@ func assertRetryPayload(t *testing.T, payload map[string]any) {
 	t.Helper()
 	encoded, _ := json.Marshal(payload["headers"])
 	var headers map[string]string
-	if err := json.Unmarshal(encoded, &headers); err != nil {
-		t.Fatalf("decode retry metadata: %v, payload=%#v", err, payload)
+	{
+		err := json.Unmarshal(encoded, &headers)
+		reportTestFailure(t, err != nil, func() {
+			t.Fatalf("decode retry metadata: %v, payload=%#v", err, payload)
+		})
 	}
 	want := map[string]string{}
 	for name, values := range testRetryHeaders() {
 		want[strings.ToLower(name)] = values[0]
 	}
-	if !reflect.DeepEqual(headers, want) {
+	reportTestFailure(t, !reflect.DeepEqual(headers, want), func() {
 		t.Fatalf("retry metadata = %#v, want %#v", headers, want)
-	}
+	})
 }
 
 func TestWebSocketErrorCarriesRetryMetadata(t *testing.T) {
@@ -273,21 +250,27 @@ func TestWebSocketErrorCarriesRetryMetadata(t *testing.T) {
 				}
 			}), "sse")
 			conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(h.server.URL, "http")+"/v1/responses", http.Header{"Authorization": {"Bearer " + h.key}})
-			if err != nil {
+			reportTestFailure(t, err != nil, func() {
 				t.Fatal(err)
-			}
+			})
 			defer conn.Close()
 			_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-			if err := conn.WriteJSON(map[string]any{"type": "response.create", "model": "test", "input": []any{}}); err != nil {
-				t.Fatal(err)
+			{
+				err := conn.WriteJSON(map[string]any{"type": "response.create", "model": "test", "input": []any{}})
+				reportTestFailure(t, err != nil, func() {
+					t.Fatal(err)
+				})
 			}
 			var payload map[string]any
-			if err := conn.ReadJSON(&payload); err != nil {
-				t.Fatal(err)
+			{
+				err := conn.ReadJSON(&payload)
+				reportTestFailure(t, err != nil, func() {
+					t.Fatal(err)
+				})
 			}
-			if payload["type"] != "error" {
+			reportTestFailure(t, payload["type"] != "error", func() {
 				t.Fatalf("payload = %#v, want error", payload)
-			}
+			})
 			assertRetryPayload(t, payload)
 		})
 	}
@@ -300,20 +283,20 @@ func TestResponseHeaderSinkReplacesHeadersAcrossAttempts(t *testing.T) {
 	first.Set("Authorization", "secret")
 	sink.OnResponseHeaders(429, first)
 	first.Set("Retry-After", "mutated")
-	if p.ResponseHeaders.Get("Retry-After") != "7" || p.ResponseHeaders.Get("Authorization") != "" {
+	reportTestFailure(t, p.ResponseHeaders.Get("Retry-After") != "7" || p.ResponseHeaders.Get("Authorization") != "", func() {
 		t.Fatalf("headers were not safely cloned: %#v", p.ResponseHeaders)
-	}
+	})
 	sink.OnResponseHeaders(200, http.Header{"X-Request-Id": {"next"}})
-	if len(p.ResponseHeaders) != 1 || p.ResponseHeaders.Get("X-Request-Id") != "next" {
+	reportTestFailure(t, len(p.ResponseHeaders) != 1 || p.ResponseHeaders.Get("X-Request-Id") != "next", func() {
 		t.Fatalf("stale retry headers survived fallback: %#v", p.ResponseHeaders)
-	}
+	})
 }
 
 func TestCancellationStillMapsTo499WithRetryMetadata(t *testing.T) {
 	got := errorFromUpstream(fmt.Errorf("wrapped: %w", context.Canceled), testRetryHeaders())
-	if got.Status != 499 || got.Type != "cancelled" {
+	reportTestFailure(t, got.Status != 499 || got.Type != "cancelled", func() {
 		t.Fatalf("cancel = %+v, want 499 cancelled", got)
-	}
+	})
 	for _, payload := range []map[string]any{streamErrorPayload(errors.New("network failed"), testRetryHeaders()), errorFramePayload(got)} {
 		assertRetryPayload(t, payload)
 	}
@@ -346,34 +329,113 @@ func TestResponsesCurlExampleAndStringInput(t *testing.T) {
 				sseUpstream(capture)(w, r)
 			}), "sse")
 			req, err := http.NewRequest(http.MethodPost, h.server.URL+"/v1/responses", strings.NewReader(body))
-			if err != nil {
+			reportTestFailure(t, err != nil, func() {
 				t.Fatal(err)
-			}
+			})
 			req.Header.Set("Authorization", "Bearer "+h.key)
 			req.Header.Set("Content-Type", "application/json")
 			resp, err := h.server.Client().Do(req)
-			if err != nil {
+			reportTestFailure(t, err != nil, func() {
 				t.Fatal(err)
-			}
+			})
 			defer resp.Body.Close()
 			out, err := io.ReadAll(resp.Body)
-			if err != nil {
+			reportTestFailure(t, err != nil, func() {
 				t.Fatal(err)
-			}
-			if resp.StatusCode != http.StatusOK || !strings.Contains(string(out), "response.completed") {
+			})
+			reportTestFailure(t, resp.StatusCode != http.StatusOK || !strings.Contains(string(out), "response.completed"), func() {
 				t.Fatalf("curl route: status=%d body=%s", resp.StatusCode, out)
-			}
+			})
 			_, raw := capture.get()
 			var got, want map[string]any
-			if err := json.Unmarshal(raw, &got); err != nil {
-				t.Fatal(err)
+			{
+				err := json.Unmarshal(raw, &got)
+				reportTestFailure(t, err != nil, func() {
+					t.Fatal(err)
+				})
 			}
-			if err := json.Unmarshal([]byte(`{"input":[{"role":"user","content":[{"type":"input_text","text":"Hi"}]}]}`), &want); err != nil {
-				t.Fatal(err)
+			{
+				err := json.Unmarshal([]byte(`{"input":[{"role":"user","content":[{"type":"input_text","text":"Hi"}]}]}`), &want)
+				reportTestFailure(t, err != nil, func() {
+					t.Fatal(err)
+				})
 			}
-			if !reflect.DeepEqual(got["input"], want["input"]) || got["stream"] != true || got["store"] != false {
+			reportTestFailure(t, !reflect.DeepEqual(got["input"], want["input"]) || got["stream"] != true || got["store"] != false, func() {
 				t.Fatalf("unexpected upstream payload: %s", raw)
-			}
+			})
 		})
 	}
+}
+
+// runPrepareSeparatesWireAndInternalSessionCase exercises one isolated test phase with the original shared state.
+func runPrepareSeparatesWireAndInternalSessionCase(t *testing.T, capturedH **testHarness, capturedGenerated *[]string, capturedTc *struct {
+	name   string
+	body   string
+	header string
+	hint   string
+	want   string
+}) {
+	t.Helper()
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	r.Header.Set("Authorization", "Bearer "+(*capturedH).key)
+	if (*capturedTc).header != "" {
+		r.Header.Set((*capturedTc).header, (*capturedTc).hint)
+	}
+	p, apiErr := (*capturedH).dataPlane.prepare(context.Background(), r, []byte((*capturedTc).body), "sse")
+	reportTestFailure(t, apiErr != nil, func() {
+		t.Fatal(apiErr)
+	})
+	defer p.Release()
+	reportTestFailure(t, p.WireSessionID != (*capturedTc).want || p.SessionID == "", func() {
+		t.Fatalf("wire/internal session = %q/%q, want wire %q and nonempty internal", p.WireSessionID, p.SessionID, (*capturedTc).want)
+	})
+	if (*capturedTc).want == "" {
+		{
+			_, err := uuid.Parse(p.SessionID)
+			reportTestFailure(t, err != nil, func() {
+				t.Fatalf("generated internal session is not UUID: %v", err)
+			})
+		}
+		(*capturedGenerated) = append((*capturedGenerated), p.SessionID)
+	}
+	req, err := (*capturedH).dataPlane.newUpstreamRequest(context.Background(), p)
+	reportTestFailure(t, err != nil, func() {
+		t.Fatal(err)
+	})
+	reportTestFailure(t, req.SessionID != p.SessionID, func() {
+		t.Fatalf("pool session = %q, want internal %q", req.SessionID, p.SessionID)
+	})
+	for name, headers := range map[string]http.Header{"sse": req.SSEHeaders, "ws": req.WSHeaders} {
+		{
+			got := headers.Get("x-client-request-id")
+			reportTestFailure(t, got != (*capturedTc).want, func() {
+				t.Errorf("%s x-client-request-id = %q, want %q", name, got, (*capturedTc).want)
+			})
+		}
+		if (*capturedTc).want == "" {
+			for _, key := range []string{"session_id", "session-id", "x-client-request-id"} {
+				reportTestFailure(t, headers.Get(key) != "", func() {
+					t.Errorf("%s leaked %s = %q", name, key, headers.Get(key))
+				})
+			}
+		}
+	}
+	{
+		got := req.SSEHeaders.Get("session_id")
+		reportTestFailure(t, got != (*capturedTc).want, func() {
+			t.Errorf("SSE session_id = %q, want %q", got, (*capturedTc).want)
+		})
+	}
+	var body map[string]any
+	{
+		err := json.Unmarshal(req.Body, &body)
+		reportTestFailure(t, err != nil, func() {
+			t.Fatal(err)
+		})
+	}
+	cacheKey, present := body["prompt_cache_key"]
+	reportTestFailure(t, (*capturedTc).want == "" && present || (*capturedTc).want != "" && cacheKey != (*capturedTc).want, func() {
+		t.Errorf("prompt_cache_key = %#v (present %t), wire = %q", cacheKey, present, (*capturedTc).want)
+	})
 }

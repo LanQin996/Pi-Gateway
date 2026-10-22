@@ -227,7 +227,7 @@ func (s *Server) handleUpdateRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.ExpectedRevision < 1 {
-		writeErr(w, http.StatusBadRequest, "expected_revision is required")
+		writeErr(w, http.StatusBadRequest, expectedRevisionRequiredMessage)
 		return
 	}
 	id := r.PathValue("id")
@@ -268,7 +268,7 @@ func (s *Server) handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 		body.ExpectedRevision = revision
 	}
 	if body.ExpectedRevision < 1 {
-		writeErr(w, http.StatusBadRequest, "expected_revision is required")
+		writeErr(w, http.StatusBadRequest, expectedRevisionRequiredMessage)
 		return
 	}
 	if !s.ensureRules(w, r) {
@@ -295,7 +295,7 @@ func (s *Server) handleDuplicateRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.ExpectedRevision < 1 {
-		writeErr(w, http.StatusBadRequest, "expected_revision is required")
+		writeErr(w, http.StatusBadRequest, expectedRevisionRequiredMessage)
 		return
 	}
 	if !s.ensureRules(w, r) {
@@ -312,19 +312,7 @@ func (s *Server) handleDuplicateRule(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleReorderRules(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		ID               string `json:"id,omitempty"`
-		ExpectedRevision int64  `json:"expected_revision,omitempty"`
-		Direction        string `json:"direction,omitempty"`
-		ExpectedVersion  *int64 `json:"expected_version,omitempty"`
-		Items            []struct {
-			ID               string `json:"id"`
-			ExpectedRevision int64  `json:"expected_revision"`
-			OrderIndex       *int64 `json:"order_index"`
-			Priority         *int   `json:"priority,omitempty"`
-			Direction        string `json:"direction,omitempty"`
-		} `json:"items"`
-	}
+	var body reorderRuleRequest
 	if err := decodeRuleRequest(r, &body); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -338,25 +326,9 @@ func (s *Server) handleReorderRules(w http.ResponseWriter, r *http.Request) {
 		s.publishRuleBatch(w, r, body.ExpectedVersion, changes, "rules.reordered")
 		return
 	}
-	changes := make([]store.RuleChange, 0, len(body.Items))
-	for _, item := range body.Items {
-		if item.ExpectedRevision < 1 {
-			writeErr(w, http.StatusBadRequest, "each item requires expected_revision")
-			return
-		}
-		if item.Direction != "" {
-			if len(body.Items) != 1 || body.ExpectedVersion == nil || item.OrderIndex != nil || item.Priority != nil || (item.Direction != "up" && item.Direction != "down") {
-				writeErr(w, http.StatusBadRequest, "direction requires one item, expected_version, up/down and no order_index/priority")
-				return
-			}
-			changes = append(changes, store.RuleChange{Kind: map[string]string{"up": "move_up", "down": "move_down"}[item.Direction], ID: item.ID, ExpectedRevision: item.ExpectedRevision})
-			continue
-		}
-		if item.OrderIndex == nil {
-			writeErr(w, http.StatusBadRequest, "each item requires order_index or direction")
-			return
-		}
-		changes = append(changes, store.RuleChange{Kind: "patch", ID: item.ID, ExpectedRevision: item.ExpectedRevision, OrderIndex: item.OrderIndex, Priority: item.Priority})
+	changes, ok := reorderRuleChanges(w, &body)
+	if !ok {
+		return
 	}
 	s.publishRuleBatch(w, r, body.ExpectedVersion, changes, "rules.reordered")
 }
@@ -622,12 +594,11 @@ func (s *Server) handleUpdateLegacyRule(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if body.Config != nil {
-		if err := validateMiddlewareConfig(*body.Config); err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
-			return
-		}
+	if err := validateOptionalMiddlewareConfig(body.Config); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
 	}
+
 	snapshot, err := s.store.LoadRuleSet(r.Context())
 	if err != nil {
 		writeRuleError(w, err)
@@ -641,27 +612,9 @@ func (s *Server) handleUpdateLegacyRule(w http.ResponseWriter, r *http.Request) 
 	if old == nil {
 		old = &store.MiddlewareRow{Name: name, Enabled: true, OrderIndex: 100, Config: mw.DefaultConfig()}
 	}
-	var current *store.RuleRow
-	if snapshot.LegacyMigrated {
-		for _, row := range snapshot.Rules {
-			if row.LegacyName == name {
-				current = row
-				break
-			}
-		}
-		if current == nil {
-			writeRuleError(w, fmt.Errorf("%w: migrated rule was deleted; use /api/rules to create a new rule", store.ErrRuleConflict))
-			return
-		}
-		if body.ExpectedRevision < 1 {
-			writeErr(w, http.StatusConflict, "expected_revision is required after migration; reload the middleware list")
-			return
-		}
-		if err := legacyRuleCompatible(r.Context(), current, old); err != nil {
-			writeRuleError(w, err)
-			return
-		}
-		old.Enabled, old.OrderIndex = current.Enabled, current.Priority
+	current, compatible := currentLegacyRule(w, r, snapshot, old, name, body.ExpectedRevision)
+	if !compatible {
+		return
 	}
 	if body.Enabled != nil {
 		old.Enabled = *body.Enabled
@@ -673,12 +626,7 @@ func (s *Server) handleUpdateLegacyRule(w http.ResponseWriter, r *http.Request) 
 		old.Config = *body.Config
 	}
 	if !snapshot.LegacyMigrated {
-		if err := s.store.RepairLegacyMiddleware(r.Context(), old); err != nil {
-			writeRuleError(w, err)
-			return
-		}
-		_ = s.store.RecordAudit(r.Context(), "middleware.updated", name)
-		writeJSON(w, http.StatusOK, map[string]any{"middleware": old})
+		s.repairLegacyRule(w, r, old, name)
 		return
 	}
 	converted, err := rulesruntime.ConvertLegacy(r.Context(), []*store.MiddlewareRow{old})
@@ -686,25 +634,8 @@ func (s *Server) handleUpdateLegacyRule(w http.ResponseWriter, r *http.Request) 
 		writeRuleError(w, err)
 		return
 	}
-	var raw json.RawMessage
-	for _, row := range converted {
-		if row.LegacyName == name {
-			definition, err := rules.ParseRule(row.Rule)
-			if err != nil {
-				writeRuleError(w, err)
-				return
-			}
-			definition.Name, definition.Description = current.Name, current.Description
-			raw, err = rulesruntime.EditableJSON(definition)
-			if err != nil {
-				writeRuleError(w, err)
-				return
-			}
-			break
-		}
-	}
-	if raw == nil {
-		writeRuleError(w, fmt.Errorf("%w: legacy converter did not return %s", store.ErrRuleInvalid, name))
+	raw, convertedOK := convertedLegacyRule(w, converted, current, name)
+	if !convertedOK {
 		return
 	}
 	published, err := s.store.PublishRules(r.Context(), nil, []store.RuleChange{{Kind: "update", ID: current.ID,
@@ -715,4 +646,110 @@ func (s *Server) handleUpdateLegacyRule(w http.ResponseWriter, r *http.Request) 
 	}
 	_ = s.store.RecordAudit(r.Context(), "middleware.updated", name+" rule="+current.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"middleware": old, "rule": snapshotRule(published, current.ID), "version": published.Version})
+}
+
+type reorderRuleRequest struct {
+	ID               string `json:"id,omitempty"`
+	ExpectedRevision int64  `json:"expected_revision,omitempty"`
+	Direction        string `json:"direction,omitempty"`
+	ExpectedVersion  *int64 `json:"expected_version,omitempty"`
+	Items            []struct {
+		ID               string `json:"id"`
+		ExpectedRevision int64  `json:"expected_revision"`
+		OrderIndex       *int64 `json:"order_index"`
+		Priority         *int   `json:"priority,omitempty"`
+		Direction        string `json:"direction,omitempty"`
+	} `json:"items"`
+}
+
+func reorderRuleChanges(w http.ResponseWriter, body *reorderRuleRequest) ([]store.RuleChange, bool) {
+	changes := make([]store.RuleChange, 0, len(body.Items))
+	for _, item := range body.Items {
+		if item.ExpectedRevision < 1 {
+			writeErr(w, http.StatusBadRequest, "each item requires expected_revision")
+			return nil, false
+		}
+		if item.Direction != "" {
+			if len(body.Items) != 1 || body.ExpectedVersion == nil || item.OrderIndex != nil || item.Priority != nil || (item.Direction != "up" && item.Direction != "down") {
+				writeErr(w, http.StatusBadRequest, "direction requires one item, expected_version, up/down and no order_index/priority")
+				return nil, false
+			}
+			changes = append(changes, store.RuleChange{Kind: map[string]string{"up": "move_up", "down": "move_down"}[item.Direction], ID: item.ID, ExpectedRevision: item.ExpectedRevision})
+			continue
+		}
+		if item.OrderIndex == nil {
+			writeErr(w, http.StatusBadRequest, "each item requires order_index or direction")
+			return nil, false
+		}
+		changes = append(changes, store.RuleChange{Kind: "patch", ID: item.ID, ExpectedRevision: item.ExpectedRevision, OrderIndex: item.OrderIndex, Priority: item.Priority})
+	}
+	return changes, true
+}
+
+func currentLegacyRule(w http.ResponseWriter, r *http.Request, snapshot *store.RuleSetSnapshot, old *store.MiddlewareRow, name string, expectedRevision int64) (*store.RuleRow, bool) {
+	var current *store.RuleRow
+	if snapshot.LegacyMigrated {
+		for _, row := range snapshot.Rules {
+			if row.LegacyName == name {
+				current = row
+				break
+			}
+		}
+		if current == nil {
+			writeRuleError(w, fmt.Errorf("%w: migrated rule was deleted; use /api/rules to create a new rule", store.ErrRuleConflict))
+			return nil, false
+		}
+		if expectedRevision < 1 {
+			writeErr(w, http.StatusConflict, "expected_revision is required after migration; reload the middleware list")
+			return nil, false
+		}
+		if err := legacyRuleCompatible(r.Context(), current, old); err != nil {
+			writeRuleError(w, err)
+			return nil, false
+		}
+		old.Enabled, old.OrderIndex = current.Enabled, current.Priority
+	}
+
+	return current, true
+}
+
+func convertedLegacyRule(w http.ResponseWriter, converted []*store.RuleRow, current *store.RuleRow, name string) (json.RawMessage, bool) {
+	var raw json.RawMessage
+	for _, row := range converted {
+		if row.LegacyName == name {
+			definition, err := rules.ParseRule(row.Rule)
+			if err != nil {
+				writeRuleError(w, err)
+				return nil, false
+			}
+			definition.Name, definition.Description = current.Name, current.Description
+			raw, err = rulesruntime.EditableJSON(definition)
+			if err != nil {
+				writeRuleError(w, err)
+				return nil, false
+			}
+			break
+		}
+	}
+	if raw == nil {
+		writeRuleError(w, fmt.Errorf("%w: legacy converter did not return %s", store.ErrRuleInvalid, name))
+		return nil, false
+	}
+	return raw, true
+}
+
+func validateOptionalMiddlewareConfig(config *string) error {
+	if config == nil {
+		return nil
+	}
+	return validateMiddlewareConfig(*config)
+}
+
+func (s *Server) repairLegacyRule(w http.ResponseWriter, r *http.Request, old *store.MiddlewareRow, name string) {
+	if err := s.store.RepairLegacyMiddleware(r.Context(), old); err != nil {
+		writeRuleError(w, err)
+		return
+	}
+	_ = s.store.RecordAudit(r.Context(), "middleware.updated", name)
+	writeJSON(w, http.StatusOK, map[string]any{"middleware": old})
 }

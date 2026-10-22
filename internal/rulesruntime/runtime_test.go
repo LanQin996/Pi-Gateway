@@ -73,66 +73,84 @@ func TestRuntimePublicationInvalidationAndPinnedSnapshots(t *testing.T) {
 	first, second := runtimeStore(t, path), runtimeStore(t, path)
 	services := []*Service{New(first), New(second)}
 	ctx := t.Context()
-	if err := services[0].Ensure(ctx); err != nil {
-		t.Fatal(err)
+	{
+		err := services[0].Ensure(ctx)
+		reportTestFailure(t, err != nil, func() {
+			t.Fatal(err)
+		})
 	}
 	original, initialVersion, err := services[0].Load(ctx)
-	if err != nil || initialVersion != 1 {
+	reportTestFailure(t, err != nil || initialVersion != 1, func() {
 		t.Fatalf("load initial: version=%d err=%v", initialVersion, err)
-	}
+	})
 	cached, version, err := services[0].Load(ctx)
-	if err != nil || version != initialVersion || cached != original {
+	reportTestFailure(t, err != nil || version != initialVersion || cached != original, func() {
 		t.Fatalf("unchanged version did not reuse compiled engine: %v", err)
-	}
-	if _, _, err := services[1].Load(ctx); err != nil {
-		t.Fatal(err)
+	})
+	{
+		_, _, err := services[1].Load(ctx)
+		reportTestFailure(t, err != nil, func() {
+			t.Fatal(err)
+		})
 	}
 	snapshot, err := first.PublishRules(ctx, &initialVersion, []store.RuleChange{
 		{Kind: "create", ID: "hot", Rule: rewriteDefinition(t, "first-published")},
 	}, ValidateSnapshot)
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatal(err)
-	}
+	})
 	var pinned *rules.Engine
 	for _, service := range services {
 		engine, version, err := service.Load(ctx)
-		if err != nil || version != snapshot.Version || engine == original {
+		reportTestFailure(t, err != nil || version != snapshot.Version || engine == original, func() {
 			t.Fatalf("instance did not refresh: version=%d err=%v", version, err)
-		}
-		if got := modelFromEngine(t, engine); got != "first-published" {
-			t.Fatalf("published model=%q", got)
+		})
+		{
+			got := modelFromEngine(t, engine)
+			reportTestFailure(t, got != "first-published", func() {
+				t.Fatalf("published model=%q", got)
+			})
 		}
 		pinned = engine
 	}
-	if got := modelFromEngine(t, original); got != "initial" {
-		t.Fatalf("initial in-flight snapshot changed: %q", got)
+	{
+		got := modelFromEngine(t, original)
+		reportTestFailure(t, got != "initial", func() {
+			t.Fatalf("initial in-flight snapshot changed: %q", got)
+		})
 	}
 	row, err := first.GetRule(ctx, "hot")
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatal(err)
-	}
+	})
 	snapshot, err = second.PublishRules(ctx, nil, []store.RuleChange{
 		{Kind: "update", ID: row.ID, ExpectedRevision: row.Revision, Rule: rewriteDefinition(t, "second-published")},
 	}, ValidateSnapshot)
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatal(err)
-	}
+	})
 	for _, service := range services {
 		engine, version, err := service.Load(ctx)
-		if err != nil || version != snapshot.Version || modelFromEngine(t, engine) != "second-published" {
+		reportTestFailure(t, err != nil || version != snapshot.Version || modelFromEngine(t, engine) != "second-published", func() {
 			t.Fatalf("second instance update: version=%d err=%v", version, err)
-		}
+		})
 		invalid := json.RawMessage(strings.Replace(string(rewriteDefinition(t, "invalid")), `"sequence"`, `"unknown_action"`, 1))
-		if _, err := first.PublishRules(ctx, nil, []store.RuleChange{{Kind: "create", ID: "invalid", Rule: invalid}}, ValidateSnapshot); err == nil {
-			t.Fatal("invalid candidate was published")
+		{
+			_, err := first.PublishRules(ctx, nil, []store.RuleChange{{Kind: "create", ID: "invalid", Rule: invalid}}, ValidateSnapshot)
+			reportTestFailure(t, err == nil, func() {
+				t.Fatal("invalid candidate was published")
+			})
 		}
 		after, afterVersion, err := service.Load(ctx)
-		if err != nil || afterVersion != version || after != engine {
+		reportTestFailure(t, err != nil || afterVersion != version || after != engine, func() {
 			t.Fatalf("rejected update invalidated working snapshot: %v", err)
-		}
+		})
 	}
-	if got := modelFromEngine(t, pinned); got != "first-published" {
-		t.Fatalf("in-flight published snapshot changed: %q", got)
+	{
+		got := modelFromEngine(t, pinned)
+		reportTestFailure(t, got != "first-published", func() {
+			t.Fatalf("in-flight published snapshot changed: %q", got)
+		})
 	}
 }
 

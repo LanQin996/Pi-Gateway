@@ -290,9 +290,9 @@ func leaseKey(key string) (string, error) {
 	return "lease:" + Fingerprint("lease", key), nil
 }
 
-func cacheTTL(ttl, max time.Duration) time.Duration {
-	if ttl < time.Millisecond || ttl > max {
-		return max
+func cacheTTL(ttl, maximum time.Duration) time.Duration {
+	if ttl < time.Millisecond || ttl > maximum {
+		return maximum
 	}
 	return ttl
 }

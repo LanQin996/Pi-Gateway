@@ -80,24 +80,20 @@ func TestRoutingSpecificHealthAndModelNeverFallsBack(t *testing.T) {
 			switch status {
 			case "disabled":
 				no := false
-				if err := st.PatchAccountManagementFields(ctx, a.ID, store.AccountManagementPatch{Enabled: &no}); err != nil {
-					t.Fatal(err)
-				}
+				requireDataNoError(t, st.PatchAccountManagementFields(ctx, a.ID, store.AccountManagementPatch{Enabled: &no}))
 			case "cooling":
-				if _, err := st.DB().ExecContext(ctx, `UPDATE accounts SET cooldown_until=? WHERE id=?`, time.Now().Add(time.Hour).UnixMilli(), a.ID); err != nil {
-					t.Fatal(err)
+				{
+					_, err := st.DB().ExecContext(ctx, `UPDATE accounts SET cooldown_until=? WHERE id=?`, time.Now().Add(time.Hour).UnixMilli(), a.ID)
+					requireDataTrue(t, !(err != nil), err)
 				}
 			default:
-				if err := st.SetAccountStatus(ctx, a.ID, status, ""); err != nil {
-					t.Fatal(err)
-				}
+				requireDataNoError(t, st.SetAccountStatus(ctx, a.ID, status, ""))
 			}
-			if got, release, err := m.AcquireSpecific(ctx, a.ID, "model"); !errors.Is(err, ErrNoAccounts) || got != nil || release != nil {
-				t.Fatalf("unhealthy fixed account admitted: %+v %v", got, err)
+			{
+				got, release, err := m.AcquireSpecific(ctx, a.ID, "model")
+				requireDataTruef(t, !(!errors.Is(err, ErrNoAccounts) || got != nil || release != nil), "unhealthy fixed account admitted: %+v %v", got, err)
 			}
-			if m.Inflight(a.ID) != 0 || m.Inflight(decoy.ID) != 0 {
-				t.Fatal("failed fixed acquisition reserved a slot")
-			}
+			requireDataCondition(t, !(m.Inflight(a.ID) != 0 || m.Inflight(decoy.ID) != 0), "failed fixed acquisition reserved a slot")
 		})
 	}
 	st := newAccountsTestStore(t)
@@ -105,23 +101,19 @@ func TestRoutingSpecificHealthAndModelNeverFallsBack(t *testing.T) {
 	a := routingAccount(t, st, "target", 1)
 	routingAccount(t, st, "decoy", 1)
 	g := &store.AccountGroup{Name: "restricted", Enabled: true, AccountIDs: []int64{a.ID}, DisabledModels: []string{"model"}}
-	if err := st.CreateAccountGroup(ctx, g); err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, st.CreateAccountGroup(ctx, g))
 	m := New(st, nil, nil, Options{})
-	if _, _, err := m.AcquireSpecific(ctx, a.ID, "model"); !errors.Is(err, ErrModelUnavailable) {
-		t.Fatalf("inherited ban bypassed: %v", err)
+	{
+		_, _, err := m.AcquireSpecific(ctx, a.ID, "model")
+		requireDataTruef(t, !(!errors.Is(err, ErrModelUnavailable)), "inherited ban bypassed: %v", err)
 	}
-	if _, _, err := m.AcquireSpecific(ctx, 999999, "model"); !errors.Is(err, ErrNoAccounts) {
-		t.Fatalf("missing fixed account: %v", err)
+	{
+		_, _, err := m.AcquireSpecific(ctx, 999999, "model")
+		requireDataTruef(t, !(!errors.Is(err, ErrNoAccounts)), "missing fixed account: %v", err)
 	}
-	if err := st.PatchAccountGroup(ctx, g.ID, store.AccountGroupPatch{DisabledModels: []string{}}); err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, st.PatchAccountGroup(ctx, g.ID, store.AccountGroupPatch{DisabledModels: []string{}}))
 	got, release, err := m.AcquireSpecific(ctx, a.ID, "model")
-	if err != nil || got.ID != a.ID {
-		t.Fatalf("wrong fixed account: %+v %v", got, err)
-	}
+	requireDataTruef(t, !(err != nil || got.ID != a.ID), "wrong fixed account: %+v %v", got, err)
 	release()
 }
 
@@ -156,11 +148,12 @@ func TestRoutingConcurrentReservationsAndIdempotentRelease(t *testing.T) {
 	close(start)
 	first := <-results
 	second := <-results
-	if first.err != nil || second.err != nil {
+	reportTestFailure(t, first.err != nil || second.err != nil, func() {
 		t.Fatalf("first slots failed: %v %v", first.err, second.err)
-	}
-	if got := m.Inflight(a.ID); got != 2 {
-		t.Fatalf("inflight=%d want2", got)
+	})
+	{
+		got := m.Inflight(a.ID)
+		requireDataTruef(t, !(got != 2), "inflight=%d want2", got)
 	}
 	cancel()
 	wg.Wait()
@@ -170,9 +163,9 @@ func TestRoutingConcurrentReservationsAndIdempotentRelease(t *testing.T) {
 			result.release()
 			t.Fatal("concurrency ceiling exceeded")
 		}
-		if !errors.Is(result.err, context.Canceled) {
+		reportTestFailure(t, !errors.Is(result.err, context.Canceled), func() {
 			t.Fatalf("unexpected waiter error %v", result.err)
-		}
+		})
 	}
 	var releases sync.WaitGroup
 	for i := 0; i < 16; i++ {
@@ -180,13 +173,15 @@ func TestRoutingConcurrentReservationsAndIdempotentRelease(t *testing.T) {
 		go func() { defer releases.Done(); first.release() }()
 	}
 	releases.Wait()
-	if got := m.Inflight(a.ID); got != 1 {
-		t.Fatalf("double release stole another request slot: %d", got)
+	{
+		got := m.Inflight(a.ID)
+		requireDataTruef(t, !(got != 1), "double release stole another request slot: %d", got)
 	}
 	second.release()
 	second.release()
-	if got := m.Inflight(a.ID); got != 0 {
-		t.Fatalf("leaked slots: %d", got)
+	{
+		got := m.Inflight(a.ID)
+		requireDataTruef(t, !(got != 0), "leaked slots: %d", got)
 	}
 }
 

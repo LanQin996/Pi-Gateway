@@ -41,6 +41,8 @@ const (
 	DefaultTextVerbosity = "low"
 )
 
+const userAgentHeader = "User-Agent"
+
 // DefaultUserAgent returns a plausible Pi User-Agent.
 //
 // Pi formats it as "pi (<platform> <release>; <arch>)" using Node's os module.
@@ -131,7 +133,7 @@ type HeaderOptions struct {
 func BuildSSEHeaders(o HeaderOptions) http.Header {
 	h := http.Header{}
 	h.Set("Authorization", "Bearer "+o.AccessToken)
-	h.Set("User-Agent", userAgentOr(o.UserAgent))
+	h.Set(userAgentHeader, userAgentOr(o.UserAgent))
 	h.Set("accept", "application/json")
 	h.Set("content-type", "application/json")
 	h.Set("X-Stainless-Lang", "js")
@@ -157,8 +159,8 @@ func BuildSSEHeaders(o HeaderOptions) http.Header {
 	}
 	// undici (Node's fetch, which Pi uses) advertises gzip+deflate by default.
 	h.Set("accept-encoding", "gzip, deflate")
-	if strings.HasPrefix(o.ClientHeaders.Get("User-Agent"), "pi (") {
-		for _, name := range []string{"User-Agent", "Accept-Language", "X-Stainless-Lang", "X-Stainless-Package-Version", "X-Stainless-OS", "X-Stainless-Arch", "X-Stainless-Runtime", "X-Stainless-Runtime-Version", "X-Stainless-Timeout"} {
+	if strings.HasPrefix(o.ClientHeaders.Get(userAgentHeader), "pi (") {
+		for _, name := range []string{userAgentHeader, "Accept-Language", "X-Stainless-Lang", "X-Stainless-Package-Version", "X-Stainless-OS", "X-Stainless-Arch", "X-Stainless-Runtime", "X-Stainless-Runtime-Version", "X-Stainless-Timeout"} {
 			value := o.ClientHeaders.Get(name)
 			if value != "" && len(value) <= 512 && !strings.ContainsAny(value, "\r\n") {
 				h.Set(name, value)
@@ -181,7 +183,7 @@ func BuildWSHeaders(o HeaderOptions) http.Header {
 	if strings.TrimSpace(o.AccountID) != "" {
 		h.Set("chatgpt-account-id", o.AccountID)
 	}
-	h.Set("User-Agent", userAgentOr(o.UserAgent))
+	h.Set(userAgentHeader, userAgentOr(o.UserAgent))
 	h.Set("OpenAI-Beta", BetaWebSocket)
 	h.Set("originator", originatorOr(o.Originator))
 	if o.SessionID != "" {

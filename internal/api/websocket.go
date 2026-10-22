@@ -147,48 +147,17 @@ func readWSMessages(ctx context.Context, conn *websocket.Conn, writer *wsFrameWr
 		if messageType != websocket.TextMessage {
 			continue
 		}
-		var frame struct {
-			Type       string          `json:"type"`
-			ResponseID json.RawMessage `json:"response_id"`
-			Mode       json.RawMessage `json:"mode"`
-			EventID    json.RawMessage `json:"event_id"`
+		handled, err := handleWSInterrupt(ctx, writer, payload, controls)
+		if err != nil {
+			return err
 		}
-		if json.Unmarshal(payload, &frame) == nil && frame.Type == "response.interrupt" && len(controls) > 0 {
-			var responseID, mode, eventID string
-			_ = json.Unmarshal(frame.ResponseID, &responseID)
-			_ = json.Unmarshal(frame.Mode, &mode)
-			_ = json.Unmarshal(frame.EventID, &eventID)
-			if err := controls[0].Interrupt(ctx, responseID, mode); err != nil {
-				rejection := errorFramePayload(&apiError{Status: http.StatusBadRequest, Type: "invalid_request_error", Message: err.Error()})
-				if eventID != "" {
-					rejection["event_id"] = eventID
-				}
-				if err := writer.writeJSON(ctx, rejection); err != nil {
-					return err
-				}
-			}
+		if handled {
 			continue
 		}
 		// A second request may wait, but further requests must receive an explicit
 		// rejection rather than disappearing while the exchange is in progress.
-		select {
-		case messages <- wsReadEvent{messageType: messageType, payload: payload}:
-		default:
-			rejection := errorFramePayload(&apiError{
-				Status: http.StatusTooManyRequests, Type: "rate_limit_error",
-				Code: "too_many_requests", Message: "WebSocket request queue is full; retry after the current response completes.",
-			})
-			// Echo the optional event ID so a pipelining client can identify which
-			// request was rejected even while earlier response events are flowing.
-			var request struct {
-				EventID string `json:"event_id"`
-			}
-			if json.Unmarshal(payload, &request) == nil && request.EventID != "" {
-				rejection["event_id"] = request.EventID
-			}
-			if err := writer.writeJSON(ctx, rejection); err != nil {
-				return err
-			}
+		if err := enqueueWSMessage(ctx, writer, messages, wsReadEvent{messageType: messageType, payload: payload}); err != nil {
+			return err
 		}
 	}
 }
@@ -234,16 +203,7 @@ func (s *Server) serveWSExchange(ctx context.Context, writer *wsFrameWriter, r *
 		p.Recorder.OnFrame(capture.DirClientIn, "ws_frame", "response.create", rawIn, nil)
 	}
 	if apiErr != nil {
-		if p != nil {
-			frame := errorFramePayload(apiErr)
-			if werr := writer.writeJSON(ctx, frame); werr == nil && p.Recorder != nil {
-				encoded, _ := json.Marshal(frame)
-				p.Recorder.OnFrame(capture.DirClientOut, "ws_frame", "error", encoded, frame)
-			}
-			s.finish(context.WithoutCancel(exchangeCtx), p, store.OutcomeError, apiErr)
-		} else {
-			_ = writer.writeJSON(ctx, errorFramePayload(apiErr))
-		}
+		s.rejectPreparedWS(ctx, exchangeCtx, writer, p, apiErr)
 		return apiErr
 	}
 
@@ -261,49 +221,11 @@ func (s *Server) serveWSExchange(ctx context.Context, writer *wsFrameWriter, r *
 		return err
 	}
 
-	first := true
-	upstreamErrorForwarded := false
-	_, err = s.streamWith429Retry(exchangeCtx, p, req, func(event *upstream.Event) error {
-		if first {
-			first = false
-			if p.Recorder != nil {
-				p.Recorder.NoteTTFB()
-			}
-		}
-		event, transformErr := p.transformResponseEvent(exchangeCtx, event)
-		if transformErr != nil {
-			return transformErr
-		}
-		if event == nil {
-			return nil
-		}
-		// Preserve ordinary events verbatim. Error events carry the safe retry
-		// metadata since this socket has already completed its HTTP upgrade.
-		rawOut, dataOut := event.Raw, event.Data
-		if upstreamEventContainsError(event) {
-			upstreamErrorForwarded = true
-			if len(p.ResponseHeaders) > 0 {
-				dataOut = make(map[string]any, len(event.Data)+1)
-				for key, value := range event.Data {
-					dataOut[key] = value
-				}
-				addRetryHeadersToPayload(dataOut, p.ResponseHeaders)
-				if encoded, encodeErr := json.Marshal(dataOut); encodeErr == nil {
-					rawOut = encoded
-				}
-			}
-		}
-		if werr := writer.write(exchangeCtx, rawOut); werr != nil {
-			return werr
-		}
-		if p.Recorder != nil {
-			p.Recorder.OnFrame(capture.DirClientOut, "ws_frame", event.Type, rawOut, dataOut)
-		}
-		return nil
-	})
+	delivery := &wsDelivery{writer: writer, prepared: p, first: true}
+	_, err = s.streamWith429Retry(exchangeCtx, p, req, func(event *upstream.Event) error { return delivery.onEvent(exchangeCtx, event) })
 	if err != nil {
 		outcome, runErr = outcomeFor(err, exchangeCtx), err
-		if exchangeCtx.Err() != nil || upstreamErrorForwarded {
+		if exchangeCtx.Err() != nil || delivery.errorForwarded {
 			return err
 		}
 		frame, _ := json.Marshal(streamErrorPayload(err, p.ResponseHeaders))
@@ -373,4 +295,124 @@ func isNormalWSClose(err error) bool {
 		return true
 	}
 	return strings.Contains(err.Error(), "use of closed network connection")
+}
+
+func handleWSInterrupt(ctx context.Context, writer *wsFrameWriter, payload []byte, controls []*upstream.ResponseControl) (bool, error) {
+	var frame struct {
+		Type       string          `json:"type"`
+		ResponseID json.RawMessage `json:"response_id"`
+		Mode       json.RawMessage `json:"mode"`
+		EventID    json.RawMessage `json:"event_id"`
+	}
+	if json.Unmarshal(payload, &frame) == nil && frame.Type == "response.interrupt" && len(controls) > 0 {
+		var responseID, mode, eventID string
+		_ = json.Unmarshal(frame.ResponseID, &responseID)
+		_ = json.Unmarshal(frame.Mode, &mode)
+		_ = json.Unmarshal(frame.EventID, &eventID)
+		if err := controls[0].Interrupt(ctx, responseID, mode); err != nil {
+			rejection := errorFramePayload(&apiError{Status: http.StatusBadRequest, Type: "invalid_request_error", Message: err.Error()})
+			if eventID != "" {
+				rejection["event_id"] = eventID
+			}
+			if err := writer.writeJSON(ctx, rejection); err != nil {
+				return true, err
+			}
+		}
+		return true, nil
+	}
+
+	return false, nil
+}
+
+func rejectWSQueueFull(ctx context.Context, writer *wsFrameWriter, payload []byte) error {
+	rejection := errorFramePayload(&apiError{
+		Status: http.StatusTooManyRequests, Type: "rate_limit_error",
+		Code: "too_many_requests", Message: "WebSocket request queue is full; retry after the current response completes.",
+	})
+	// Echo the optional event ID so a pipelining client can identify which
+	// request was rejected even while earlier response events are flowing.
+	var request struct {
+		EventID string `json:"event_id"`
+	}
+	if json.Unmarshal(payload, &request) == nil && request.EventID != "" {
+		rejection["event_id"] = request.EventID
+	}
+	if err := writer.writeJSON(ctx, rejection); err != nil {
+		return err
+	}
+	return nil
+}
+
+type wsDelivery struct {
+	writer                *wsFrameWriter
+	prepared              *prepared
+	first, errorForwarded bool
+}
+
+func (delivery *wsDelivery) onEvent(ctx context.Context, event *upstream.Event) error {
+	if delivery.first {
+		delivery.first = false
+		if delivery.prepared.Recorder != nil {
+			delivery.prepared.Recorder.NoteTTFB()
+		}
+	}
+	event, transformErr := delivery.prepared.transformResponseEvent(ctx, event)
+	if transformErr != nil {
+		return transformErr
+	}
+	if event == nil {
+		return nil
+	}
+	// Preserve ordinary events verbatim. Error events carry the safe retry
+	// metadata since this socket has already completed its HTTP upgrade.
+	rawOut, dataOut := delivery.eventPayload(event)
+	if werr := delivery.writer.write(ctx, rawOut); werr != nil {
+		return werr
+	}
+	if delivery.prepared.Recorder != nil {
+		delivery.prepared.Recorder.OnFrame(capture.DirClientOut, "ws_frame", event.Type, rawOut, dataOut)
+	}
+	return nil
+}
+
+func (s *Server) rejectPreparedWS(ctx, exchangeCtx context.Context, writer *wsFrameWriter, p *prepared, apiErr *apiError) {
+	if p != nil {
+		frame := errorFramePayload(apiErr)
+		if werr := writer.writeJSON(ctx, frame); werr == nil && p.Recorder != nil {
+			encoded, _ := json.Marshal(frame)
+			p.Recorder.OnFrame(capture.DirClientOut, "ws_frame", "error", encoded, frame)
+		}
+		s.finish(context.WithoutCancel(exchangeCtx), p, store.OutcomeError, apiErr)
+	} else {
+		_ = writer.writeJSON(ctx, errorFramePayload(apiErr))
+	}
+}
+
+func (delivery *wsDelivery) eventPayload(event *upstream.Event) ([]byte, map[string]any) {
+	rawOut, dataOut := event.Raw, event.Data
+	if upstreamEventContainsError(event) {
+		delivery.errorForwarded = true
+		if len(delivery.prepared.ResponseHeaders) > 0 {
+			dataOut = make(map[string]any, len(event.Data)+1)
+			for key, value := range event.Data {
+				dataOut[key] = value
+			}
+			addRetryHeadersToPayload(dataOut, delivery.prepared.ResponseHeaders)
+			if encoded, encodeErr := json.Marshal(dataOut); encodeErr == nil {
+				rawOut = encoded
+			}
+		}
+	}
+	return rawOut, dataOut
+}
+
+func enqueueWSMessage(ctx context.Context, writer *wsFrameWriter, messages chan<- wsReadEvent, message wsReadEvent) error {
+	select {
+	case messages <- message:
+	default:
+		if err := rejectWSQueueFull(ctx, writer, message.payload); err != nil {
+			return err
+		}
+	}
+	return nil
 }

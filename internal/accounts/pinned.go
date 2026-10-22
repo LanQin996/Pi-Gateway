@@ -29,36 +29,12 @@ func (m *Manager) AcquirePinned(ctx context.Context, key *store.APIKey, accountI
 		if err := ctx.Err(); err != nil {
 			return nil, nil, err
 		}
-		current, err := m.currentKey(ctx, key)
+		pinned, err := m.pinnedEligibleAccount(ctx, key, accountID, model)
 		if err != nil {
 			return nil, nil, err
-		}
-		candidates, err := m.eligible(ctx, current, model)
-		if err != nil {
-			return nil, nil, err
-		}
-		var pinned *store.Account
-		for _, account := range candidates {
-			if account.ID == accountID {
-				pinned = account
-				break
-			}
-		}
-		if pinned == nil {
-			return nil, nil, ErrNoAccounts
 		}
 		if m.tryReserve(pinned) {
-			release := m.pinnedRelease(pinned.ID)
-			if err := ctx.Err(); err != nil {
-				release()
-				return nil, nil, err
-			}
-			fresh, err := m.revalidateReservation(ctx, key, pinned.ID, model)
-			if err != nil {
-				release()
-				return nil, nil, err
-			}
-			return fresh, release, nil
+			return m.finishPinnedReservation(ctx, key, pinned, model)
 		}
 		select {
 		case <-ctx.Done():
@@ -80,4 +56,40 @@ func (m *Manager) pinnedRelease(accountID int64) func() {
 			m.mu.Unlock()
 		})
 	}
+}
+
+func (m *Manager) pinnedEligibleAccount(ctx context.Context, key *store.APIKey, accountID int64, model string) (*store.Account, error) {
+	current, err := m.currentKey(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	candidates, err := m.eligible(ctx, current, model)
+	if err != nil {
+		return nil, err
+	}
+	var pinned *store.Account
+	for _, account := range candidates {
+		if account.ID == accountID {
+			pinned = account
+			break
+		}
+	}
+	if pinned == nil {
+		return nil, ErrNoAccounts
+	}
+	return pinned, nil
+}
+
+func (m *Manager) finishPinnedReservation(ctx context.Context, key *store.APIKey, pinned *store.Account, model string) (*store.Account, func(), error) {
+	release := m.pinnedRelease(pinned.ID)
+	if err := ctx.Err(); err != nil {
+		release()
+		return nil, nil, err
+	}
+	fresh, err := m.revalidateReservation(ctx, key, pinned.ID, model)
+	if err != nil {
+		release()
+		return nil, nil, err
+	}
+	return fresh, release, nil
 }

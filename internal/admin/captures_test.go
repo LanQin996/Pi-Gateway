@@ -12,13 +12,16 @@ import (
 
 func TestHandleExportCapturesLimit(t *testing.T) {
 	db, err := store.Open(":memory:")
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatal(err)
-	}
+	})
 	defer db.Close()
 	for i := 0; i < 1005; i++ {
-		if err := db.InsertCapture(context.Background(), &store.Capture{}, 0); err != nil {
-			t.Fatal(err)
+		{
+			err := db.InsertCapture(context.Background(), &store.Capture{}, 0)
+			reportTestFailure(t, err != nil, func() {
+				t.Fatal(err)
+			})
 		}
 	}
 	s := &Server{store: db}
@@ -32,9 +35,9 @@ func TestHandleExportCapturesLimit(t *testing.T) {
 		t.Run("limit="+tt.raw, func(t *testing.T) {
 			w := httptest.NewRecorder()
 			s.handleExportCaptures(w, httptest.NewRequest("GET", "/?limit="+tt.raw, nil))
-			if w.Code != 200 {
+			reportTestFailure(t, w.Code != 200, func() {
 				t.Fatalf("status %d: %s", w.Code, w.Body.String())
-			}
+			})
 			dec := json.NewDecoder(w.Body)
 			count := 0
 			for {
@@ -43,14 +46,14 @@ func TestHandleExportCapturesLimit(t *testing.T) {
 				if err == io.EOF {
 					break
 				}
-				if err != nil {
+				reportTestFailure(t, err != nil, func() {
 					t.Fatal(err)
-				}
+				})
 				count++
 			}
-			if count != tt.want {
+			reportTestFailure(t, count != tt.want, func() {
 				t.Fatalf("exported %d, want %d", count, tt.want)
-			}
+			})
 		})
 	}
 }
@@ -69,8 +72,11 @@ func TestExportCaptureLimit(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := exportCaptureLimit(tt.raw); got != tt.want {
-				t.Fatalf("exportCaptureLimit(%q) = %d, want %d", tt.raw, got, tt.want)
+			{
+				got := exportCaptureLimit(tt.raw)
+				reportTestFailure(t, got != tt.want, func() {
+					t.Fatalf("exportCaptureLimit(%q) = %d, want %d", tt.raw, got, tt.want)
+				})
 			}
 		})
 	}

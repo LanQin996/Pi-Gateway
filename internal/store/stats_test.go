@@ -51,101 +51,62 @@ func TestUsageSummaryAndDimensionsFrozenMetrics(t *testing.T) {
 	// Pagination is ignored for aggregations.
 	f := UsageFilter{UsageRange: UsageRange{Start: start, End: start + 2*86400000}, Limit: 1, Offset: 2}
 	u, err := s.UsageSummaryFor(ctx, f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if u.RequestCount != 5 || u.SuccessCount != 2 || u.FailureCount != 1 || u.CancelledCount != 1 || u.IncompleteCount != 1 {
-		t.Fatalf("outcome counts=%+v", u)
-	}
-	if u.InputTokens != 400 || u.CachedTokens != 105 || u.CacheWriteTokens != 5 || u.OutputTokens != 170 || u.ReasoningTokens != 2 || u.TotalTokens != 570 || u.CostMicros != 33 {
-		t.Fatalf("sums=%+v", u)
-	}
-	if u.CacheEligibleRequests != 3 || u.CacheHitRequests != 3 {
-		t.Fatalf("nullable cache counts=%+v", u)
-	}
+	requireDataNoError(t, err)
+	requireDataTruef(t, !(u.RequestCount != 5 || u.SuccessCount != 2 || u.FailureCount != 1 || u.CancelledCount != 1 || u.IncompleteCount != 1), "outcome counts=%+v", u)
+	requireDataTruef(t, !(u.InputTokens != 400 || u.CachedTokens != 105 || u.CacheWriteTokens != 5 || u.OutputTokens != 170 || u.ReasoningTokens != 2 || u.TotalTokens != 570 || u.CostMicros != 33), "sums=%+v", u)
+	requireDataTruef(t, !(u.CacheEligibleRequests != 3 || u.CacheHitRequests != 3), "nullable cache counts=%+v", u)
 	checkFloat(t, "cache rate", float64(u.CachedTokens)/float64(u.InputTokens), .2625)
 	checkFloat(t, "avg latency", u.AvgLatencyMS, 520)
-	if u.TTFT != (UsagePercentiles{200, 200, 200}) {
+	reportStoreTestFailure(t, u.TTFT != (UsagePercentiles{200, 200, 200}), func() {
 		t.Errorf("TTFT=%+v", u.TTFT)
-	}
+	})
 	// Successful samples are 25 and 50 (TTFT equals duration, so use total).
 	// Cancelled/incomplete requests are excluded from throughput.
-	if u.OutputTPS != (UsagePercentiles{50, 50, 50}) {
+	reportStoreTestFailure(t, u.OutputTPS != (UsagePercentiles{50, 50, 50}), func() {
 		t.Errorf("TPS=%+v", u.OutputTPS)
-	}
+	})
 
 	models, err := s.UsageByModel(ctx, f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(models) != 2 || models[0].Key != "a" || models[0].ID != 0 || models[0].RequestCount != 3 || models[0].SuccessCount != 2 || models[0].FailureCount != 1 {
-		t.Fatalf("models=%+v", models)
-	}
+	requireDataNoError(t, err)
+	requireDataTruef(t, !(len(models) != 2 || models[0].Key != "a" || models[0].ID != 0 || models[0].RequestCount != 3 || models[0].SuccessCount != 2 || models[0].FailureCount != 1), "models=%+v", models)
 	checkFloat(t, "model a request share", models[0].Share, .6)
 	checkFloat(t, "model b request share", models[1].Share, .4)
 	checkFloat(t, "model a TPS", models[0].OutputTPS, 37.5)
 	checkFloat(t, "model b TPS", models[1].OutputTPS, 0)
 	keys, err := s.UsageByKey(ctx, f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(keys) != 2 || keys[0].ID != 2 || keys[0].RequestCount != 3 || keys[1].ID != 1 || keys[1].RequestCount != 2 {
-		t.Fatalf("keys must group by ID despite renaming: %+v", keys)
-	}
+	requireDataNoError(t, err)
+	requireDataTruef(t, !(len(keys) != 2 || keys[0].ID != 2 || keys[0].RequestCount != 3 || keys[1].ID != 1 || keys[1].RequestCount != 2), "keys must group by ID despite renaming: %+v", keys)
 	accounts, err := s.UsageByAccount(ctx, f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(accounts) != 2 || accounts[0].ID != 11 || accounts[0].RequestCount != 3 || accounts[1].ID != 10 || accounts[1].RequestCount != 2 {
-		t.Fatalf("accounts must group by ID despite renaming: %+v", accounts)
-	}
+	requireDataNoError(t, err)
+	requireDataTruef(t, !(len(accounts) != 2 || accounts[0].ID != 11 || accounts[0].RequestCount != 3 || accounts[1].ID != 10 || accounts[1].RequestCount != 2), "accounts must group by ID despite renaming: %+v", accounts)
 	trend, err := s.UsageTrend(ctx, f, "day")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(trend) != 2 || trend[0].BucketStart != start || trend[0].RequestCount != 3 || trend[1].BucketStart != start+86400000 || trend[1].RequestCount != 2 {
-		t.Fatalf("daily trend=%+v", trend)
-	}
+	requireDataNoError(t, err)
+	requireDataTruef(t, !(len(trend) != 2 || trend[0].BucketStart != start || trend[0].RequestCount != 3 || trend[1].BucketStart != start+86400000 || trend[1].RequestCount != 2), "daily trend=%+v", trend)
 	checkFloat(t, "daily first TPS", trend[0].OutputTPS, 37.5)
 	checkFloat(t, "daily second TPS", trend[1].OutputTPS, 0)
 	hours, err := s.UsageTrend(ctx, f, "hour")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(hours) != 3 || hours[0].BucketStart != start || hours[1].BucketStart != start+3600000 || hours[2].BucketStart != start+86400000 {
-		t.Fatalf("hourly trend=%+v", hours)
-	}
-	if _, err := s.UsageTrend(ctx, f, "minute"); err == nil {
-		t.Error("invalid bucket accepted")
+	requireDataNoError(t, err)
+	requireDataTruef(t, !(len(hours) != 3 || hours[0].BucketStart != start || hours[1].BucketStart != start+3600000 || hours[2].BucketStart != start+86400000), "hourly trend=%+v", hours)
+	{
+		_, err := s.UsageTrend(ctx, f, "minute")
+		reportStoreTestFailure(t, err == nil, func() {
+			t.Error("invalid bucket accepted")
+		})
 	}
 
 	firstTwo := UsageFilter{UsageRange: UsageRange{Start: start + 600000, End: start + 4200000}}
 	u, err = s.UsageSummaryFor(ctx, firstTwo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if u.RequestCount != 2 || u.OutputTPS != (UsagePercentiles{50, 50, 50}) {
-		t.Fatalf("half-open interval or single-sample TPS: %+v", u)
-	}
+	requireDataNoError(t, err)
+	requireDataTruef(t, !(u.RequestCount != 2 || u.OutputTPS != (UsagePercentiles{50, 50, 50})), "half-open interval or single-sample TPS: %+v", u)
 	rows, total, err := s.ListUsageRecords(ctx, UsageFilter{Limit: 1, Offset: 2})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if total != 5 || len(rows) != 1 || rows[0].RequestID != "third" || rows[0].InputTokens != nil || rows[0].CostMicros != nil {
-		t.Fatalf("nullable page=%+v total=%d", rows, total)
-	}
+	requireDataNoError(t, err)
+	requireDataTruef(t, !(total != 5 || len(rows) != 1 || rows[0].RequestID != "third" || rows[0].InputTokens != nil || rows[0].CostMicros != nil), "nullable page=%+v total=%d", rows, total)
 	rows, total, err = s.ListUsageRecords(ctx, UsageFilter{Search: "SECOND"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if total != 1 || len(rows) != 1 || rows[0].InputTokens == nil || *rows[0].InputTokens != 0 || rows[0].CostMicros == nil || *rows[0].CostMicros != 0 {
-		t.Fatalf("zero-valued usage=%+v", rows)
-	}
+	requireDataNoError(t, err)
+	requireDataTruef(t, !(total != 1 || len(rows) != 1 || rows[0].InputTokens == nil || *rows[0].InputTokens != 0 || rows[0].CostMicros == nil || *rows[0].CostMicros != 0), "zero-valued usage=%+v", rows)
 	for _, filter := range []UsageFilter{{APIKeyID: 1, AccountID: 11, Model: "a", Outcome: "succeeded"}, {Search: "upstream_error"}} {
 		_, total, err := s.ListUsageRecords(ctx, filter)
-		if err != nil || total != 1 {
-			t.Fatalf("filter %+v: total=%d err=%v", filter, total, err)
-		}
+		requireDataTruef(t, !(err != nil || total != 1), "filter %+v: total=%d err=%v", filter, total, err)
 	}
 }
 
@@ -187,60 +148,40 @@ func TestUsageLifecycleReconcileAndRetention(t *testing.T) {
 	ctx := context.Background()
 	old := UsageRecord{RequestID: "old", StartedAt: 100, Outcome: "succeeded", CompletedAt: 5}
 	oldID, err := s.StartUsageRecord(ctx, &old)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, err)
 	recent := UsageRecord{RequestID: "recent", StartedAt: 200}
 	recentID, err := s.StartUsageRecord(ctx, &recent)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, err)
 	rows, _, err := s.ListUsageRecords(ctx, UsageFilter{Outcome: "running"})
-	if err != nil || len(rows) != 2 {
-		t.Fatalf("start rows=%+v %v", rows, err)
-	}
+	requireDataTruef(t, !(err != nil || len(rows) != 2), "start rows=%+v %v", rows, err)
 	for _, r := range rows {
-		if r.CompletedAt != 0 || r.InputTokens != nil {
-			t.Fatalf("start wrote terminal values: %+v", r)
-		}
+		requireDataTruef(t, !(r.CompletedAt != 0 || r.InputTokens != nil), "start wrote terminal values: %+v", r)
 	}
 	n, err := s.ReconcileRunningUsageRecords(ctx, 200)
-	if err != nil || n != 1 {
-		t.Fatalf("reconcile=%d %v", n, err)
-	}
+	requireDataTruef(t, !(err != nil || n != 1), "reconcile=%d %v", n, err)
 	n, err = s.ReconcileRunningUsageRecords(ctx, 200)
-	if err != nil || n != 0 {
-		t.Fatalf("reconcile duplicate=%d %v", n, err)
-	}
+	requireDataTruef(t, !(err != nil || n != 0), "reconcile duplicate=%d %v", n, err)
 	rows, _, err = s.ListUsageRecords(ctx, UsageFilter{Outcome: "incomplete"})
-	if err != nil || len(rows) != 1 || rows[0].ID != oldID || rows[0].CompletedAt <= 0 {
-		t.Fatalf("orphan rows=%+v %v", rows, err)
-	}
-	if err := s.FinishUsageRecord(ctx, recentID, &UsageRecord{Outcome: "running"}); err == nil {
-		t.Fatal("accepted nonterminal finish")
+	requireDataTruef(t, !(err != nil || len(rows) != 1 || rows[0].ID != oldID || rows[0].CompletedAt <= 0), "orphan rows=%+v %v", rows, err)
+	{
+		err := s.FinishUsageRecord(ctx, recentID, &UsageRecord{Outcome: "running"})
+		requireDataTrue(t, !(err == nil), "accepted nonterminal finish")
 	}
 	for i := 0; i < 3; i++ {
 		finishTestUsage(t, s, UsageRecord{RequestID: "done", StartedAt: 10, CompletedAt: 50, Outcome: "succeeded"})
 	}
 	n, err = s.DeleteUsageRecordsBefore(ctx, 51, 1, 2)
-	if err != nil || n != 2 {
-		t.Fatalf("bounded delete=%d %v", n, err)
-	}
+	requireDataTruef(t, !(err != nil || n != 2), "bounded delete=%d %v", n, err)
 	n, err = s.DeleteUsageRecordsBefore(ctx, 50, 10, 1)
-	if err != nil || n != 0 {
-		t.Fatalf("strict cutoff=%d %v", n, err)
-	}
+	requireDataTruef(t, !(err != nil || n != 0), "strict cutoff=%d %v", n, err)
 	n, err = s.DeleteUsageRecordsBefore(ctx, NowMS()+10000, 10, 1)
-	if err != nil || n != 2 {
-		t.Fatalf("delete completed=%d %v", n, err)
-	}
+	requireDataTruef(t, !(err != nil || n != 2), "delete completed=%d %v", n, err)
 	rows, total, err := s.ListUsageRecords(ctx, UsageFilter{})
-	if err != nil || total != 1 || rows[0].ID != recentID || rows[0].Outcome != "running" {
-		t.Fatalf("running row lost: %+v total=%d err=%v", rows, total, err)
-	}
+	requireDataTruef(t, !(err != nil || total != 1 || rows[0].ID != recentID || rows[0].Outcome != "running"), "running row lost: %+v total=%d err=%v", rows, total, err)
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
-	if _, err := s.DeleteUsageRecordsBefore(cancelled, 1000, 1, 1); err == nil {
-		t.Fatal("ignored cancellation")
+	{
+		_, err := s.DeleteUsageRecordsBefore(cancelled, 1000, 1, 1)
+		requireDataTrue(t, !(err == nil), "ignored cancellation")
 	}
 }

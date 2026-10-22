@@ -157,14 +157,9 @@ func (s *Server) prepare(ctx context.Context, r *http.Request, rawBody []byte, c
 	if err != nil {
 		return nil, &apiError{Status: http.StatusUnauthorized, Message: "invalid or missing API key", Type: "invalid_request_error"}
 	}
-	var clientBody map[string]any
-	if len(rawBody) > 0 {
-		if err := json.Unmarshal(rawBody, &clientBody); err != nil {
-			return nil, &apiError{Status: http.StatusBadRequest, Message: "request body is not valid JSON: " + err.Error(), Type: "invalid_request_error"}
-		}
-	}
-	if clientBody == nil {
-		clientBody = map[string]any{}
+	clientBody, bodyErr := decodeClientBody(rawBody)
+	if bodyErr != nil {
+		return nil, bodyErr
 	}
 	compactDirect := strings.HasSuffix(r.URL.Path, "/responses/compact")
 	compact, compactErr := detectCompaction(clientBody, compactDirect)
@@ -175,16 +170,9 @@ func (s *Server) prepare(ctx context.Context, r *http.Request, rawBody []byte, c
 	headerHints := []string{r.Header.Get("x-client-request-id"), r.Header.Get("session-id"), r.Header.Get("session_id"), r.Header.Get("x-session-id")}
 	sessionID := piwire.DeriveSessionID(clientBody, headerHints, func() string { return internalSessionID(ctx) })
 	promptCacheKey := piwire.DeriveSessionID(clientBody, headerHints, nil)
-	expandedBody, expandErr := s.upstream.ExpandCompactionBody(rawBody, key.ID)
+	normalizeBody, expandErr := s.expandClientCompaction(rawBody, clientBody, key.ID)
 	if expandErr != nil {
-		return nil, errorFromUpstream(expandErr)
-	}
-	normalizeBody := clientBody
-	if !bytes.Equal(expandedBody, rawBody) {
-		normalizeBody = make(map[string]any)
-		if err := json.Unmarshal(expandedBody, &normalizeBody); err != nil {
-			return nil, compactInputError(err.Error())
-		}
+		return nil, expandErr
 	}
 	engine, version, err := s.ruleService.Load(ctx)
 	if err != nil && !errors.Is(err, rulesruntime.ErrMigration) {
@@ -207,52 +195,10 @@ func (s *Server) prepare(ctx context.Context, r *http.Request, rawBody []byte, c
 		p.Recorder = s.newRecorder(key, nil, clientTransport, "", built)
 		p.Recorder.OnClientRequest(r.Header, rawBody)
 	}
-	if engine != nil {
-		initial, err := p.applyPipeline(ctx, rules.PhaseClientRequest, normalizeBody)
-		if err != nil {
-			return p, pipelineAPIError(err)
-		}
-		normalized, err := p.applyPipeline(ctx, rules.PhaseRequestNormalize, initial.Body)
-		if err != nil {
-			return p, pipelineAPIError(err)
-		}
-		built.Body, err = ruleOrderedBody(normalized.Body, nil)
-		if err != nil {
-			return p, ruleAPIError(err.Error())
-		}
-		m, _ := built.Body.Get("model")
-		built.Model, _ = m.(string)
-		if strings.TrimSpace(built.Model) == "" {
-			return p, &apiError{Status: 400, Message: "no model specified and no default model configured", Type: "invalid_request_error"}
-		}
-		built.JSON, err = json.Marshal(built.Body)
-		if err != nil {
-			return p, ruleAPIError(err.Error())
-		}
-		p.RuleContext["model"] = built.Model
-	} else {
-		built, err = rulescapture.NormalizeRequest(normalizeBody, rt, promptCacheKey)
-		if err != nil {
-			return p, ruleAPIError(err.Error())
-		}
-		p.Built = built
+	if err := s.normalizePrepared(ctx, p, normalizeBody, rt, promptCacheKey); err != nil {
+		return p, err
 	}
-	if compact && engine == nil {
-		for _, field := range []string{"instructions", "prompt_cache_options"} {
-			if value, ok := normalizeBody[field]; ok {
-				built.Body.Set(field, value)
-			}
-		}
-		built.JSON, _ = json.Marshal(built.Body)
-	}
-	if compact && engine == nil && p.CompactionMode == "on" {
-		before, _ := json.Marshal(built.Body)
-		built.Body.Set("model", p.CompactionModel)
-		built.Model = p.CompactionModel
-		built.JSON, _ = json.Marshal(built.Body)
-		p.RuleContext["model"] = built.Model
-		p.recordGatewayDifference("compaction_model", "Model summary configuration", before, built.JSON)
-	}
+	p.shapeLegacyCompaction(normalizeBody)
 	if apiErr := s.applyRequestRules(ctx, p); apiErr != nil {
 		return p, apiErr
 	}
@@ -260,113 +206,19 @@ func (s *Server) prepare(ctx context.Context, r *http.Request, rawBody []byte, c
 	if apiErr := s.detectCodexBridge(p); apiErr != nil {
 		return p, apiErr
 	}
-	beforeShape, _ := json.Marshal(built.Body)
-	if engine != nil {
-		if p.Compact {
-			if _, err := compactRequestBody(built.Body); err != nil {
-				return p, compactInputError(err.Error())
-			}
-		}
-		if err := p.finalizeRules(ctx); err != nil {
-			return p, pipelineAPIError(err)
-		}
-	} else if p.Compact {
-		built.Body, err = compactRequestBody(built.Body)
-		if err != nil {
-			return p, compactInputError(err.Error())
-		}
-		built.JSON, err = json.Marshal(built.Body)
-		if err != nil {
-			return p, ruleAPIError(err.Error())
-		}
-	} else {
-		piwire.EnforcePiShape(built.Body)
-		built.JSON, err = json.Marshal(built.Body)
-		if err != nil {
-			return p, ruleAPIError(err.Error())
-		}
+	if err := p.shapePrepared(ctx); err != nil {
+		return p, err
 	}
-	if compact && p.CompactionMode == "on" {
-		p.CompactionModel = built.Model
+	if err := s.resolvePreparedContinuation(ctx, p); err != nil {
+		return p, err
 	}
-	if p.Compact {
-		name := "Native compaction request"
-		if p.CompactionMode == "on" {
-			name = "Model summary compaction request"
-		}
-		p.recordGatewayDifference("compaction", name, beforeShape, built.JSON)
-	}
-	built.SessionID = sessionID
-	rawPrevious, _ := built.Body.Get("previous_response_id")
-	continuation, previousID, continuationErr := s.resolveContinuation(ctx, key.ID, rawPrevious)
-	if continuationErr != nil {
-		return p, continuationErr
-	}
-	if continuation != nil {
-		sessionID = continuation.SessionID
-		built.SessionID = sessionID
-	}
-	p.SessionID, p.PreviousResponseID, p.Continuation = sessionID, previousID, continuation
-	p.PoolSessionID = poolSessionID(ctx, sessionID)
 	if apiErr := s.prepareCodexBridge(p); apiErr != nil {
 		return p, apiErr
 	}
 
-	keyRelease := func() {}
-	if key != nil {
-		dec, rel, lerr := s.limiter.Admit(ctx, key.ID, keylimit.LimitsFromKey(key), time.Now())
-		if lerr != nil {
-			s.logger.Warn("key admission check failed; allowing request", "error", lerr, "key_id", key.ID)
-		} else if !dec.Allowed {
-			return p, &apiError{Status: http.StatusTooManyRequests, Message: admissionMessage(dec), Type: "rate_limit_error", Code: dec.Reason, ResponseHeaders: retryAfterHeaders(dec.RetryAfter)}
-		} else {
-			keyRelease = rel
-		}
+	if err := s.routePrepared(ctx, p, rt, clientTransport, promptCacheKey); err != nil {
+		return p, err
 	}
-	var account *store.Account
-	var release func()
-	if continuation != nil {
-		account, release, err = s.accounts.AcquirePinned(ctx, key, continuation.AccountID, built.Model)
-	} else {
-		scope := ""
-		connection, _ := ctx.Value(downstreamWSContextKey{}).(string)
-		if connection != "" || promptCacheKey != "" {
-			scope = poolSessionID(ctx, sessionID)
-		}
-		account, release, err = s.accounts.AcquireWithAffinity(ctx, key, built.Model, scope)
-	}
-	if err != nil {
-		keyRelease()
-		if continuation != nil && errors.Is(err, accounts.ErrNoAccounts) {
-			return p, continuationAPIError(session.ErrMiss)
-		}
-		if errors.Is(err, accounts.ErrModelUnavailable) {
-			return p, &apiError{Status: http.StatusForbidden, Message: "This model is disabled for the eligible accounts or groups.", Type: "invalid_request_error", Code: "model_disabled"}
-		}
-		return p, &apiError{Status: http.StatusServiceUnavailable, Message: err.Error(), Type: "server_error"}
-	}
-	p.AccountRelease = release
-	release = composeRelease(keyRelease, release)
-	transport := s.resolveTransport(rt, key, account, clientTransport)
-	if p.Compact {
-		transport = "sse" // Compaction is a separate HTTP operation, never a socket delta.
-	}
-	if continuation != nil && transport != "websocket-cached" && transport != "auto" {
-		release()
-		return p, continuationAPIError(session.ErrMiss)
-	}
-	p.Account, p.Release, p.Transport = account, release, transport
-	p.RuleContext["account_id"], p.RuleContext["upstream_protocol"] = account.ID, transport
-	p.RuleContext["model"] = built.Model
-	if p.Recorder != nil {
-		p.Recorder.SetRoute(account.ID, account.Name, built.Model, sessionID, transport)
-	}
-	p.Usage = s.newUsageTracker(key, account, built.Model, clientTransport, transport, sessionID, stringField(clientBody, "service_tier"))
-	p.Usage.noteRequestMetadata(built.JSON)
-	if p.Compact {
-		p.Usage.requestKind = "compaction"
-	}
-	s.startUsage(ctx, p.Usage)
 	return p, nil
 }
 
@@ -380,12 +232,12 @@ func (s *Server) prepare(ctx context.Context, r *http.Request, rawBody []byte, c
 func (s *Server) resolveTransport(rt *store.Settings, key *store.APIKey, account *store.Account, clientTransport string) string {
 	if account != nil {
 		switch strings.ToLower(strings.TrimSpace(account.UpstreamProtocol)) {
-		case "ws", "websocket", "websocket-cached":
+		case "ws", "websocket", cachedWebSocketTransport:
 			// An account-level WS override always selects the pooled/cached socket
 			// so the incremental-context path (previous_response_id + delta input)
 			// is used. The upstream client only understands these internal names,
 			// so "ws" must never be passed through verbatim.
-			return "websocket-cached"
+			return cachedWebSocketTransport
 		case "sse":
 			return "sse"
 		}
@@ -405,7 +257,7 @@ func normalizeTransport(configured, clientTransport string) string {
 		return "sse"
 	case "auto":
 		if clientTransport == "ws" {
-			return "websocket-cached"
+			return cachedWebSocketTransport
 		}
 		return "auto"
 	default:
@@ -581,8 +433,8 @@ func writeError(w http.ResponseWriter, e *apiError) {
 		e = &apiError{Status: http.StatusInternalServerError, Message: "internal error", Type: "server_error"}
 	}
 	copyResponseHeaders(w, e.ResponseHeaders)
-	if e.RequestID != "" && w.Header().Get("x-request-id") == "" {
-		w.Header().Set("x-request-id", e.RequestID)
+	if e.RequestID != "" && w.Header().Get(requestIDHeader) == "" {
+		w.Header().Set(requestIDHeader, e.RequestID)
 	}
 	inner := map[string]any{
 		"message": e.Message,
@@ -603,7 +455,7 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	_ = enc.Encode(payload)
 }
 
-func orDefault(v any, fallback any) any {
+func orDefault(v, fallback any) any {
 	switch t := v.(type) {
 	case string:
 		if strings.TrimSpace(t) == "" {
@@ -624,15 +476,15 @@ func errorFromUpstream(err error, responseHeaders ...http.Header) (apiErr *apiEr
 	defer func() {
 		apiErr.ResponseHeaders = safeRetryHeaders(responseHeaders...)
 		if apiErr.RequestID == "" {
-			apiErr.RequestID = apiErr.ResponseHeaders.Get("x-request-id")
-		} else if apiErr.ResponseHeaders.Get("x-request-id") == "" {
-			apiErr.ResponseHeaders.Set("x-request-id", apiErr.RequestID)
+			apiErr.RequestID = apiErr.ResponseHeaders.Get(requestIDHeader)
+		} else if apiErr.ResponseHeaders.Get(requestIDHeader) == "" {
+			apiErr.ResponseHeaders.Set(requestIDHeader, apiErr.RequestID)
 		}
 	}()
 	var policyError *apiError
 	if errors.As(err, &policyError) {
-		copy := *policyError
-		return &copy
+		cloned := *policyError
+		return &cloned
 	}
 	if errors.Is(err, upstream.ErrContinuationUnavailable) {
 		return continuationAPIError(err)
@@ -645,32 +497,7 @@ func errorFromUpstream(err error, responseHeaders ...http.Header) (apiErr *apiEr
 	}
 	var failure *upstream.FailureError
 	if errors.As(err, &failure) {
-		status := http.StatusBadGateway
-		// HTTP status parsed from the upstream response is authoritative even when
-		// its logical code does not use the http_* naming convention.
-		if failure.Status >= 400 && failure.Status < 600 {
-			status = failure.Status
-		} else {
-			switch failure.Code {
-			case "http_401":
-				status = http.StatusUnauthorized
-			case "http_403":
-				status = http.StatusForbidden
-			case "http_404":
-				status = http.StatusNotFound
-			case "http_429", "usage_limit_reached", "usage_not_included", "rate_limit_exceeded":
-				status = http.StatusTooManyRequests
-			case "http_400", "invalid_request_error":
-				status = http.StatusBadRequest
-			}
-			if strings.HasPrefix(failure.Code, "http_") {
-				var parsed int
-				if _, scanErr := fmt.Sscanf(failure.Code, "http_%d", &parsed); scanErr == nil && parsed >= 400 && parsed < 600 {
-					status = parsed
-				}
-			}
-		}
-		return &apiError{Status: status, Message: failure.Message, Type: "upstream_error", Code: failure.Code, RequestID: failure.RequestID}
+		return failureAPIError(failure)
 	}
 	if errors.Is(err, context.Canceled) {
 		return &apiError{Status: 499, Message: "client closed request", Type: "cancelled", Code: "client_closed_request"}
@@ -963,6 +790,296 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].ID < candidates[j].ID })
 	available := map[string]store.CatalogModel{}
 	observed := map[string]bool{}
+	accountIDs := modelCatalogAccountIDs(candidates)
+	// Neither current permissions nor final key-filtered responses are cached.
+	restrictions, policyErr := s.store.DisabledModelsForAccounts(r.Context(), accountIDs, key)
+	if policyErr != nil {
+		writeError(w, &apiError{Status: http.StatusInternalServerError, Message: "could not load model restrictions", Type: "server_error"})
+		return
+	}
+	catalogs, loadErr := s.loadModelCatalogs(r.Context(), accountIDs)
+	if loadErr != nil {
+		writeError(w, &apiError{Status: http.StatusInternalServerError, Message: "could not load an account model catalog", Type: "server_error"})
+		return
+	}
+	mergeVisibleCatalogs(accountIDs, restrictions, catalogs, available, observed)
+	// Resolve mappings once, exactly as piwire.BuildRequest does. Even a native
+	// model name must be omitted if configuration remaps it to a blocked target.
+	mappings := s.settings.Get().ModelMappings
+	observeModelAliases(mappings, observed)
+	ids := make([]string, 0, len(observed))
+	for id := range observed {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	data := visibleModelEntries(ids, mappings, available, codexMode)
+	if len(data) == 0 {
+		w.Header().Set("X-Model-Catalog-Status", "empty")
+	} else {
+		w.Header().Set("X-Model-Catalog-Status", "cached")
+	}
+	if codexMode {
+		writeJSON(w, http.StatusOK, map[string]any{"models": data})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
+}
+
+func (s *Server) normalizePrepared(ctx context.Context, p *prepared, normalizeBody map[string]any, rt *store.Settings, promptCacheKey string) *apiError {
+	engine, built := p.RuleEngine, p.Built
+	var err error
+	if engine != nil {
+		initial, err := p.applyPipeline(ctx, rules.PhaseClientRequest, normalizeBody)
+		if err != nil {
+			return pipelineAPIError(err)
+		}
+		normalized, err := p.applyPipeline(ctx, rules.PhaseRequestNormalize, initial.Body)
+		if err != nil {
+			return pipelineAPIError(err)
+		}
+		built.Body, err = ruleOrderedBody(normalized.Body, nil)
+		if err != nil {
+			return ruleAPIError(err.Error())
+		}
+		m, _ := built.Body.Get("model")
+		built.Model, _ = m.(string)
+		if strings.TrimSpace(built.Model) == "" {
+			return &apiError{Status: 400, Message: "no model specified and no default model configured", Type: "invalid_request_error"}
+		}
+		built.JSON, err = json.Marshal(built.Body)
+		if err != nil {
+			return ruleAPIError(err.Error())
+		}
+		p.RuleContext["model"] = built.Model
+	} else {
+		built, err = rulescapture.NormalizeRequest(normalizeBody, rt, promptCacheKey)
+		if err != nil {
+			return ruleAPIError(err.Error())
+		}
+		p.Built = built
+	}
+	return nil
+}
+
+func (p *prepared) shapeLegacyCompaction(normalizeBody map[string]any) {
+	compact, engine, built := p.Compact, p.RuleEngine, p.Built
+	if compact && engine == nil {
+		for _, field := range []string{"instructions", "prompt_cache_options"} {
+			if value, ok := normalizeBody[field]; ok {
+				built.Body.Set(field, value)
+			}
+		}
+		built.JSON, _ = json.Marshal(built.Body)
+	}
+	if compact && engine == nil && p.CompactionMode == "on" {
+		before, _ := json.Marshal(built.Body)
+		built.Body.Set("model", p.CompactionModel)
+		built.Model = p.CompactionModel
+		built.JSON, _ = json.Marshal(built.Body)
+		p.RuleContext["model"] = built.Model
+		p.recordGatewayDifference("compaction_model", "Model summary configuration", before, built.JSON)
+	}
+}
+
+func (p *prepared) shapePrepared(ctx context.Context) *apiError {
+	engine, built := p.RuleEngine, p.Built
+	var err error
+	beforeShape, _ := json.Marshal(built.Body)
+	if engine != nil {
+		if err := p.finalizePreparedRules(ctx); err != nil {
+			return err
+		}
+	} else if p.Compact {
+		built.Body, err = compactRequestBody(built.Body)
+		if err != nil {
+			return compactInputError(err.Error())
+		}
+		built.JSON, err = json.Marshal(built.Body)
+		if err != nil {
+			return ruleAPIError(err.Error())
+		}
+	} else {
+		piwire.EnforcePiShape(built.Body)
+		built.JSON, err = json.Marshal(built.Body)
+		if err != nil {
+			return ruleAPIError(err.Error())
+		}
+	}
+	p.recordCompactionShape(beforeShape)
+	return nil
+}
+
+func (s *Server) resolvePreparedContinuation(ctx context.Context, p *prepared) *apiError {
+	built, sessionID, key := p.Built, p.SessionID, p.Key
+	built.SessionID = sessionID
+	rawPrevious, _ := built.Body.Get("previous_response_id")
+	continuation, previousID, continuationErr := s.resolveContinuation(ctx, key.ID, rawPrevious)
+	if continuationErr != nil {
+		return continuationErr
+	}
+	if continuation != nil {
+		sessionID = continuation.SessionID
+		built.SessionID = sessionID
+	}
+	p.SessionID, p.PreviousResponseID, p.Continuation = sessionID, previousID, continuation
+	p.PoolSessionID = poolSessionID(ctx, sessionID)
+	return nil
+}
+
+func (s *Server) routePrepared(ctx context.Context, p *prepared, rt *store.Settings, clientTransport, promptCacheKey string) *apiError {
+	key, built, continuation, sessionID, clientBody := p.Key, p.Built, p.Continuation, p.SessionID, p.ClientBody
+	keyRelease, admissionErr := s.admitPreparedKey(ctx, key)
+	if admissionErr != nil {
+		return admissionErr
+	}
+	account, release, err := s.acquirePreparedAccount(ctx, p, promptCacheKey)
+	if err != nil {
+		keyRelease()
+		if continuation != nil && errors.Is(err, accounts.ErrNoAccounts) {
+			return continuationAPIError(session.ErrMiss)
+		}
+		if errors.Is(err, accounts.ErrModelUnavailable) {
+			return &apiError{Status: http.StatusForbidden, Message: "This model is disabled for the eligible accounts or groups.", Type: "invalid_request_error", Code: "model_disabled"}
+		}
+		return &apiError{Status: http.StatusServiceUnavailable, Message: err.Error(), Type: "server_error"}
+	}
+	p.AccountRelease = release
+	release = composeRelease(keyRelease, release)
+	transport := s.resolveTransport(rt, key, account, clientTransport)
+	if p.Compact {
+		transport = "sse" // Compaction is a separate HTTP operation, never a socket delta.
+	}
+	if continuation != nil && transport != cachedWebSocketTransport && transport != "auto" {
+		release()
+		return continuationAPIError(session.ErrMiss)
+	}
+	p.Account, p.Release, p.Transport = account, release, transport
+	p.RuleContext["account_id"], p.RuleContext["upstream_protocol"] = account.ID, transport
+	p.RuleContext["model"] = built.Model
+	if p.Recorder != nil {
+		p.Recorder.SetRoute(account.ID, account.Name, built.Model, sessionID, transport)
+	}
+	p.Usage = s.newUsageTracker(key, account, built.Model, clientTransport, transport, sessionID, stringField(clientBody, "service_tier"))
+	p.Usage.noteRequestMetadata(built.JSON)
+	if p.Compact {
+		p.Usage.requestKind = "compaction"
+	}
+	s.startUsage(ctx, p.Usage)
+	return nil
+}
+
+func (s *Server) admitPreparedKey(ctx context.Context, key *store.APIKey) (func(), *apiError) {
+	keyRelease := func() {
+		// Requests without key admission have no reservation to release.
+	}
+	if key != nil {
+		dec, rel, lerr := s.limiter.Admit(ctx, key.ID, keylimit.LimitsFromKey(key), time.Now())
+		if lerr != nil {
+			s.logger.Warn("key admission check failed; allowing request", "error", lerr, "key_id", key.ID)
+		} else {
+			if !dec.Allowed {
+				return nil, &apiError{Status: http.StatusTooManyRequests, Message: admissionMessage(dec), Type: "rate_limit_error", Code: dec.Reason, ResponseHeaders: retryAfterHeaders(dec.RetryAfter)}
+			}
+
+			keyRelease = rel
+
+		}
+	}
+
+	return keyRelease, nil
+}
+
+func (s *Server) acquirePreparedAccount(ctx context.Context, p *prepared, promptCacheKey string) (*store.Account, func(), error) {
+	key, built, continuation, sessionID := p.Key, p.Built, p.Continuation, p.SessionID
+	var err error
+	var account *store.Account
+	var release func()
+	if continuation != nil {
+		account, release, err = s.accounts.AcquirePinned(ctx, key, continuation.AccountID, built.Model)
+	} else {
+		scope := ""
+		connection, _ := ctx.Value(downstreamWSContextKey{}).(string)
+		if connection != "" || promptCacheKey != "" {
+			scope = poolSessionID(ctx, sessionID)
+		}
+		account, release, err = s.accounts.AcquireWithAffinity(ctx, key, built.Model, scope)
+	}
+	return account, release, err
+}
+
+func decodeClientBody(rawBody []byte) (map[string]any, *apiError) {
+	var clientBody map[string]any
+	if len(rawBody) > 0 {
+		if err := json.Unmarshal(rawBody, &clientBody); err != nil {
+			return nil, &apiError{Status: http.StatusBadRequest, Message: "request body is not valid JSON: " + err.Error(), Type: "invalid_request_error"}
+		}
+	}
+	if clientBody == nil {
+		clientBody = map[string]any{}
+	}
+
+	return clientBody, nil
+}
+
+func (s *Server) expandClientCompaction(rawBody []byte, clientBody map[string]any, keyID int64) (map[string]any, *apiError) {
+	expandedBody, expandErr := s.upstream.ExpandCompactionBody(rawBody, keyID)
+	if expandErr != nil {
+		return nil, errorFromUpstream(expandErr)
+	}
+	normalizeBody := clientBody
+	if !bytes.Equal(expandedBody, rawBody) {
+		normalizeBody = make(map[string]any)
+		if err := json.Unmarshal(expandedBody, &normalizeBody); err != nil {
+			return nil, compactInputError(err.Error())
+		}
+	}
+
+	return normalizeBody, nil
+}
+
+func (p *prepared) finalizePreparedRules(ctx context.Context) *apiError {
+	built := p.Built
+	if p.Compact {
+		if _, err := compactRequestBody(built.Body); err != nil {
+			return compactInputError(err.Error())
+		}
+	}
+	if err := p.finalizeRules(ctx); err != nil {
+		return pipelineAPIError(err)
+	}
+	return nil
+}
+
+func failureAPIError(failure *upstream.FailureError) *apiError {
+	status := http.StatusBadGateway
+	// HTTP status parsed from the upstream response is authoritative even when
+	// its logical code does not use the http_* naming convention.
+	if failure.Status >= 400 && failure.Status < 600 {
+		status = failure.Status
+	} else {
+		switch failure.Code {
+		case "http_401":
+			status = http.StatusUnauthorized
+		case "http_403":
+			status = http.StatusForbidden
+		case "http_404":
+			status = http.StatusNotFound
+		case "http_429", "usage_limit_reached", "usage_not_included", "rate_limit_exceeded":
+			status = http.StatusTooManyRequests
+		case "http_400", "invalid_request_error":
+			status = http.StatusBadRequest
+		}
+		if strings.HasPrefix(failure.Code, "http_") {
+			var parsed int
+			if _, scanErr := fmt.Sscanf(failure.Code, "http_%d", &parsed); scanErr == nil && parsed >= 400 && parsed < 600 {
+				status = parsed
+			}
+		}
+	}
+	return &apiError{Status: status, Message: failure.Message, Type: "upstream_error", Code: failure.Code, RequestID: failure.RequestID}
+}
+
+func modelCatalogAccountIDs(candidates []*store.Account) []int64 {
 	accountIDs := make([]int64, 0, len(candidates))
 	now := store.NowMS()
 	for _, account := range candidates {
@@ -975,17 +1092,11 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		}
 		accountIDs = append(accountIDs, account.ID)
 	}
-	// Neither current permissions nor final key-filtered responses are cached.
-	restrictions, policyErr := s.store.DisabledModelsForAccounts(r.Context(), accountIDs, key)
-	if policyErr != nil {
-		writeError(w, &apiError{Status: http.StatusInternalServerError, Message: "could not load model restrictions", Type: "server_error"})
-		return
-	}
-	catalogs, loadErr := s.loadModelCatalogs(r.Context(), accountIDs)
-	if loadErr != nil {
-		writeError(w, &apiError{Status: http.StatusInternalServerError, Message: "could not load an account model catalog", Type: "server_error"})
-		return
-	}
+
+	return accountIDs
+}
+
+func mergeVisibleCatalogs(accountIDs []int64, restrictions map[int64][]string, catalogs map[int64][]store.CatalogModel, available map[string]store.CatalogModel, observed map[string]bool) {
 	for _, accountID := range accountIDs {
 		disabled := restrictions[accountID]
 		blocked := make(map[string]bool, len(disabled))
@@ -1008,19 +1119,31 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			available[id] = model
 		}
 	}
-	// Resolve mappings once, exactly as piwire.BuildRequest does. Even a native
-	// model name must be omitted if configuration remaps it to a blocked target.
-	mappings := s.settings.Get().ModelMappings
+}
+
+func (p *prepared) recordCompactionShape(beforeShape []byte) {
+	compact, built := p.Compact, p.Built
+	if compact && p.CompactionMode == "on" {
+		p.CompactionModel = built.Model
+	}
+	if p.Compact {
+		name := "Native compaction request"
+		if p.CompactionMode == "on" {
+			name = "Model summary compaction request"
+		}
+		p.recordGatewayDifference("compaction", name, beforeShape, built.JSON)
+	}
+}
+
+func observeModelAliases(mappings map[string]string, observed map[string]bool) {
 	for alias := range mappings {
 		if strings.TrimSpace(alias) != "" {
 			observed[alias] = true
 		}
 	}
-	ids := make([]string, 0, len(observed))
-	for id := range observed {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
+}
+
+func visibleModelEntries(ids []string, mappings map[string]string, available map[string]store.CatalogModel, codexMode bool) []map[string]json.RawMessage {
 	data := make([]map[string]json.RawMessage, 0, len(ids))
 	for _, id := range ids {
 		target := id
@@ -1031,14 +1154,5 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			data = append(data, publicModelEntry(model, id, codexMode))
 		}
 	}
-	if len(data) == 0 {
-		w.Header().Set("X-Model-Catalog-Status", "empty")
-	} else {
-		w.Header().Set("X-Model-Catalog-Status", "cached")
-	}
-	if codexMode {
-		writeJSON(w, http.StatusOK, map[string]any{"models": data})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
+	return data
 }

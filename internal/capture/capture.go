@@ -42,6 +42,8 @@ type Options struct {
 	IncludeHeaders    bool
 }
 
+const bearerPrefix = "Bearer "
+
 // New creates a recorder for a capture scaffold (account/key/transport/model
 // already filled in by the caller).
 func New(scaffold *store.Capture, opts Options) *Recorder {
@@ -216,30 +218,7 @@ func (r *Recorder) appendFrameLocked(dir, kind, eventType string, raw []byte, pa
 		r.latestInbound = len(r.cap.ResponseFrames)
 	}
 
-	// Store the parsed payload when the frame is JSON, otherwise the raw text.
-	// If the raw event cannot fit in the remaining budget, avoid marshaling the
-	// decoded map at all: the raw-size check bounds the temporary representation.
-	switch {
-	case parsed != nil && r.canMarshalParsedLocked(len(raw)):
-		if encoded, err := json.Marshal(parsed); err == nil {
-			if allowed := r.allow(len(encoded)); allowed == len(encoded) {
-				frame.Data = json.RawMessage(encoded)
-			} else {
-				frame.Text = string(encoded[:allowed])
-			}
-		}
-	case len(raw) > 0:
-		allowed := r.allow(len(raw))
-		if allowed == len(raw) && json.Valid(raw) {
-			frame.Data = json.RawMessage(raw)
-		} else {
-			frame.Text = string(raw[:allowed])
-		}
-	case parsed != nil:
-		// The parsed payload has no raw fallback and no budget remains, so it
-		// was dropped without allocating its encoded representation.
-		r.truncated = true
-	}
+	r.fillFramePayloadLocked(&frame, raw, parsed)
 	r.cap.ResponseFrames = append(r.cap.ResponseFrames, frame)
 
 	// ResponseText is the client-visible SSE hop only. The upstream "in" event
@@ -417,42 +396,42 @@ func formatSSEFramePrefix(raw []byte, limit int) []byte {
 		return nil
 	}
 	out := make([]byte, 0, limit)
-	// Emit with an index so CRLF normalization and empty trailing lines are
-	// handled exactly like formatSSEFrame, while never exceeding limit.
 	for i := 0; ; {
-		for _, b := range []byte("data: ") {
-			if len(out) >= limit {
-				return out
-			}
-			out = append(out, b)
+		out = appendSSEPrefixChunk(out, []byte("data: "), limit)
+		if len(out) >= limit {
+			return out
 		}
-		for i < len(raw) && raw[i] != '\n' && raw[i] != '\r' {
-			if len(out) >= limit {
-				return out
-			}
-			out = append(out, raw[i])
-			i++
-		}
+		end := sseLineEnd(raw, i, limit-len(out))
+		out = appendSSEPrefixChunk(out, raw[i:end], limit)
 		if len(out) >= limit {
 			return out
 		}
 		out = append(out, '\n')
-		if i >= len(raw) {
-			if len(out) >= limit {
-				return out
-			}
-			out = append(out, '\n')
-			return out
+		if end >= len(raw) {
+			return appendSSEPrefixChunk(out, []byte{'\n'}, limit)
 		}
-		if raw[i] == '\r' {
-			i++
-			if i < len(raw) && raw[i] == '\n' {
-				i++
-			}
-		} else {
-			i++
-		}
+		i = afterSSENewline(raw, end)
 	}
+}
+
+func appendSSEPrefixChunk(out, chunk []byte, limit int) []byte {
+	return append(out, chunk[:min(len(chunk), limit-len(out))]...)
+}
+
+func sseLineEnd(raw []byte, start, remaining int) int {
+	// Do not scan an unbounded upstream line after the capture budget is exhausted.
+	end := start + min(len(raw)-start, remaining)
+	for start < end && raw[start] != '\n' && raw[start] != '\r' {
+		start++
+	}
+	return start
+}
+
+func afterSSENewline(raw []byte, start int) int {
+	if raw[start] == '\r' && start+1 < len(raw) && raw[start+1] == '\n' {
+		return start + 2
+	}
+	return start + 1
 }
 
 func (r *Recorder) clipHeadersLocked(headers http.Header) []store.Header {
@@ -508,9 +487,9 @@ func flattenHeaders(h http.Header) []store.Header {
 func sanitizeHeaderValue(name, value string) string {
 	switch strings.ToLower(name) {
 	case "authorization", "proxy-authorization":
-		if strings.HasPrefix(value, "Bearer ") {
-			token := strings.TrimPrefix(value, "Bearer ")
-			return "Bearer " + maskToken(token)
+		if strings.HasPrefix(value, bearerPrefix) {
+			token := strings.TrimPrefix(value, bearerPrefix)
+			return bearerPrefix + maskToken(token)
 		}
 		return maskToken(value)
 	case "x-api-key", "api-key", "openai-api-key", "cookie", "set-cookie":
@@ -540,4 +519,31 @@ func formatSSEFrame(raw []byte) []byte {
 	}
 	b.WriteByte('\n')
 	return []byte(b.String())
+}
+
+func (r *Recorder) fillFramePayloadLocked(frame *store.Frame, raw []byte, parsed map[string]any) {
+	// Store the parsed payload when the frame is JSON, otherwise the raw text.
+	// If the raw event cannot fit in the remaining budget, avoid marshaling the
+	// decoded map at all: the raw-size check bounds the temporary representation.
+	switch {
+	case parsed != nil && r.canMarshalParsedLocked(len(raw)):
+		if encoded, err := json.Marshal(parsed); err == nil {
+			if allowed := r.allow(len(encoded)); allowed == len(encoded) {
+				frame.Data = json.RawMessage(encoded)
+			} else {
+				frame.Text = string(encoded[:allowed])
+			}
+		}
+	case len(raw) > 0:
+		allowed := r.allow(len(raw))
+		if allowed == len(raw) && json.Valid(raw) {
+			frame.Data = json.RawMessage(raw)
+		} else {
+			frame.Text = string(raw[:allowed])
+		}
+	case parsed != nil:
+		// The parsed payload has no raw fallback and no budget remains, so it
+		// was dropped without allocating its encoded representation.
+		r.truncated = true
+	}
 }

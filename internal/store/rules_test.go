@@ -26,103 +26,74 @@ func exerciseRulePublication(t *testing.T, first, second *Store) {
 	t.Helper()
 	ctx := context.Background()
 	initial, err := first.LoadRuleSet(ctx)
-	if err != nil || initial.Version != 0 || len(initial.Rules) != 0 {
-		t.Fatalf("initial=%+v err=%v", initial, err)
-	}
+	requireDataTruef(t, !(err != nil || initial.Version != 0 || len(initial.Rules) != 0), "initial=%+v err=%v", initial, err)
 	version := int64(0)
 	snapshot, err := first.PublishRules(ctx, &version, []RuleChange{
 		{Kind: "create", ID: "b", Rule: testRuleJSON("same name", 20)},
 		{Kind: "create", ID: "a", Rule: testRuleJSON("same name", 10)},
 	}, acceptRuleSet)
-	if err != nil || snapshot.Version != 1 || len(snapshot.Rules) != 2 || snapshot.Rules[0].ID != "a" {
-		t.Fatalf("create=%+v err=%v", snapshot, err)
+	requireDataTruef(t, !(err != nil || snapshot.Version != 1 || len(snapshot.Rules) != 2 || snapshot.Rules[0].ID != "a"), "create=%+v err=%v", snapshot, err)
+	{
+		_, err := first.PublishRules(ctx, &version, []RuleChange{{Kind: "create", ID: "c", Rule: testRuleJSON("stale", 0)}}, acceptRuleSet)
+		requireDataTruef(t, !(!errors.Is(err, ErrRuleConflict)), "stale version accepted: %v", err)
 	}
-	if _, err := first.PublishRules(ctx, &version, []RuleChange{{Kind: "create", ID: "c", Rule: testRuleJSON("stale", 0)}}, acceptRuleSet); !errors.Is(err, ErrRuleConflict) {
-		t.Fatalf("stale version accepted: %v", err)
-	}
-	if _, err := first.PublishRules(ctx, nil, []RuleChange{{Kind: "update", ID: "a", ExpectedRevision: 2, Rule: testRuleJSON("stale", 0)}}, acceptRuleSet); !errors.Is(err, ErrRuleConflict) {
-		t.Fatalf("stale revision accepted: %v", err)
+	{
+		_, err := first.PublishRules(ctx, nil, []RuleChange{{Kind: "update", ID: "a", ExpectedRevision: 2, Rule: testRuleJSON("stale", 0)}}, acceptRuleSet)
+		requireDataTruef(t, !(!errors.Is(err, ErrRuleConflict)), "stale revision accepted: %v", err)
 	}
 	rejected := errors.New("candidate compilation rejected")
 	calls := 0
 	_, err = first.PublishRules(ctx, nil, []RuleChange{{Kind: "update", ID: "a", ExpectedRevision: 1, Rule: testRuleJSON("reject", 0)}}, func(_ context.Context, candidate *RuleSetSnapshot) error {
 		calls++
-		if candidate.Version != 2 || len(candidate.Rules) != 2 {
-			t.Fatalf("validator got partial candidate: %+v", candidate)
-		}
+		requireDataTruef(t, !(candidate.Version != 2 || len(candidate.Rules) != 2), "validator got partial candidate: %+v", candidate)
 		return rejected
 	})
-	if !errors.Is(err, rejected) || calls != 1 {
-		t.Fatalf("validator=%d error=%v", calls, err)
-	}
+	requireDataTruef(t, !(!errors.Is(err, rejected) || calls != 1), "validator=%d error=%v", calls, err)
 	seen, err := second.LoadRuleSet(ctx)
-	if err != nil || seen.Version != 1 || seen.Rules[0].Name != "same name" || seen.Rules[0].Revision != 1 {
-		t.Fatalf("failed mutation escaped transaction: %+v %v", seen, err)
-	}
+	requireDataTruef(t, !(err != nil || seen.Version != 1 || seen.Rules[0].Name != "same name" || seen.Rules[0].Revision != 1), "failed mutation escaped transaction: %+v %v", seen, err)
 	page, err := second.ListRules(ctx, RuleListFilter{Search: "SAME", Page: 2, PageSize: 1})
-	if err != nil || page.Total != 2 || page.Version != 1 || len(page.Rules) != 1 || page.Rules[0].ID != "b" {
-		t.Fatalf("page=%+v err=%v", page, err)
-	}
+	requireDataTruef(t, !(err != nil || page.Total != 2 || page.Version != 1 || len(page.Rules) != 1 || page.Rules[0].ID != "b"), "page=%+v err=%v", page, err)
 	page, err = second.ListRules(ctx, RuleListFilter{Search: "%"})
-	if err != nil || page.Total != 0 {
-		t.Fatalf("search wildcard was not literal: %+v %v", page, err)
-	}
+	requireDataTruef(t, !(err != nil || page.Total != 0), "search wildcard was not literal: %+v %v", page, err)
 	priority, order, disabled := 10, int64(0), false
 	snapshot, err = first.PublishRules(ctx, nil, []RuleChange{
 		{Kind: "patch", ID: "a", ExpectedRevision: 1, OrderIndex: &order},
 		{Kind: "patch", ID: "b", ExpectedRevision: 1, Priority: &priority, OrderIndex: &order, Enabled: &disabled},
 	}, acceptRuleSet)
-	if err != nil || snapshot.Version != 2 || snapshot.Rules[0].ID != "a" || snapshot.Rules[1].Enabled {
-		t.Fatalf("reorder=%+v err=%v", snapshot, err)
-	}
+	requireDataTruef(t, !(err != nil || snapshot.Version != 2 || snapshot.Rules[0].ID != "a" || snapshot.Rules[1].Enabled), "reorder=%+v err=%v", snapshot, err)
 	var doc map[string]any
-	if err := json.Unmarshal(snapshot.Rules[1].Rule, &doc); err != nil || doc["enabled"] != false || doc["priority"] != float64(10) {
-		t.Fatalf("index and AST disagree: %v %v", doc, err)
+	{
+		err := json.Unmarshal(snapshot.Rules[1].Rule, &doc)
+		requireDataTruef(t, !(err != nil || doc["enabled"] != false || doc["priority"] != float64(10)), "index and AST disagree: %v %v", doc, err)
 	}
 	_, err = first.PublishRules(ctx, nil, []RuleChange{
 		{Kind: "delete", ID: "a", ExpectedRevision: 2},
 		{Kind: "delete", ID: "b", ExpectedRevision: 1},
 	}, acceptRuleSet)
-	if !errors.Is(err, ErrRuleConflict) {
-		t.Fatalf("non-atomic batch: %v", err)
-	}
-	if row, _ := first.GetRule(ctx, "a"); row == nil {
-		t.Fatal("first batch deletion committed before conflict")
+	requireDataTruef(t, !(!errors.Is(err, ErrRuleConflict)), "non-atomic batch: %v", err)
+	{
+		row, _ := first.GetRule(ctx, "a")
+		requireDataTrue(t, !(row == nil), "first batch deletion committed before conflict")
 	}
 	snapshot, err = first.PublishRules(ctx, nil, []RuleChange{{Kind: "duplicate", ID: "a", NewID: "copy", ExpectedRevision: 2}}, acceptRuleSet)
-	if err != nil || snapshot.Version != 3 || len(snapshot.Rules) != 3 {
-		t.Fatalf("duplicate=%+v %v", snapshot, err)
-	}
+	requireDataTruef(t, !(err != nil || snapshot.Version != 3 || len(snapshot.Rules) != 3), "duplicate=%+v %v", snapshot, err)
 	copyRow, _ := first.GetRule(ctx, "copy")
-	if copyRow.Revision != 1 || copyRow.LegacyName != "" || copyRow.Source != "duplicate:a" || copyRow.Name != "same name (copy)" {
-		t.Fatalf("copy metadata=%+v", copyRow)
-	}
+	requireDataTruef(t, !(copyRow.Revision != 1 || copyRow.LegacyName != "" || copyRow.Source != "duplicate:a" || copyRow.Name != "same name (copy)"), "copy metadata=%+v", copyRow)
 	encoded, err := json.Marshal(copyRow)
-	if err != nil || !strings.Contains(string(encoded), `"schema_version":1`) || !strings.Contains(string(encoded), `"created_at":"`) || strings.Contains(string(encoded), `"rule":`) {
-		t.Fatalf("flat API JSON=%s err=%v", encoded, err)
-	}
+	requireDataTruef(t, !(err != nil || !strings.Contains(string(encoded), `"schema_version":1`) || !strings.Contains(string(encoded), `"created_at":"`) || strings.Contains(string(encoded), `"rule":`)), "flat API JSON=%s err=%v", encoded, err)
 	var wins, conflicts atomic.Int32
 	var wg sync.WaitGroup
 	for _, st := range []*Store{first, second} {
 		wg.Add(1)
-		go func(st *Store) {
-			defer wg.Done()
-			_, err := st.PublishRules(ctx, nil, []RuleChange{{Kind: "update", ID: "a", ExpectedRevision: 2, Rule: testRuleJSON("concurrent winner", 10)}}, acceptRuleSet)
-			if err == nil {
-				wins.Add(1)
-			} else if errors.Is(err, ErrRuleConflict) {
-				conflicts.Add(1)
-			} else {
-				t.Errorf("concurrent writer: %v", err)
-			}
-		}(st)
+		go func(st *Store) { verifyExerciseRulePublication(st, &t, &ctx, &wins, &conflicts, &wg) }(st)
 	}
 	wg.Wait()
-	if wins.Load() != 1 || conflicts.Load() != 1 {
+	reportStoreTestFailure(t, wins.Load() != 1 || conflicts.Load() != 1, func() {
 		t.Fatalf("wins=%d conflicts=%d", wins.Load(), conflicts.Load())
-	}
-	if version, err := first.RuleSetVersion(ctx); err != nil || version != 4 {
-		t.Fatalf("published version=%d %v", version, err)
+	})
+	{
+		version, err := first.RuleSetVersion(ctx)
+		requireDataTruef(t, !(err != nil || version != 4), "published version=%d %v", version, err)
 	}
 	exerciseRuleSnapshotMarker(t, first, second)
 }
@@ -135,48 +106,34 @@ func exerciseRuleSnapshotMarker(t *testing.T, first, second *Store) {
 	published, err := first.PublishRules(ctx, nil, []RuleChange{
 		{Kind: "create", ID: "language-v2-installed", Rule: testRuleJSON("V2 installed", 0)},
 	}, acceptRuleSet)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, err)
 	installed, err := second.RulesV2Installed(ctx)
-	if err != nil || !installed {
-		t.Fatalf("publication did not persist installation marker: installed=%t err=%v", installed, err)
-	}
-	if _, err := first.ExecContext(ctx, `DELETE FROM settings WHERE key='rules.language.v2'`); err != nil {
-		t.Fatal(err)
+	requireDataTruef(t, !(err != nil || !installed), "publication did not persist installation marker: installed=%t err=%v", installed, err)
+	{
+		_, err := first.ExecContext(ctx, `DELETE FROM settings WHERE key='rules.language.v2'`)
+		requireDataTrue(t, !(err != nil), err)
 	}
 	// Mimic an earlier V2 installation that has the rule but no durable setting.
 	loaded, err := second.LoadRuleSet(ctx)
-	if err != nil || loaded.Version != published.Version || !hasV2Marker(loaded) {
-		t.Fatalf("read-only V2 snapshot: %+v err=%v", loaded, err)
-	}
+	requireDataTruef(t, !(err != nil || loaded.Version != published.Version || !hasV2Marker(loaded)), "read-only V2 snapshot: %+v err=%v", loaded, err)
 	installed, err = second.RulesV2Installed(ctx)
-	if err != nil || installed {
-		t.Fatalf("snapshot load must not write a setting: installed=%t err=%v", installed, err)
-	}
+	requireDataTruef(t, !(err != nil || installed), "snapshot load must not write a setting: installed=%t err=%v", installed, err)
 	for range 2 {
 		installed, err = second.RestoreRulesV2Marker(ctx)
-		if err != nil || !installed {
-			t.Fatalf("restore old installation marker: installed=%t err=%v", installed, err)
-		}
+		requireDataTruef(t, !(err != nil || !installed), "restore old installation marker: installed=%t err=%v", installed, err)
 	}
-	if version, err := first.RuleSetVersion(ctx); err != nil || version != published.Version {
-		t.Fatalf("marker repair changed publication version: %d %v", version, err)
+	{
+		version, err := first.RuleSetVersion(ctx)
+		requireDataTruef(t, !(err != nil || version != published.Version), "marker repair changed publication version: %d %v", version, err)
 	}
 	deleted, err := first.PublishRules(ctx, nil, []RuleChange{
 		{Kind: "delete", ID: "language-v2-installed", ExpectedRevision: 1},
 	}, acceptRuleSet)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, err)
 	installed, err = second.RestoreRulesV2Marker(ctx)
-	if err != nil || !installed {
-		t.Fatalf("rule deletion lost durable installation: installed=%t err=%v", installed, err)
-	}
+	requireDataTruef(t, !(err != nil || !installed), "rule deletion lost durable installation: installed=%t err=%v", installed, err)
 	loaded, err = second.LoadRuleSet(ctx)
-	if err != nil || loaded.Version != deleted.Version || hasV2Marker(loaded) {
-		t.Fatalf("marker repair resurrected deleted rule: %+v err=%v", loaded, err)
-	}
+	requireDataTruef(t, !(err != nil || loaded.Version != deleted.Version || hasV2Marker(loaded)), "marker repair resurrected deleted rule: %+v err=%v", loaded, err)
 }
 
 func TestRulesSQLitePublication(t *testing.T) {
@@ -384,4 +341,19 @@ func TestRulesPostgresPublicationAndUpgrade(t *testing.T) {
 	}
 	defer second.Close()
 	exerciseRulePublication(t, first, second)
+}
+
+// verifyExerciseRulePublication exercises one isolated test phase with the original shared state.
+func verifyExerciseRulePublication(st *Store, capturedT **testing.T, capturedCtx *context.Context, capturedWins *atomic.Int32, capturedConflicts *atomic.Int32, capturedWg *sync.WaitGroup) {
+	(*capturedT).Helper()
+
+	defer (*capturedWg).Done()
+	_, err := st.PublishRules((*capturedCtx), nil, []RuleChange{{Kind: "update", ID: "a", ExpectedRevision: 2, Rule: testRuleJSON("concurrent winner", 10)}}, acceptRuleSet)
+	if err == nil {
+		(*capturedWins).Add(1)
+	} else if errors.Is(err, ErrRuleConflict) {
+		(*capturedConflicts).Add(1)
+	} else {
+		(*capturedT).Errorf("concurrent writer: %v", err)
+	}
 }

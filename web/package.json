@@ -13,7 +13,8 @@
     "check:capture": "node check-capture-diff.mjs && node check-capture-inspection.mjs",
     "check:rules": "node check-rules.mjs",
     "check:simulation": "node check-rule-simulation.mjs",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "check:ui-accessibility": "node check-ui-accessibility.mjs"
   },
   "dependencies": {
     "@vue-flow/core": "^1.48.2",

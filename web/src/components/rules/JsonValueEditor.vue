@@ -8,11 +8,19 @@ import {ruleLabel, ruleOptionLabel} from '../../utils/ruleLabels'
 const props = defineProps({modelValue: {type: null as unknown as PropType<JsonValue>, required:true}, path:{type:String,default:''}, depth:{type:Number,default:0}, compact:Boolean, idPrefix:String})
 const emit = defineEmits<{ 'update:modelValue': [value: JsonValue] }>()
 const { t, locale } = useI18n()
-const kind = computed(() => props.modelValue === null ? 'null' : Array.isArray(props.modelValue) ? 'array' : typeof props.modelValue)
+const kind = computed(() => (() => {
+    if (props.modelValue === null) {
+        return 'null'
+    }
+    if (Array.isArray(props.modelValue)) {
+        return 'array'
+    }
+    return typeof props.modelValue
+})())
 const objectEntries = computed(() => props.modelValue && typeof props.modelValue === 'object' && !Array.isArray(props.modelValue) ? Object.entries(props.modelValue) : [])
 function update(value: JsonValue) { emit('update:modelValue', value) }
 function updateText(event: Event) {
-  if (props.compact && (event as InputEvent).isComposing) return
+  if (props.compact && (event as InputEvent).isComposing) { return }
   update((event.target as HTMLTextAreaElement).value)
 }
 function updateNumber(event: Event) {
@@ -20,23 +28,23 @@ function updateNumber(event: Event) {
   const number = Number(input.value)
   const valid = input.value.trim() !== '' && Number.isFinite(number) && (!Number.isInteger(number) || Number.isSafeInteger(number))
   input.setCustomValidity(valid ? '' : t('rules.numberError'))
-  if (valid) update(number)
+  if (valid) { update(number) }
 }
 function changeKind(next: string) {
-  if (next === 'null') update(null)
-  else if (next === 'boolean') update(false)
-  else if (next === 'number') update(0)
-  else if (next === 'string') update('')
-  else if (next === 'array') update([])
-  else if (next === 'object') update({})
+  if (next === 'null') { update(null) }
+  else if (next === 'boolean') { update(false) }
+  else if (next === 'number') { update(0) }
+  else if (next === 'string') { update('') }
+  else if (next === 'array') { update([]) }
+  else if (next === 'object') { update({}) }
 }
-function updateArray(index: number, value: JsonValue) { if (Array.isArray(props.modelValue)) update(props.modelValue.map((item, i) => i === index ? value : item)) }
-function removeArray(index: number) { if (Array.isArray(props.modelValue)) update(props.modelValue.filter((_, i) => i !== index)) }
-function addArray() { if (Array.isArray(props.modelValue)) update([...props.modelValue, null]) }
-function updateObject(key: string, value: JsonValue) { if (props.modelValue && typeof props.modelValue === 'object' && !Array.isArray(props.modelValue)) update({...props.modelValue, [key]: value}) }
+function updateArray(index: number, value: JsonValue) { if (Array.isArray(props.modelValue)) { update(props.modelValue.map((item, i) => i === index ? value : item)) } }
+function removeArray(index: number) { if (Array.isArray(props.modelValue)) { update(props.modelValue.filter((_, i) => i !== index)) } }
+function addArray() { if (Array.isArray(props.modelValue)) { update([...props.modelValue, null]) } }
+function updateObject(key: string, value: JsonValue) { if (props.modelValue && typeof props.modelValue === 'object' && !Array.isArray(props.modelValue)) { update({...props.modelValue, [key]: value}) } }
 function removeObject(key: string) { if (props.modelValue && typeof props.modelValue === 'object' && !Array.isArray(props.modelValue)) { const next = {...props.modelValue}; delete next[key]; update(next) } }
 function addObject() {
-  if (!props.modelValue || typeof props.modelValue !== 'object' || Array.isArray(props.modelValue)) return
+  if (!props.modelValue || typeof props.modelValue !== 'object' || Array.isArray(props.modelValue)) { return }
   let key = 'property'
   let index = 1
   while (Object.hasOwn(props.modelValue, key)) key = `property_${index++}`
@@ -44,7 +52,7 @@ function addObject() {
 }
 function changeKey(oldKey: string, event: Event) {
   const key = (event.target as HTMLInputElement).value
-  if (!props.modelValue || typeof props.modelValue !== 'object' || Array.isArray(props.modelValue)) return
+  if (!props.modelValue || typeof props.modelValue !== 'object' || Array.isArray(props.modelValue)) { return }
   const input = event.target as HTMLInputElement
   try { const next = setObjectProperty(props.modelValue, oldKey, key, props.modelValue[oldKey]!); input.setCustomValidity(''); update(next) } catch { input.setCustomValidity(t('rules.duplicateKey')); input.reportValidity() }
 }

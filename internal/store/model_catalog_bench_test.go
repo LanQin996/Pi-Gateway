@@ -53,46 +53,63 @@ func BenchmarkAccountModelReads(b *testing.B) {
 	for _, n := range []int{1, 20, 100} {
 		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
 			s, ids, key := benchmarkAccountModelFixture(b, n)
-			b.Run("catalog/individual", func(b *testing.B) {
-				b.ReportAllocs()
-				b.ReportMetric(float64(n), "SQL-reads/op")
-				for i := 0; i < b.N; i++ {
-					for _, id := range ids {
-						if _, err := s.GetAccountModelCatalog(ctx, id); err != nil {
-							b.Fatal(err)
-						}
-					}
-				}
-			})
-			b.Run("catalog/batch", func(b *testing.B) {
-				b.ReportAllocs()
-				b.ReportMetric(float64((n+accountModelBatchSize-1)/accountModelBatchSize), "SQL-reads/op")
-				for i := 0; i < b.N; i++ {
-					if _, err := s.GetAccountModelCatalogs(ctx, ids); err != nil {
-						b.Fatal(err)
-					}
-				}
-			})
-			b.Run("restrictions/individual", func(b *testing.B) {
-				b.ReportAllocs()
-				b.ReportMetric(float64(n), "SQL-reads/op")
-				for i := 0; i < b.N; i++ {
-					for _, id := range ids {
-						if _, err := s.DisabledModelsForAccount(ctx, id, key); err != nil {
-							b.Fatal(err)
-						}
-					}
-				}
-			})
-			b.Run("restrictions/batch", func(b *testing.B) {
-				b.ReportAllocs()
-				b.ReportMetric(float64((n+accountModelBatchSize-1)/accountModelBatchSize), "SQL-reads/op")
-				for i := 0; i < b.N; i++ {
-					if _, err := s.DisabledModelsForAccounts(ctx, ids, key); err != nil {
-						b.Fatal(err)
-					}
-				}
-			})
+			b.Run("catalog/individual", func(b *testing.B) { benchmarkAccountModelReadsCase1(b, ctx, ids, n, s) })
+			b.Run("catalog/batch", func(b *testing.B) { benchmarkAccountModelReadsCase2(b, ctx, ids, n, s) })
+			b.Run("restrictions/individual", func(b *testing.B) { benchmarkAccountModelReadsCase3(b, ctx, ids, key, n, s) })
+			b.Run("restrictions/batch", func(b *testing.B) { benchmarkAccountModelReadsCase4(b, ctx, ids, key, n, s) })
 		})
+	}
+}
+
+func benchmarkAccountModelReadsCase1(b *testing.B, ctx context.Context, ids []int64, n int, s *Store) {
+	b.ReportAllocs()
+	b.ReportMetric(float64(n), "SQL-reads/op")
+	for i := 0; i < b.N; i++ {
+		for _, id := range ids {
+			{
+				_, err := s.GetAccountModelCatalog(ctx, id)
+				reportStoreTestFailure(b, err != nil, func() {
+					b.Fatal(err)
+				})
+			}
+		}
+	}
+}
+func benchmarkAccountModelReadsCase2(b *testing.B, ctx context.Context, ids []int64, n int, s *Store) {
+	b.ReportAllocs()
+	b.ReportMetric(float64((n+accountModelBatchSize-1)/accountModelBatchSize), "SQL-reads/op")
+	for i := 0; i < b.N; i++ {
+		{
+			_, err := s.GetAccountModelCatalogs(ctx, ids)
+			reportStoreTestFailure(b, err != nil, func() {
+				b.Fatal(err)
+			})
+		}
+	}
+}
+func benchmarkAccountModelReadsCase3(b *testing.B, ctx context.Context, ids []int64, key *APIKey, n int, s *Store) {
+	b.ReportAllocs()
+	b.ReportMetric(float64(n), "SQL-reads/op")
+	for i := 0; i < b.N; i++ {
+		for _, id := range ids {
+			{
+				_, err := s.DisabledModelsForAccount(ctx, id, key)
+				reportStoreTestFailure(b, err != nil, func() {
+					b.Fatal(err)
+				})
+			}
+		}
+	}
+}
+func benchmarkAccountModelReadsCase4(b *testing.B, ctx context.Context, ids []int64, key *APIKey, n int, s *Store) {
+	b.ReportAllocs()
+	b.ReportMetric(float64((n+accountModelBatchSize-1)/accountModelBatchSize), "SQL-reads/op")
+	for i := 0; i < b.N; i++ {
+		{
+			_, err := s.DisabledModelsForAccounts(ctx, ids, key)
+			reportStoreTestFailure(b, err != nil, func() {
+				b.Fatal(err)
+			})
+		}
 	}
 }

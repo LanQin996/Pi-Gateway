@@ -47,7 +47,7 @@ const choices = computed(() => {
 		}
 	}
 	for (const model of new Set([...selected.value, ...inheritedByModel.value.keys()])) {
-		if (!existing.has(model)) listed.push({ id: model, name: model, sources: [], missing: true })
+		if (!existing.has(model)) { listed.push({ id: model, name: model, sources: [], missing: true }) }
 	}
 	const query = search.value.trim().toLowerCase()
 	return listed.filter(model => !query || `${model.name} ${model.id} ${model.sources.join(' ')}`.toLowerCase().includes(query))
@@ -55,7 +55,7 @@ const choices = computed(() => {
 })
 function downloadMetadata(metadata: unknown) {
 	const json = modelMetadataJSON(metadata)
-	if (json === undefined) return
+	if (json === undefined) { return }
 	const url = URL.createObjectURL(new Blob([json], { type: 'application/json;charset=utf-8' }))
 	const link = document.createElement('a')
 	link.href = url
@@ -66,7 +66,7 @@ function downloadMetadata(metadata: unknown) {
 	setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 function toggle(model: string, checked: boolean) {
-	if (props.disabled || inheritedByModel.value.has(model)) return
+	if (props.disabled || inheritedByModel.value.has(model)) { return }
 	selected.value = checked ? [...new Set([...selected.value, model])] : selected.value.filter(value => value !== model)
 }
 </script>
@@ -86,7 +86,7 @@ function toggle(model: string, checked: boolean) {
 		<p class="control-hint">{{ c('catalogHint') }}</p>
 		<p class="control-hint">{{ c('catalogPermissionHint') }}</p>
 		<label class="search-field model-search"><Search :size="16" aria-hidden="true" /><input v-model="search" class="input" :placeholder="c('searchModels')" :aria-label="c('searchModels')" /></label>
-		<p v-if="loading" class="control-hint" role="status">{{ c('loadingModels') }}</p>
+		<output v-if="loading" class="control-hint" >{{ c('loadingModels') }}</output>
 		<div v-if="choices.length" class="model-choices">
 			<div v-for="(model, index) in choices" :key="model.id" class="model-choice" :class="{ inherited: inheritedByModel.has(model.id) }">
 				<input :id="`${id}-model-${index}`" type="checkbox" :checked="selected.includes(model.id) || inheritedByModel.has(model.id)" :disabled="disabled || inheritedByModel.has(model.id)" @change="toggle(model.id, ($event.target as HTMLInputElement).checked)" />
@@ -110,7 +110,7 @@ function toggle(model: string, checked: boolean) {
 				</div>
 			</div>
 		</div>
-		<p v-else-if="!loading" class="control-hint" role="status">{{ search.trim() ? c('noMatches') : sources.length ? c('emptyCatalog') : c('noSources') }}</p>
+		<output v-else-if="!loading" class="control-hint" >{{ (() => { if (search.trim()) { return c('noMatches'); } if (sources.length) { return c('emptyCatalog'); } return c('noSources'); })() }}</output>
 		<p v-if="inherited.length" class="control-hint">{{ c('inheritedHint') }}</p>
 	</section>
 </template>

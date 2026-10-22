@@ -15,159 +15,73 @@ func TestAccountGroupsAndKeyCRUD(t *testing.T) {
 	b := &Account{Name: "b", Enabled: true}
 	disabled := &Account{Name: "disabled", Enabled: false}
 	for _, account := range []*Account{a, b, disabled} {
-		if err := s.CreateAccount(ctx, account); err != nil {
-			t.Fatal(err)
-		}
+		requireDataNoError(t, s.CreateAccount(ctx, account))
 	}
 	g := &AccountGroup{Name: "first", Enabled: true, Notes: "notes", AccountIDs: []int64{a.ID, disabled.ID, a.ID}}
-	if err := s.CreateAccountGroup(ctx, g); err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, s.CreateAccountGroup(ctx, g))
 	other := &AccountGroup{Name: "second", Enabled: false, AccountIDs: []int64{b.ID}}
-	if err := s.CreateAccountGroup(ctx, other); err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, s.CreateAccountGroup(ctx, other))
 	got, err := s.GetAccountGroup(ctx, g.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Name != "first" || got.Notes != "notes" || !reflect.DeepEqual(got.AccountIDs, []int64{a.ID, disabled.ID}) || got.CreatedAt == 0 || got.UpdatedAt == 0 {
-		t.Fatalf("group=%+v", got)
-	}
+	requireDataNoError(t, err)
+	requireDataTruef(t, !(got.Name != "first" || got.Notes != "notes" || !reflect.DeepEqual(got.AccountIDs, []int64{a.ID, disabled.ID}) || got.CreatedAt == 0 || got.UpdatedAt == 0), "group=%+v", got)
 	k := &APIKey{Name: "key", Enabled: true, Label: "label", MaxConcurrency: 3, RequestsPerMinute: 7, DailyLimitUSD: 1.25, WeeklyLimitUSD: 8.5, Strategy: "smart", Transport: "ws", GroupIDs: []int64{g.ID, other.ID, g.ID}}
-	if err := s.CreateKey(ctx, k); err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, s.CreateKey(ctx, k))
 	checkKey := func(key *APIKey) {
 		t.Helper()
-		if key == nil || key.Label != k.Label || key.MaxConcurrency != k.MaxConcurrency || key.RequestsPerMinute != k.RequestsPerMinute || key.DailyLimitUSD != k.DailyLimitUSD || key.WeeklyLimitUSD != k.WeeklyLimitUSD || key.Strategy != k.Strategy || key.Transport != k.Transport || !reflect.DeepEqual(key.GroupIDs, uniqueIDs(k.GroupIDs)) {
-			t.Fatalf("key=%+v want=%+v", key, k)
-		}
+		requireDataTruef(t, !(key == nil || key.Label != k.Label || key.MaxConcurrency != k.MaxConcurrency || key.RequestsPerMinute != k.RequestsPerMinute || key.DailyLimitUSD != k.DailyLimitUSD || key.WeeklyLimitUSD != k.WeeklyLimitUSD || key.Strategy != k.Strategy || key.Transport != k.Transport || !reflect.DeepEqual(key.GroupIDs, uniqueIDs(k.GroupIDs))), "key=%+v want=%+v", key, k)
 	}
 	key, err := s.GetKey(ctx, k.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, err)
 	checkKey(key)
 	key, err = s.GetKeyByValue(ctx, k.Key)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, err)
 	checkKey(key)
 	keys, err := s.ListKeys(ctx)
-	if err != nil || len(keys) != 1 {
-		t.Fatalf("keys=%+v %v", keys, err)
-	}
+	requireDataTruef(t, !(err != nil || len(keys) != 1), "keys=%+v %v", keys, err)
 	checkKey(keys[0])
 	eligible, err := s.EligibleAccountsForKey(ctx, k)
-	if err != nil || len(eligible) != 1 || eligible[0].ID != a.ID {
-		t.Fatalf("eligible=%+v %v", eligible, err)
-	}
+	requireDataTruef(t, !(err != nil || len(eligible) != 1 || eligible[0].ID != a.ID), "eligible=%+v %v", eligible, err)
 	g.Enabled = false
 	g.AccountIDs = nil
-	if err := s.UpdateAccountGroup(ctx, g); err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, s.UpdateAccountGroup(ctx, g))
 	eligible, err = s.EligibleAccountsForKey(ctx, k)
-	if err != nil || len(eligible) != 0 {
-		t.Fatalf("disabled groups must not fall back to all: %+v %v", eligible, err)
-	}
+	requireDataTruef(t, !(err != nil || len(eligible) != 0), "disabled groups must not fall back to all: %+v %v", eligible, err)
 	got, err = s.GetAccountGroup(ctx, g.ID)
-	if err != nil || len(got.AccountIDs) != 2 {
-		t.Fatalf("disable deleted members: %+v %v", got, err)
-	}
+	requireDataTruef(t, !(err != nil || len(got.AccountIDs) != 2), "disable deleted members: %+v %v", got, err)
 	g.Enabled = true
-	if err := s.UpdateAccountGroup(ctx, g); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.SetAccountGroupAccounts(ctx, g.ID, []int64{b.ID, b.ID}); err != nil {
-		t.Fatal(err)
+	requireDataNoError(t, s.UpdateAccountGroup(ctx, g))
+	requireDataNoError(t, s.SetAccountGroupAccounts(ctx, g.ID, []int64{b.ID, b.ID}))
+	got, err = s.GetAccountGroup(ctx, g.ID)
+	requireDataTruef(t, !(err != nil || !reflect.DeepEqual(got.AccountIDs, []int64{b.ID})), "replaced members=%+v %v", got, err)
+	{
+		err := s.SetAccountGroupAccounts(ctx, g.ID, []int64{a.ID, 9999})
+		requireDataTrue(t, !(err == nil), "nonexistent account accepted")
 	}
 	got, err = s.GetAccountGroup(ctx, g.ID)
-	if err != nil || !reflect.DeepEqual(got.AccountIDs, []int64{b.ID}) {
-		t.Fatalf("replaced members=%+v %v", got, err)
-	}
-	if err := s.SetAccountGroupAccounts(ctx, g.ID, []int64{a.ID, 9999}); err == nil {
-		t.Fatal("nonexistent account accepted")
-	}
-	got, err = s.GetAccountGroup(ctx, g.ID)
-	if err != nil || !reflect.DeepEqual(got.AccountIDs, []int64{b.ID}) {
-		t.Fatalf("failed replacement not rolled back: %+v %v", got, err)
-	}
-	if err := s.SetKeyGroups(ctx, k.ID, []int64{other.ID}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.SetKeyGroups(ctx, k.ID, []int64{g.ID, 9999}); err == nil {
-		t.Fatal("nonexistent group accepted")
+	requireDataTruef(t, !(err != nil || !reflect.DeepEqual(got.AccountIDs, []int64{b.ID})), "failed replacement not rolled back: %+v %v", got, err)
+	requireDataNoError(t, s.SetKeyGroups(ctx, k.ID, []int64{other.ID}))
+	{
+		err := s.SetKeyGroups(ctx, k.ID, []int64{g.ID, 9999})
+		requireDataTrue(t, !(err == nil), "nonexistent group accepted")
 	}
 	ids, err := s.ListKeyGroupIDs(ctx, k.ID)
-	if err != nil || !reflect.DeepEqual(ids, []int64{other.ID}) {
-		t.Fatalf("key bindings not rolled back: %v %v", ids, err)
-	}
+	requireDataTruef(t, !(err != nil || !reflect.DeepEqual(ids, []int64{other.ID})), "key bindings not rolled back: %v %v", ids, err)
 	k.GroupIDs = []int64{g.ID}
 	k.Label = "edited"
 	k.MaxConcurrency = 9
 	k.RequestsPerMinute = 13
 	k.DailyLimitUSD = 2.5
 	k.WeeklyLimitUSD = 16
-	if err := s.UpdateKey(ctx, k); err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, s.UpdateKey(ctx, k))
 	key, err = s.GetKey(ctx, k.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, err)
 	checkKey(key)
-	if err := s.MarkKeyUsed(ctx, k.ID); err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, s.MarkKeyUsed(ctx, k.ID))
 	key, err = s.GetKey(ctx, k.ID)
-	if err != nil || key.RequestCount != 1 || key.LastUsedAt == 0 {
-		t.Fatalf("key usage=%+v %v", key, err)
-	}
-	if err := s.SetKeyGroups(ctx, k.ID, nil); err != nil {
-		t.Fatal(err)
-	}
-	eligible, err = s.EligibleAccountsForKey(ctx, k)
-	if err != nil || len(eligible) != 2 {
-		t.Fatalf("unbound key=%+v %v", eligible, err)
-	}
-	groups, err := s.ListAccountGroups(ctx)
-	if err != nil || len(groups) != 2 {
-		t.Fatalf("groups=%+v %v", groups, err)
-	}
-	if err := s.SetKeyGroups(ctx, k.ID, []int64{g.ID}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.DeleteAccountGroup(ctx, g.ID); err != nil {
-		t.Fatal(err)
-	}
-	ids, err = s.ListKeyGroupIDs(ctx, k.ID)
-	if err != nil || len(ids) != 0 {
-		t.Fatalf("dangling group binding=%v %v", ids, err)
-	}
-	got, err = s.GetAccountGroup(ctx, g.ID)
-	if err != nil || got != nil {
-		t.Fatalf("deleted group=%+v %v", got, err)
-	}
-	if err := s.SetKeyGroups(ctx, k.ID, []int64{other.ID}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.DeleteKey(ctx, k.ID); err != nil {
-		t.Fatal(err)
-	}
-	key, err = s.GetKey(ctx, k.ID)
-	if err != nil || key != nil {
-		t.Fatalf("deleted key=%+v %v", key, err)
-	}
-	key, err = s.GetKeyByValue(ctx, k.Key)
-	if err != nil || key != nil {
-		t.Fatalf("deleted key value=%+v %v", key, err)
-	}
-	ids, err = s.ListKeyGroupIDs(ctx, k.ID)
-	if err != nil || len(ids) != 0 {
-		t.Fatalf("dangling key binding=%v %v", ids, err)
-	}
+	requireDataTruef(t, !(err != nil || key.RequestCount != 1 || key.LastUsedAt == 0), "key usage=%+v %v", key, err)
+	func() {
+		verifyAccountGroupsAndKeyCRUD(&ctx, verifyAccountGroupsAndKeyCRUDState{capturedT: &t, capturedS: &s, capturedG: &g, capturedOther: &other, capturedGot: &got, capturedErr: &err, capturedK: &k, capturedKey: &key, capturedEligible: &eligible, capturedIds: &ids})
+	}()
 }
 
 func TestAccountSchedulingStateReadback(t *testing.T) {
@@ -225,4 +139,40 @@ func TestKeyAndGroupWritesAreAtomic(t *testing.T) {
 	if err != nil || got.Name != "original" {
 		t.Fatalf("partial key update persisted: %+v %v", got, err)
 	}
+}
+
+type verifyAccountGroupsAndKeyCRUDState struct {
+	capturedT        **testing.T
+	capturedS        **Store
+	capturedG        **AccountGroup
+	capturedOther    **AccountGroup
+	capturedGot      **AccountGroup
+	capturedErr      *error
+	capturedK        **APIKey
+	capturedKey      **APIKey
+	capturedEligible *[]*Account
+	capturedIds      *[]int64
+}
+
+// verifyAccountGroupsAndKeyCRUD exercises one isolated test phase with the original shared state.
+func verifyAccountGroupsAndKeyCRUD(capturedCtx *context.Context, state verifyAccountGroupsAndKeyCRUDState) {
+	requireDataNoError((*state.capturedT), (*state.capturedS).SetKeyGroups((*capturedCtx), (*state.capturedK).ID, nil))
+	(*state.capturedEligible), (*state.capturedErr) = (*state.capturedS).EligibleAccountsForKey((*capturedCtx), (*state.capturedK))
+	requireDataTruef((*state.capturedT), !((*state.capturedErr) != nil || len((*state.capturedEligible)) != 2), "unbound key=%+v %v", (*state.capturedEligible), (*state.capturedErr))
+	groups, err := (*state.capturedS).ListAccountGroups((*capturedCtx))
+	requireDataTruef((*state.capturedT), !(err != nil || len(groups) != 2), "groups=%+v %v", groups, err)
+	requireDataNoError((*state.capturedT), (*state.capturedS).SetKeyGroups((*capturedCtx), (*state.capturedK).ID, []int64{(*state.capturedG).ID}))
+	requireDataNoError((*state.capturedT), (*state.capturedS).DeleteAccountGroup((*capturedCtx), (*state.capturedG).ID))
+	(*state.capturedIds), err = (*state.capturedS).ListKeyGroupIDs((*capturedCtx), (*state.capturedK).ID)
+	requireDataTruef((*state.capturedT), !(err != nil || len((*state.capturedIds)) != 0), "dangling group binding=%v %v", (*state.capturedIds), err)
+	(*state.capturedGot), err = (*state.capturedS).GetAccountGroup((*capturedCtx), (*state.capturedG).ID)
+	requireDataTruef((*state.capturedT), !(err != nil || (*state.capturedGot) != nil), "deleted group=%+v %v", (*state.capturedGot), err)
+	requireDataNoError((*state.capturedT), (*state.capturedS).SetKeyGroups((*capturedCtx), (*state.capturedK).ID, []int64{(*state.capturedOther).ID}))
+	requireDataNoError((*state.capturedT), (*state.capturedS).DeleteKey((*capturedCtx), (*state.capturedK).ID))
+	(*state.capturedKey), err = (*state.capturedS).GetKey((*capturedCtx), (*state.capturedK).ID)
+	requireDataTruef((*state.capturedT), !(err != nil || (*state.capturedKey) != nil), "deleted key=%+v %v", (*state.capturedKey), err)
+	(*state.capturedKey), err = (*state.capturedS).GetKeyByValue((*capturedCtx), (*state.capturedK).Key)
+	requireDataTruef((*state.capturedT), !(err != nil || (*state.capturedKey) != nil), "deleted key value=%+v %v", (*state.capturedKey), err)
+	(*state.capturedIds), err = (*state.capturedS).ListKeyGroupIDs((*capturedCtx), (*state.capturedK).ID)
+	requireDataTruef((*state.capturedT), !(err != nil || len((*state.capturedIds)) != 0), "dangling key binding=%v %v", (*state.capturedIds), err)
 }

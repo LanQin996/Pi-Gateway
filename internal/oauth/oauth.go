@@ -338,15 +338,8 @@ func ValidateChatGPTAccessToken(accessToken string) error {
 		}
 	}
 	for _, key := range []string{"client_id", "azp", "aud"} {
-		if value, ok := claims[key].(string); ok && strings.TrimSpace(value) == ClientID {
+		if hasCodexClientID(claims[key]) {
 			return errors.New("oauth: Codex client tokens cannot be used as ChatGPT credentials")
-		}
-		if values, ok := claims[key].([]any); ok {
-			for _, value := range values {
-				if value == ClientID {
-					return errors.New("oauth: Codex client tokens cannot be used as ChatGPT credentials")
-				}
-			}
 		}
 	}
 	return nil
@@ -396,4 +389,17 @@ func ParseAuthorizationInput(input string) (code string, state string) {
 
 	// 4. A bare authorization code.
 	return value, ""
+}
+
+func hasCodexClientID(value any) bool {
+	if text, ok := value.(string); ok {
+		return strings.TrimSpace(text) == ClientID
+	}
+	values, _ := value.([]any)
+	for _, item := range values {
+		if item == ClientID {
+			return true
+		}
+	}
+	return false
 }

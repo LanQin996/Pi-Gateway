@@ -78,22 +78,7 @@ func (m *Manager) RefreshQuota(ctx context.Context, account *store.Account) (*qu
 		creditsErr string
 	)
 
-	report, err := client.FetchUsage(ctx, account, accessToken)
-	if err != nil {
-		reportErr = err.Error()
-		if firstErr == nil {
-			firstErr = err
-		}
-	} else {
-		snapshot.Report = report
-		planType = report.PlanType
-		if report.PlanType != "" && report.PlanType != account.PlanType {
-			account.PlanType = report.PlanType
-		}
-	}
-	if snapshot.Report != nil && reportErr != "" {
-		snapshot.Report.Error = reportErr
-	}
+	planType, reportErr, firstErr = refreshQuotaReport(ctx, client, account, accessToken, snapshot)
 
 	credits, err := client.FetchResetCredits(ctx, account, accessToken)
 	if err != nil {
@@ -246,4 +231,25 @@ func (m *Manager) refreshAllQuotas(ctx context.Context, concurrency int, jitter 
 		}(account)
 	}
 	wg.Wait()
+}
+
+func refreshQuotaReport(ctx context.Context, client *quota.Client, account *store.Account, accessToken string, snapshot *quota.Snapshot) (planType, reportErr string, firstErr error) {
+	report, err := client.FetchUsage(ctx, account, accessToken)
+	if err != nil {
+		reportErr = err.Error()
+		if firstErr == nil {
+			firstErr = err
+		}
+	} else {
+		snapshot.Report = report
+		planType = report.PlanType
+		if report.PlanType != "" && report.PlanType != account.PlanType {
+			account.PlanType = report.PlanType
+		}
+	}
+	if snapshot.Report != nil && reportErr != "" {
+		snapshot.Report.Error = reportErr
+	}
+
+	return planType, reportErr, firstErr
 }

@@ -84,67 +84,7 @@ func oldRulesStore(t *testing.T, path string) *store.Store {
 
 func TestOldInstallationAddsImageDefaultOnce(t *testing.T) {
 	for _, entry := range []string{"ensure", "load"} {
-		t.Run(entry, func(t *testing.T) {
-			path := filepath.Join(runtimeTempDir(t), "old.db")
-			first := oldRulesStore(t, path)
-			second := runtimeStore(t, path)
-			before, err := first.LoadRuleSet(t.Context())
-			if err != nil {
-				t.Fatal(err)
-			}
-			var wg sync.WaitGroup
-			for _, st := range []*store.Store{first, second, first, second} {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					service := New(st)
-					var err error
-					if entry == "ensure" {
-						err = service.Ensure(t.Context())
-					} else {
-						_, _, err = service.Load(t.Context())
-					}
-					if err != nil {
-						t.Errorf("concurrent upgrade: %v", err)
-					}
-				}()
-			}
-			wg.Wait()
-			after, err := first.LoadRuleSet(t.Context())
-			if err != nil || after.Version != before.Version+1 || len(after.Rules) != len(before.Rules)+1 {
-				t.Fatalf("upgrade did not publish exactly once: %+v err=%v", after, err)
-			}
-			for _, row := range before.Rules {
-				got, err := first.GetRule(t.Context(), row.ID)
-				if err != nil || !reflect.DeepEqual(got, row) {
-					t.Fatalf("upgrade changed existing rule %s: %+v err=%v", row.ID, got, err)
-				}
-			}
-			filter, err := first.GetRule(t.Context(), "default-drop-image-generation")
-			if err != nil || filter == nil || !filter.Enabled || filter.Source != "default" {
-				t.Fatalf("missing enabled default: %+v err=%v", filter, err)
-			}
-			engine, _, err := New(second).Load(t.Context())
-			if err != nil {
-				t.Fatal(err)
-			}
-			result, err := engine.Apply(t.Context(), rules.PhaseRequest, &rules.Input{Body: map[string]any{"tools": []any{map[string]any{"type": "image_generation"}}}})
-			if err != nil || result.Body.(map[string]any)["tools"] != nil {
-				t.Fatalf("upgraded default did not filter images: %+v err=%v", result, err)
-			}
-			deleted, err := first.PublishRules(t.Context(), nil, []store.RuleChange{{Kind: "delete", ID: filter.ID, ExpectedRevision: filter.Revision}}, ValidateSnapshot)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := New(second).Ensure(t.Context()); err != nil {
-				t.Fatal(err)
-			}
-			_, version, err := New(second).Load(t.Context())
-			filter, lookupErr := second.GetRule(t.Context(), filter.ID)
-			if err != nil || lookupErr != nil || filter != nil || version != deleted.Version {
-				t.Fatalf("restart resurrected deleted default: filter=%+v version=%d err=%v/%v", filter, version, err, lookupErr)
-			}
-		})
+		t.Run(entry, func(t *testing.T) { oldInstallationAddsImageDefaultOnceCase1(t, entry) })
 	}
 }
 
@@ -197,4 +137,69 @@ func TestDefaultUpgradeValidationRollbackAllowsRetry(t *testing.T) {
 	if err != nil || filter == nil || !filter.Enabled {
 		t.Fatalf("failed upgrade left a completion marker: %+v err=%v", filter, err)
 	}
+}
+
+func oldInstallationAddsImageDefaultOnceCase1(t *testing.T, entry string) {
+	path := filepath.Join(runtimeTempDir(t), "old.db")
+	first := oldRulesStore(t, path)
+	second := runtimeStore(t, path)
+	before, err := first.LoadRuleSet(t.Context())
+	reportTestFailure(t, err != nil, func() {
+		t.Fatal(err)
+	})
+	var wg sync.WaitGroup
+	for _, st := range []*store.Store{first, second, first, second} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			service := New(st)
+			var err error
+			if entry == "ensure" {
+				err = service.Ensure(t.Context())
+			} else {
+				_, _, err = service.Load(t.Context())
+			}
+			reportTestFailure(t, err != nil, func() {
+				t.Errorf("concurrent upgrade: %v", err)
+			})
+		}()
+	}
+	wg.Wait()
+	after, err := first.LoadRuleSet(t.Context())
+	reportTestFailure(t, err != nil || after.Version != before.Version+1 || len(after.Rules) != len(before.Rules)+1, func() {
+		t.Fatalf("upgrade did not publish exactly once: %+v err=%v", after, err)
+	})
+	for _, row := range before.Rules {
+		got, err := first.GetRule(t.Context(), row.ID)
+		reportTestFailure(t, err != nil || !reflect.DeepEqual(got, row), func() {
+			t.Fatalf("upgrade changed existing rule %s: %+v err=%v", row.ID, got, err)
+		})
+	}
+	filter, err := first.GetRule(t.Context(), "default-drop-image-generation")
+	reportTestFailure(t, err != nil || filter == nil || !filter.Enabled || filter.Source != "default", func() {
+		t.Fatalf("missing enabled default: %+v err=%v", filter, err)
+	})
+	engine, _, err := New(second).Load(t.Context())
+	reportTestFailure(t, err != nil, func() {
+		t.Fatal(err)
+	})
+	result, err := engine.Apply(t.Context(), rules.PhaseRequest, &rules.Input{Body: map[string]any{"tools": []any{map[string]any{"type": "image_generation"}}}})
+	reportTestFailure(t, err != nil || result.Body.(map[string]any)["tools"] != nil, func() {
+		t.Fatalf("upgraded default did not filter images: %+v err=%v", result, err)
+	})
+	deleted, err := first.PublishRules(t.Context(), nil, []store.RuleChange{{Kind: "delete", ID: filter.ID, ExpectedRevision: filter.Revision}}, ValidateSnapshot)
+	reportTestFailure(t, err != nil, func() {
+		t.Fatal(err)
+	})
+	{
+		err := New(second).Ensure(t.Context())
+		reportTestFailure(t, err != nil, func() {
+			t.Fatal(err)
+		})
+	}
+	_, version, err := New(second).Load(t.Context())
+	filter, lookupErr := second.GetRule(t.Context(), filter.ID)
+	reportTestFailure(t, err != nil || lookupErr != nil || filter != nil || version != deleted.Version, func() {
+		t.Fatalf("restart resurrected deleted default: filter=%+v version=%d err=%v/%v", filter, version, err, lookupErr)
+	})
 }

@@ -16,9 +16,23 @@ const labels = computed(() => locale.value === 'zh-CN'
 	: { subtitle: 'Request route, tokens, latency and billing details', overview: 'Request overview', requestId: 'Request ID', startedAt: 'Started at', apiKey: 'API key', account: 'Account', model: 'Model', transport: 'Transport', outcome: 'Outcome', status: 'Status / error', tokens: 'Token details', latency: 'Latency details', billing: 'Billing', reasoning: 'Reasoning tokens' })
 const detailItems = computed(() => {
 	const row = props.record
-	if (!row) return []
+	if (!row) { return [] }
 	return [
-		{ label: locale.value === 'zh-CN' ? '请求类型' : 'Request type', value: row.request_kind === 'compaction' ? (locale.value === 'zh-CN' ? '压缩请求' : 'Compaction request') : row.request_kind === 'generation' ? (locale.value === 'zh-CN' ? '生成请求' : 'Generation request') : '—', mono: false },
+		{ label: locale.value === 'zh-CN' ? '请求类型' : 'Request type', value: (() => {
+    if (row.request_kind === 'compaction') {
+        if (locale.value === 'zh-CN') {
+            return '压缩请求'
+        }
+        return 'Compaction request'
+    }
+    if (row.request_kind === 'generation') {
+        if (locale.value === 'zh-CN') {
+            return '生成请求'
+        }
+        return 'Generation request'
+    }
+    return '—'
+})(), mono: false },
 		{ label: labels.value.requestId, value: row.request_id || '—', mono: true },
 		{ label: labels.value.startedAt, value: formatDateTime(row.started_at), mono: true },
 		{ label: labels.value.apiKey, value: row.api_key_name || '—', mono: true },

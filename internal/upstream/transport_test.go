@@ -42,14 +42,17 @@ func TestSSEIdleTimeoutAfterFirstEvent(t *testing.T) {
 		events++
 		return nil
 	})
-	if !IsIdleTimeoutError(err) || !errors.Is(err, ErrIdleTimeout) {
+	reportTestFailure(t, !IsIdleTimeoutError(err) || !errors.Is(err, ErrIdleTimeout), func() {
 		t.Fatalf("expected identifiable idle timeout, got %v", err)
-	}
-	if events != 1 {
+	})
+	reportTestFailure(t, events != 1, func() {
 		t.Fatalf("events=%d want 1", events)
-	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("idle timeout took too long: %s", elapsed)
+	})
+	{
+		elapsed := time.Since(started)
+		reportTestFailure(t, elapsed > time.Second, func() {
+			t.Fatalf("idle timeout took too long: %s", elapsed)
+		})
 	}
 }
 
@@ -73,15 +76,18 @@ func TestSSEResponseHeaderTimeout(t *testing.T) {
 	defer cancel()
 	started := time.Now()
 	_, err := c.Stream(ctx, &Request{Transport: "sse", Body: []byte(`{}`)}, func(*Event) error { return nil })
-	if ctx.Err() != nil || err == nil || !strings.Contains(err.Error(), "timeout awaiting response headers") {
+	reportTestFailure(t, ctx.Err() != nil || err == nil || !strings.Contains(err.Error(), "timeout awaiting response headers"), func() {
 		t.Fatalf("expected response header timeout, got %v", err)
-	}
+	})
 	var netErr net.Error
-	if !errors.As(err, &netErr) || !netErr.Timeout() {
+	reportTestFailure(t, !errors.As(err, &netErr) || !netErr.Timeout(), func() {
 		t.Fatalf("expected net timeout error, got %T: %v", err, err)
-	}
-	if elapsed := time.Since(started); elapsed > time.Second {
-		t.Fatalf("response header timeout took too long: %s", elapsed)
+	})
+	{
+		elapsed := time.Since(started)
+		reportTestFailure(t, elapsed > time.Second, func() {
+			t.Fatalf("response header timeout took too long: %s", elapsed)
+		})
 	}
 }
 
@@ -114,62 +120,23 @@ func TestWSIdleTimeoutDoesNotFallbackToSSE(t *testing.T) {
 	started := time.Now()
 	events := 0
 	_, err := c.Stream(ctx, &Request{Transport: "auto", Body: []byte(`{}`)}, func(*Event) error { events++; return nil })
-	if !IsIdleTimeoutError(err) || !errors.Is(err, ErrIdleTimeout) || events != 0 || time.Since(started) > time.Second {
+	reportTestFailure(t, !IsIdleTimeoutError(err) || !errors.Is(err, ErrIdleTimeout) || events != 0 || time.Since(started) > time.Second, func() {
 		t.Fatalf("expected prompt idle timeout before any event, got %v events=%d", err, events)
-	}
+	})
 	var te *transportError
-	if !errors.As(err, &te) || te.requestNotSent {
+	reportTestFailure(t, !errors.As(err, &te) || te.requestNotSent, func() {
 		t.Fatalf("sent request was not recorded: %v", err)
-	}
-	if creates.Load() != 1 || posts.Load() != 0 {
+	})
+	reportTestFailure(t, creates.Load() != 1 || posts.Load() != 0, func() {
 		t.Fatalf("auto retried or fell back: websocket=%d sse=%d", creates.Load(), posts.Load())
-	}
+	})
 }
 
 func TestWSHandshakeFailurePreservesFailureErrorAndFallbackPolicy(t *testing.T) {
 	for _, transport := range []string{"websocket", "auto"} {
 		for _, status := range []int{200, 302, 400, 401, 403, 404, 426, 429, 500, 502, 503, 599} {
 			t.Run(fmt.Sprintf("%s/%d", transport, status), func(t *testing.T) {
-				const payload = `{"error":{"code":"upstream_rejected","message":"rejected request"}}`
-				var handshakes, posts atomic.Int32
-				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if r.Method == http.MethodPost {
-						posts.Add(1)
-						fmt.Fprint(w, "data: {\"type\":\"response.completed\"}\n\n")
-						return
-					}
-					handshakes.Add(1)
-					w.Header().Set("x-request-id", "req-handshake")
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(status)
-					fmt.Fprint(w, payload)
-				}))
-				defer server.Close()
-				c := testClient(t, server.URL)
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				defer cancel()
-				events := 0
-				res, err := c.Stream(ctx, &Request{Transport: transport, Body: []byte(`{}`)}, func(*Event) error { events++; return nil })
-				if handshakes.Load() != 1 {
-					t.Fatalf("handshakes=%d want 1", handshakes.Load())
-				}
-				if transport == "auto" && status >= 500 {
-					if err != nil || posts.Load() != 1 || events != 1 || res == nil || res.FallbackFrom != "websocket" || res.Transport != "sse" {
-						t.Fatalf("expected one safe fallback: res=%+v err=%v posts=%d events=%d", res, err, posts.Load(), events)
-					}
-					return
-				}
-				var failure *FailureError
-				if !errors.As(err, &failure) || failure.Status != status || failure.Code != "upstream_rejected" || failure.RequestID != "req-handshake" || string(failure.Payload) != payload || failure.Message == "" {
-					t.Fatalf("lost structured handshake failure: %+v error=%v", failure, err)
-				}
-				if res == nil || res.Status != status || posts.Load() != 0 || events != 0 || !IsFailureError(err) {
-					t.Fatalf("unexpected fallback/result: res=%+v posts=%d events=%d error=%v", res, posts.Load(), events, err)
-				}
-				var te *transportError
-				if !errors.As(err, &te) || !te.requestNotSent {
-					t.Fatalf("pre-send failure not recorded: %v", err)
-				}
+				runWSHandshakeFailurePreservesFailureErrorAndFallbackPolicyCase(t, &transport, &status)
 			})
 		}
 	}
@@ -177,83 +144,13 @@ func TestWSHandshakeFailurePreservesFailureErrorAndFallbackPolicy(t *testing.T) 
 
 func TestWSSentBeforeFirstEventDoesNotFallback(t *testing.T) {
 	for _, mode := range []string{"close", "invalid-json"} {
-		t.Run(mode, func(t *testing.T) {
-			var creates, posts atomic.Int32
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method == http.MethodPost {
-					posts.Add(1)
-					fmt.Fprint(w, "data: {\"type\":\"response.completed\"}\n\n")
-					return
-				}
-				socket, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
-				if err != nil {
-					return
-				}
-				defer socket.Close()
-				if _, _, err := socket.ReadMessage(); err != nil {
-					return
-				}
-				creates.Add(1)
-				if mode == "invalid-json" {
-					_ = socket.WriteMessage(websocket.TextMessage, []byte("invalid json"))
-				}
-			}))
-			defer server.Close()
-			c := testClient(t, server.URL)
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			events := 0
-			_, err := c.Stream(ctx, &Request{Transport: "auto", Body: []byte(`{}`)}, func(*Event) error { events++; return nil })
-			var te *transportError
-			if !errors.As(err, &te) || te.requestNotSent || te.eventsEmitted || events != 0 || creates.Load() != 1 || posts.Load() != 0 {
-				t.Fatalf("unsafe replay: error=%v events=%d creates=%d posts=%d", err, events, creates.Load(), posts.Load())
-			}
-		})
+		t.Run(mode, func(t *testing.T) { runWSSentBeforeFirstEventDoesNotFallbackCase(t, &mode) })
 	}
 }
 
 func TestWSConnectionFailureFallbackPreservesFinalError(t *testing.T) {
 	for _, failSSE := range []bool{false, true} {
-		t.Run(fmt.Sprint(failSSE), func(t *testing.T) {
-			var posts, dials atomic.Int32
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodPost {
-					t.Errorf("unexpected method: %s", r.Method)
-				}
-				posts.Add(1)
-				if failSSE {
-					w.Header().Set("x-request-id", "final-sse")
-					w.WriteHeader(http.StatusTooManyRequests)
-					fmt.Fprint(w, `{"error":{"code":"final_failure","message":"rate limit"}}`)
-					return
-				}
-				fmt.Fprint(w, "data: {\"type\":\"response.completed\"}\n\n")
-			}))
-			defer server.Close()
-			factory := egress.NewFactory(egress.Options{})
-			factory.BaseDialer = func(ctx context.Context, network, addr string) (net.Conn, error) {
-				if dials.Add(1) == 1 {
-					return nil, &net.OpError{Op: "dial", Net: network, Err: errors.New("injected connection failure")}
-				}
-				return (&net.Dialer{}).DialContext(ctx, network, addr)
-			}
-			c := New(Config{SSEURL: server.URL, WSURL: "ws" + strings.TrimPrefix(server.URL, "http")}, factory)
-			defer c.Close()
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			res, err := c.Stream(ctx, &Request{Transport: "auto", Body: []byte(`{}`)}, func(*Event) error { return nil })
-			if posts.Load() != 1 || dials.Load() != 2 {
-				t.Fatalf("posts=%d dials=%d", posts.Load(), dials.Load())
-			}
-			if failSSE {
-				var failure *FailureError
-				if !errors.As(err, &failure) || failure.Code != "final_failure" || failure.Status != 429 || failure.RequestID != "final-sse" {
-					t.Fatalf("lost final SSE failure: %v", err)
-				}
-			} else if err != nil || res == nil || res.FallbackFrom != "websocket" {
-				t.Fatalf("expected safe fallback, got res=%+v error=%v", res, err)
-			}
-		})
+		t.Run(fmt.Sprint(failSSE), func(t *testing.T) { runWSConnectionFailureFallbackPreservesFinalErrorCase(t, &failSSE) })
 	}
 }
 
@@ -312,9 +209,9 @@ func TestWSWriteFailureDoesNotFallback(t *testing.T) {
 			defer cancel()
 			_, err := c.Stream(ctx, &Request{Transport: "auto", Body: []byte(`{}`)}, func(*Event) error { return nil })
 			var te *transportError
-			if !errors.Is(err, injected) || !errors.As(err, &te) || te.requestNotSent || handshakes.Load() != 1 || posts.Load() != 0 {
+			reportTestFailure(t, !errors.Is(err, injected) || !errors.As(err, &te) || te.requestNotSent || handshakes.Load() != 1 || posts.Load() != 0, func() {
 				t.Fatalf("write failure replayed: err=%v handshakes=%d posts=%d", err, handshakes.Load(), posts.Load())
-			}
+			})
 		})
 	}
 }
@@ -336,8 +233,11 @@ func TestWSFallbackRequiresProofRequestNotSent(t *testing.T) {
 		{"sse-error", &transportError{err: connectionError, transport: "sse", requestNotSent: true}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := canFallbackToSSE(fmt.Errorf("wrapped: %w", tc.err)); got != tc.want {
-				t.Fatalf("canFallbackToSSE=%v want=%v", got, tc.want)
+			{
+				got := canFallbackToSSE(fmt.Errorf("wrapped: %w", tc.err))
+				reportTestFailure(t, got != tc.want, func() {
+					t.Fatalf("canFallbackToSSE=%v want=%v", got, tc.want)
+				})
 			}
 		})
 	}
@@ -356,12 +256,12 @@ func TestWSHandshakePayloadIsBounded(t *testing.T) {
 	defer cancel()
 	_, err := c.Stream(ctx, &Request{Transport: "websocket", Body: []byte(`{}`)}, func(*Event) error { return nil })
 	var failure *FailureError
-	if !errors.As(err, &failure) || failure.Status != 403 || failure.Code != "http_403" || failure.RequestID != "bounded-body" {
+	reportTestFailure(t, !errors.As(err, &failure) || failure.Status != 403 || failure.Code != "http_403" || failure.RequestID != "bounded-body", func() {
 		t.Fatalf("lost handshake metadata: %v", err)
-	}
-	if len(failure.Payload) == 0 || len(failure.Payload) > 1<<20 || !strings.HasPrefix(payload, string(failure.Payload)) {
+	})
+	reportTestFailure(t, len(failure.Payload) == 0 || len(failure.Payload) > 1<<20 || !strings.HasPrefix(payload, string(failure.Payload)), func() {
 		t.Fatalf("unexpected handshake payload: length=%d", len(failure.Payload))
-	}
+	})
 }
 
 func TestSSEFailureEventIsForwardedBeforeFailureReturn(t *testing.T) {
@@ -377,9 +277,9 @@ func TestSSEFailureEventIsForwardedBeforeFailureReturn(t *testing.T) {
 		return nil
 	})
 	order = append(order, "return")
-	if !IsFailureError(err) || strings.Join(order, ",") != "event,return" {
+	reportTestFailure(t, !IsFailureError(err) || strings.Join(order, ",") != "event,return", func() {
 		t.Fatalf("failure order=%v err=%v", order, err)
-	}
+	})
 }
 
 func TestSSENamedErrorWithoutTypeFailsAndIsDeliveredOnce(t *testing.T) {
@@ -395,19 +295,22 @@ func TestSSENamedErrorWithoutTypeFailsAndIsDeliveredOnce(t *testing.T) {
 		events = append(events, event)
 		return nil
 	})
-	if !IsFailureError(err) || len(events) != 1 {
+	reportTestFailure(t, !IsFailureError(err) || len(events) != 1, func() {
 		t.Fatalf("named error delivery count=%d err=%v", len(events), err)
-	}
+	})
 	var failure *FailureError
-	if !errors.As(err, &failure) || failure.Status != 503 || failure.Code != "bad" || failure.RequestID != "req-header" {
+	reportTestFailure(t, !errors.As(err, &failure) || failure.Status != 503 || failure.Code != "bad" || failure.RequestID != "req-header", func() {
 		t.Fatalf("named error lost status/code/header request id: %+v", failure)
-	}
-	if events[0].Type != EventError || events[0].SSEEvent != EventError || string(events[0].Raw) == "" {
+	})
+	reportTestFailure(t, events[0].Type != EventError || events[0].SSEEvent != EventError || string(events[0].Raw) == "", func() {
 		t.Fatalf("named error was not normalized for one delivery: %+v", events[0])
-	}
+	})
 	var decoded map[string]any
-	if err := json.Unmarshal(events[0].Raw, &decoded); err != nil || decoded["type"] != EventError {
-		t.Fatalf("delivered error frame is not structured: %s (%v)", events[0].Raw, err)
+	{
+		err := json.Unmarshal(events[0].Raw, &decoded)
+		reportTestFailure(t, err != nil || decoded["type"] != EventError, func() {
+			t.Fatalf("delivered error frame is not structured: %s (%v)", events[0].Raw, err)
+		})
 	}
 }
 
@@ -425,13 +328,13 @@ func TestSSETopLevelErrorWithoutTypeFailsAndIsDeliveredOnce(t *testing.T) {
 		delivered = event
 		return nil
 	})
-	if !IsFailureError(err) || count != 1 || delivered == nil || delivered.Type != EventError {
+	reportTestFailure(t, !IsFailureError(err) || count != 1 || delivered == nil || delivered.Type != EventError, func() {
 		t.Fatalf("top-level error count=%d event=%+v err=%v", count, delivered, err)
-	}
+	})
 	var failure *FailureError
-	if !errors.As(err, &failure) || failure.Status != 429 || failure.Code != "bad" || failure.RequestID != "req-1" {
+	reportTestFailure(t, !errors.As(err, &failure) || failure.Status != 429 || failure.Code != "bad" || failure.RequestID != "req-1", func() {
 		t.Fatalf("top-level error details lost: %+v", failure)
-	}
+	})
 }
 
 func TestSSEOrdinaryNamedEventIsNotAnError(t *testing.T) {
@@ -446,12 +349,12 @@ func TestSSEOrdinaryNamedEventIsNotAnError(t *testing.T) {
 		events = append(events, event)
 		return nil
 	})
-	if err != nil || len(events) != 2 {
+	reportTestFailure(t, err != nil || len(events) != 2, func() {
 		t.Fatalf("ordinary named events err=%v count=%d", err, len(events))
-	}
-	if events[0].SSEEvent != "response.output_text.delta" || events[0].Type != "" || string(events[0].Raw) != `{"delta":"hello"}` {
+	})
+	reportTestFailure(t, events[0].SSEEvent != "response.output_text.delta" || events[0].Type != "" || string(events[0].Raw) != `{"delta":"hello"}`, func() {
 		t.Fatalf("ordinary event changed: %+v", events[0])
-	}
+	})
 }
 
 func TestSSEFailureOverridesSuccessfulTypeAndPreventsDuplicateFrame(t *testing.T) {
@@ -477,9 +380,9 @@ func TestSSEFailureOverridesSuccessfulTypeAndPreventsDuplicateFrame(t *testing.T
 			if err != nil && !forwardedError {
 				frames = append(frames, FormatSSEFrame([]byte(`{"type":"error"}`)))
 			}
-			if !IsFailureError(err) || !forwardedError || len(frames) != 1 {
+			reportTestFailure(t, !IsFailureError(err) || !forwardedError || len(frames) != 1, func() {
 				t.Fatalf("expected one recognized error frame: count=%d forwarded=%v err=%v", len(frames), forwardedError, err)
-			}
+			})
 		})
 	}
 }
@@ -504,15 +407,15 @@ func TestWSTopLevelErrorIsDeliveredOnceWithoutRetry(t *testing.T) {
 	count := 0
 	_, err := c.Stream(context.Background(), &Request{Transport: "auto", Body: []byte(`{}`)}, func(event *Event) error {
 		count++
-		if event.Type != EventError || event.Data["type"] != EventError {
+		reportTestFailure(t, event.Type != EventError || event.Data["type"] != EventError, func() {
 			t.Errorf("top-level WS error not normalized: %+v", event)
-		}
+		})
 		return nil
 	})
 	var failure *FailureError
-	if !errors.As(err, &failure) || failure.Code != "bad" || failure.Status != 429 || failure.RequestID != "req-ws" || count != 1 || requests.Load() != 1 {
+	reportTestFailure(t, !errors.As(err, &failure) || failure.Code != "bad" || failure.Status != 429 || failure.RequestID != "req-ws" || count != 1 || requests.Load() != 1, func() {
 		t.Fatalf("failure=%+v count=%d requests=%d error=%v", failure, count, requests.Load(), err)
-	}
+	})
 }
 
 func TestSSERequiresTerminalAndForwardsFailure(t *testing.T) {
@@ -542,23 +445,25 @@ func TestSSERequiresTerminalAndForwardsFailure(t *testing.T) {
 			n := 0
 			_, err := c.Stream(context.Background(), &Request{Transport: "sse", Body: []byte(`{}`)}, func(e *Event) error {
 				n++
-				if !strings.Contains(tc.wire, string(e.Raw)) {
+				reportTestFailure(t, !strings.Contains(tc.wire, string(e.Raw)), func() {
 					t.Errorf("raw event changed: %s", e.Raw)
-				}
+				})
 				return nil
 			})
-			if n != tc.events {
+			reportTestFailure(t, n != tc.events, func() {
 				t.Fatalf("events=%d want=%d", n, tc.events)
-			}
-			if tc.failure != IsFailureError(err) {
+			})
+			reportTestFailure(t, tc.failure != IsFailureError(err), func() {
 				t.Fatalf("failure=%v error=%v", tc.failure, err)
-			}
+			})
 			if tc.truncated {
-				if err == nil || !strings.Contains(err.Error(), "truncated") {
+				reportTestFailure(t, err == nil || !strings.Contains(err.Error(), "truncated"), func() {
 					t.Fatalf("expected truncation, got %v", err)
-				}
-			} else if !tc.failure && err != nil {
-				t.Fatal(err)
+				})
+			} else {
+				reportTestFailure(t, !tc.failure && err != nil, func() {
+					t.Fatal(err)
+				})
 			}
 		})
 	}
@@ -580,14 +485,14 @@ func TestWSBinaryJSONFrameIsDecodedLikeText(t *testing.T) {
 	events := 0
 	_, err := c.Stream(context.Background(), &Request{Transport: "websocket", Body: []byte(`{}`)}, func(event *Event) error {
 		events++
-		if event.Type != EventResponseCompleted || event.Data["type"] != EventResponseCompleted {
+		reportTestFailure(t, event.Type != EventResponseCompleted || event.Data["type"] != EventResponseCompleted, func() {
 			t.Fatalf("unexpected binary event: %+v", event)
-		}
+		})
 		return nil
 	})
-	if err != nil || events != 1 {
+	reportTestFailure(t, err != nil || events != 1, func() {
 		t.Fatalf("binary websocket stream err=%v events=%d", err, events)
-	}
+	})
 }
 
 func TestWSBinaryNonJSONFrameReturnsProtocolError(t *testing.T) {
@@ -605,9 +510,9 @@ func TestWSBinaryNonJSONFrameReturnsProtocolError(t *testing.T) {
 	defer server.Close()
 	c := testClient(t, server.URL)
 	_, err := c.Stream(context.Background(), &Request{Transport: "websocket", Body: []byte(`{}`)}, func(*Event) error { return nil })
-	if err == nil || !strings.Contains(err.Error(), "invalid websocket JSON") {
+	reportTestFailure(t, err == nil || !strings.Contains(err.Error(), "invalid websocket JSON"), func() {
 		t.Fatalf("expected binary JSON protocol error, got %v", err)
-	}
+	})
 }
 
 func TestWSRejectsOversizedFrame(t *testing.T) {
@@ -625,101 +530,22 @@ func TestWSRejectsOversizedFrame(t *testing.T) {
 	defer server.Close()
 	c := testClient(t, server.URL)
 	_, err := c.Stream(context.Background(), &Request{Transport: "websocket", Body: []byte(`{}`)}, func(*Event) error { return nil })
-	if !errors.Is(err, ErrWSFrameTooLarge) {
+	reportTestFailure(t, !errors.Is(err, ErrWSFrameTooLarge), func() {
 		t.Fatalf("expected oversized websocket error, got %v", err)
-	}
+	})
 }
 
 func TestWSFirstFailureAfterSendDoesNotRetry(t *testing.T) {
 	for _, transport := range []string{"websocket", "websocket-cached", "auto"} {
 		for _, code := range []string{"previous_response_not_found", "websocket_connection_limit_reached"} {
-			t.Run(transport+"/"+code, func(t *testing.T) {
-				var creates, posts atomic.Int32
-				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if r.Method == http.MethodPost {
-						posts.Add(1)
-						fmt.Fprint(w, "data: {\"type\":\"response.completed\"}\n\n")
-						return
-					}
-					socket, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
-					if err != nil {
-						return
-					}
-					defer socket.Close()
-					if _, _, err := socket.ReadMessage(); err != nil {
-						return
-					}
-					creates.Add(1)
-					_ = socket.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"error","code":%q}`, code)))
-				}))
-				defer server.Close()
-				c := testClient(t, server.URL)
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				defer cancel()
-				var events []string
-				_, err := c.Stream(ctx, &Request{Transport: transport, Body: []byte(`{}`)}, func(event *Event) error {
-					events = append(events, event.Type)
-					return nil
-				})
-				var failure *FailureError
-				if !errors.As(err, &failure) || failure.Code != code || creates.Load() != 1 || posts.Load() != 0 || len(events) != 1 || events[0] != EventError {
-					t.Fatalf("error=%v creates=%d posts=%d events=%v", err, creates.Load(), posts.Load(), events)
-				}
-				var te *transportError
-				if !errors.As(err, &te) || te.requestNotSent {
-					t.Fatalf("sent request was not recorded: %v", err)
-				}
-			})
+			t.Run(transport+"/"+code, func(t *testing.T) { runWSFirstFailureAfterSendDoesNotRetryCase(t, &transport, &code) })
 		}
 	}
 }
 
 func TestWSRequiresTerminalAndNoRetryAfterDelivery(t *testing.T) {
 	for _, code := range []string{"", "previous_response_not_found", "websocket_connection_limit_reached", "bad"} {
-		t.Run(code, func(t *testing.T) {
-			var dials atomic.Int32
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				socket, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
-				if err != nil {
-					return
-				}
-				defer socket.Close()
-				dials.Add(1)
-				if _, _, err = socket.ReadMessage(); err != nil {
-					return
-				}
-				_ = socket.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.output_text.delta","delta":"hello"}`))
-				if code != "" {
-					_ = socket.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"error","code":%q,"message":"failed"}`, code)))
-				}
-				_ = socket.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "done"), time.Now().Add(time.Second))
-			}))
-			defer server.Close()
-			c := testClient(t, server.URL)
-			events := 0
-			_, err := c.Stream(context.Background(), &Request{Transport: "auto", Body: []byte(`{}`)}, func(e *Event) error { events++; return nil })
-			if err == nil {
-				t.Fatal("expected stream failure")
-			}
-			if dials.Load() != 1 {
-				t.Fatalf("dialed %d times", dials.Load())
-			}
-			var te *transportError
-			if !errors.As(err, &te) || !te.eventsEmitted {
-				t.Fatalf("missing emitted flag: %v", err)
-			}
-			want := 2
-			if code == "" {
-				want = 1
-				var closeErr *websocket.CloseError
-				if !errors.As(err, &closeErr) || closeErr.Code != 1000 {
-					t.Fatalf("lost close code: %v", err)
-				}
-			}
-			if events != want {
-				t.Fatalf("events=%d want=%d", events, want)
-			}
-		})
+		t.Run(code, func(t *testing.T) { runWSRequiresTerminalAndNoRetryAfterDeliveryCase(t, &code) })
 	}
 }
 func TestWSCancellationInterruptsBlockedRead(t *testing.T) {
@@ -753,9 +579,9 @@ func TestWSCancellationInterruptsBlockedRead(t *testing.T) {
 	cancel()
 	select {
 	case err := <-done:
-		if !errors.Is(err, context.Canceled) {
+		reportTestFailure(t, !errors.Is(err, context.Canceled), func() {
 			t.Fatalf("error=%v", err)
-		}
+		})
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("read was not canceled promptly")
 	}
@@ -764,27 +590,14 @@ func TestWSCancellationInterruptsBlockedRead(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("socket remains open")
 	}
-	if c.PoolSize() != 0 {
+	reportTestFailure(t, c.PoolSize() != 0, func() {
 		t.Fatal("canceled socket returned to pool")
-	}
+	})
 }
 func TestWSConcurrentSameKeyReusesOneSocket(t *testing.T) {
 	var dials atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		socket, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer socket.Close()
-		dials.Add(1)
-		for {
-			if _, _, err := socket.ReadMessage(); err != nil {
-				return
-			}
-			if err := socket.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"r","output":[]}}`)); err != nil {
-				return
-			}
-		}
+		serveWSConcurrentSameKeyReusesOneSocketRequest(w, r, &dials)
 	}))
 	defer server.Close()
 	c := testClient(t, server.URL)
@@ -812,35 +625,270 @@ func TestWSConcurrentSameKeyReusesOneSocket(t *testing.T) {
 	wg.Wait()
 	close(errs)
 	for err := range errs {
-		if err != nil {
+		reportTestFailure(t, err != nil, func() {
 			t.Error(err)
-		}
+		})
 	}
-	if dials.Load() != 1 {
+	reportTestFailure(t, dials.Load() != 1, func() {
 		t.Errorf("same key created %d sockets, want 1", dials.Load())
-	}
+	})
 }
 func TestWSPoolCloseUnblocksWaiters(t *testing.T) {
 	p := newWSPool(time.Minute, nil)
 	_, err := p.acquire(context.Background(), "key")
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatal(err)
-	}
+	})
 	done := make(chan error, 1)
 	go func() { _, err := p.acquire(context.Background(), "key"); done <- err }()
 	p.closeAll()
 	select {
 	case err := <-done:
-		if err == nil {
+		reportTestFailure(t, err == nil, func() {
 			t.Fatal("closed pool admitted waiter")
-		}
+		})
 	case <-time.After(time.Second):
 		t.Fatal("waiter stuck")
 	}
 	p.release("key")
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if len(p.slots) != 0 {
+	reportTestFailure(t, len(p.slots) != 0, func() {
 		t.Fatalf("leaked %d slots", len(p.slots))
+	})
+}
+
+// runWSHandshakeFailurePreservesFailureErrorAndFallbackPolicyCase exercises one isolated test phase with the original shared state.
+func runWSHandshakeFailurePreservesFailureErrorAndFallbackPolicyCase(t *testing.T, capturedTransport *string, capturedStatus *int) {
+	t.Helper()
+
+	const payload = `{"error":{"code":"upstream_rejected","message":"rejected request"}}`
+	var handshakes, posts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			posts.Add(1)
+			fmt.Fprint(w, "data: {\"type\":\"response.completed\"}\n\n")
+			return
+		}
+		handshakes.Add(1)
+		w.Header().Set("x-request-id", "req-handshake")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader((*capturedStatus))
+		fmt.Fprint(w, payload)
+	}))
+	defer server.Close()
+	c := testClient(t, server.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	events := 0
+	res, err := c.Stream(ctx, &Request{Transport: (*capturedTransport), Body: []byte(`{}`)}, func(*Event) error { events++; return nil })
+	reportTestFailure(t, handshakes.Load() != 1, func() {
+		t.Fatalf("handshakes=%d want 1", handshakes.Load())
+	})
+	if (*capturedTransport) == "auto" && (*capturedStatus) >= 500 {
+		reportTestFailure(t, err != nil || posts.Load() != 1 || events != 1 || res == nil || res.FallbackFrom != "websocket" || res.Transport != "sse", func() {
+			t.Fatalf("expected one safe fallback: res=%+v err=%v posts=%d events=%d", res, err, posts.Load(), events)
+		})
+		return
+	}
+	var failure *FailureError
+	reportTestFailure(t, !errors.As(err, &failure) || failure.Status != (*capturedStatus) || failure.Code != "upstream_rejected" || failure.RequestID != "req-handshake" || string(failure.Payload) != payload || failure.Message == "", func() {
+		t.Fatalf("lost structured handshake failure: %+v error=%v", failure, err)
+	})
+	reportTestFailure(t, res == nil || res.Status != (*capturedStatus) || posts.Load() != 0 || events != 0 || !IsFailureError(err), func() {
+		t.Fatalf("unexpected fallback/result: res=%+v posts=%d events=%d error=%v", res, posts.Load(), events, err)
+	})
+	var te *transportError
+	reportTestFailure(t, !errors.As(err, &te) || !te.requestNotSent, func() {
+		t.Fatalf("pre-send failure not recorded: %v", err)
+	})
+}
+
+// runWSSentBeforeFirstEventDoesNotFallbackCase exercises one isolated test phase with the original shared state.
+func runWSSentBeforeFirstEventDoesNotFallbackCase(t *testing.T, capturedMode *string) {
+	t.Helper()
+
+	var creates, posts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			posts.Add(1)
+			fmt.Fprint(w, "data: {\"type\":\"response.completed\"}\n\n")
+			return
+		}
+		socket, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer socket.Close()
+		if _, _, err := socket.ReadMessage(); err != nil {
+			return
+		}
+		creates.Add(1)
+		if (*capturedMode) == "invalid-json" {
+			_ = socket.WriteMessage(websocket.TextMessage, []byte("invalid json"))
+		}
+	}))
+	defer server.Close()
+	c := testClient(t, server.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	events := 0
+	_, err := c.Stream(ctx, &Request{Transport: "auto", Body: []byte(`{}`)}, func(*Event) error { events++; return nil })
+	var te *transportError
+	reportTestFailure(t, !errors.As(err, &te) || te.requestNotSent || te.eventsEmitted || events != 0 || creates.Load() != 1 || posts.Load() != 0, func() {
+		t.Fatalf("unsafe replay: error=%v events=%d creates=%d posts=%d", err, events, creates.Load(), posts.Load())
+	})
+}
+
+// runWSConnectionFailureFallbackPreservesFinalErrorCase exercises one isolated test phase with the original shared state.
+func runWSConnectionFailureFallbackPreservesFinalErrorCase(t *testing.T, capturedFailSSE *bool) {
+	t.Helper()
+
+	var posts, dials atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reportTestFailure(t, r.Method != http.MethodPost, func() {
+			t.Errorf("unexpected method: %s", r.Method)
+		})
+		posts.Add(1)
+		if *capturedFailSSE {
+			w.Header().Set("x-request-id", "final-sse")
+			w.WriteHeader(http.StatusTooManyRequests)
+			fmt.Fprint(w, `{"error":{"code":"final_failure","message":"rate limit"}}`)
+			return
+		}
+		fmt.Fprint(w, "data: {\"type\":\"response.completed\"}\n\n")
+	}))
+	defer server.Close()
+	factory := egress.NewFactory(egress.Options{})
+	factory.BaseDialer = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if dials.Add(1) == 1 {
+			return nil, &net.OpError{Op: "dial", Net: network, Err: errors.New("injected connection failure")}
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, addr)
+	}
+	c := New(Config{SSEURL: server.URL, WSURL: "ws" + strings.TrimPrefix(server.URL, "http")}, factory)
+	defer c.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	res, err := c.Stream(ctx, &Request{Transport: "auto", Body: []byte(`{}`)}, func(*Event) error { return nil })
+	reportTestFailure(t, posts.Load() != 1 || dials.Load() != 2, func() {
+		t.Fatalf("posts=%d dials=%d", posts.Load(), dials.Load())
+	})
+	if *capturedFailSSE {
+		var failure *FailureError
+		reportTestFailure(t, !errors.As(err, &failure) || failure.Code != "final_failure" || failure.Status != 429 || failure.RequestID != "final-sse", func() {
+			t.Fatalf("lost final SSE failure: %v", err)
+		})
+	} else {
+		reportTestFailure(t, err != nil || res == nil || res.FallbackFrom != "websocket", func() {
+			t.Fatalf("expected safe fallback, got res=%+v error=%v", res, err)
+		})
+	}
+}
+
+// runWSFirstFailureAfterSendDoesNotRetryCase exercises one isolated test phase with the original shared state.
+func runWSFirstFailureAfterSendDoesNotRetryCase(t *testing.T, capturedTransport *string, capturedCode *string) {
+	t.Helper()
+
+	var creates, posts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			posts.Add(1)
+			fmt.Fprint(w, "data: {\"type\":\"response.completed\"}\n\n")
+			return
+		}
+		socket, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer socket.Close()
+		if _, _, err := socket.ReadMessage(); err != nil {
+			return
+		}
+		creates.Add(1)
+		_ = socket.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"error","code":%q}`, (*capturedCode))))
+	}))
+	defer server.Close()
+	c := testClient(t, server.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	var events []string
+	_, err := c.Stream(ctx, &Request{Transport: (*capturedTransport), Body: []byte(`{}`)}, func(event *Event) error {
+		events = append(events, event.Type)
+		return nil
+	})
+	var failure *FailureError
+	reportTestFailure(t, !errors.As(err, &failure) || failure.Code != (*capturedCode) || creates.Load() != 1 || posts.Load() != 0 || len(events) != 1 || events[0] != EventError, func() {
+		t.Fatalf("error=%v creates=%d posts=%d events=%v", err, creates.Load(), posts.Load(), events)
+	})
+	var te *transportError
+	reportTestFailure(t, !errors.As(err, &te) || te.requestNotSent, func() {
+		t.Fatalf("sent request was not recorded: %v", err)
+	})
+}
+
+// runWSRequiresTerminalAndNoRetryAfterDeliveryCase exercises one isolated test phase with the original shared state.
+func runWSRequiresTerminalAndNoRetryAfterDeliveryCase(t *testing.T, capturedCode *string) {
+	t.Helper()
+
+	var dials atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		socket, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer socket.Close()
+		dials.Add(1)
+		if _, _, err = socket.ReadMessage(); err != nil {
+			return
+		}
+		_ = socket.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.output_text.delta","delta":"hello"}`))
+		if (*capturedCode) != "" {
+			_ = socket.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"error","code":%q,"message":"failed"}`, (*capturedCode))))
+		}
+		_ = socket.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "done"), time.Now().Add(time.Second))
+	}))
+	defer server.Close()
+	c := testClient(t, server.URL)
+	events := 0
+	_, err := c.Stream(context.Background(), &Request{Transport: "auto", Body: []byte(`{}`)}, func(e *Event) error { events++; return nil })
+	reportTestFailure(t, err == nil, func() {
+		t.Fatal("expected stream failure")
+	})
+	reportTestFailure(t, dials.Load() != 1, func() {
+		t.Fatalf("dialed %d times", dials.Load())
+	})
+	var te *transportError
+	reportTestFailure(t, !errors.As(err, &te) || !te.eventsEmitted, func() {
+		t.Fatalf("missing emitted flag: %v", err)
+	})
+	want := 2
+	if (*capturedCode) == "" {
+		want = 1
+		var closeErr *websocket.CloseError
+		reportTestFailure(t, !errors.As(err, &closeErr) || closeErr.Code != 1000, func() {
+			t.Fatalf("lost close code: %v", err)
+		})
+	}
+	reportTestFailure(t, events != want, func() {
+		t.Fatalf("events=%d want=%d", events, want)
+	})
+}
+
+// serveWSConcurrentSameKeyReusesOneSocketRequest exercises one isolated test phase with the original shared state.
+func serveWSConcurrentSameKeyReusesOneSocketRequest(w http.ResponseWriter, r *http.Request, capturedDials *atomic.Int32) {
+	socket, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer socket.Close()
+	(*capturedDials).Add(1)
+	for {
+		if _, _, err := socket.ReadMessage(); err != nil {
+			return
+		}
+		if err := socket.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.completed","response":{"id":"r","output":[]}}`)); err != nil {
+			return
+		}
 	}
 }
