@@ -35,3 +35,9 @@
 - **S5332 `compose_smoke.py`**：現有 probe 僅允許 loopback HTTP，proxy／redirect 仍禁止；真正 TLS 改造需要明確 endpoint 與信任設定決策。
 
 兩項仍未解決，未在服務端標記 Safe／Accepted／False Positive。**本次六項維護性補修不應被宣稱已讓 Security 升 A 或 Quality Gate 通過。** 新提交的最終分析與 CI 結果以 PR checks 為準。
+
+## 服務端重分析回饋
+
+`38e9f61d294054171feb1f8bd32343bb89c27660` 於 06:04 UTC 的 Sonar Code Analysis，GitHub checks 實際頁面列出 3 個 annotations：原有 2 個安全問題，以及新固定路徑清單令 `/api/auth/logout` 達到三次重複的字面值問題（issue `AaFiNgeASWJBroeFAkbt`）。該次 annotations 已不再列出原六項維護性問題；這是 PR check 的證據，不是主分支全部問題清單。
+
+後續將 logout 路徑抽為 `AUTH_LOGOUT_PATH`，清單與兩次 logout request 共用同一常數；不改路徑值、請求方法或次數，再次跑完整 10 項 probe 測試。最新提交仍需以自己的 CI／Sonar 結果判定，2 項安全問題保持待決策。

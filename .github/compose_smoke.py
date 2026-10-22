@@ -19,6 +19,7 @@ from uuid import uuid4
 ACCOUNT_GROUPS_PATH = "/api/account-groups"
 KEYS_PATH = "/api/keys"
 MODELS_PATH = "/v1/models"
+AUTH_LOGOUT_PATH = "/api/auth/logout"
 
 def entity_id(value):
     """State and API responses may select only positive signed-64-bit IDs."""
@@ -42,7 +43,7 @@ def request_path(path):
     # No encoded separators, traversal segments, queries, fragments or origins.
     if not isinstance(path, str):
         raise ValueError("unsupported Compose probe request path")
-    static_paths = ("/", "/healthz", "/api/auth/login", "/api/auth/logout",
+    static_paths = ("/", "/healthz", "/api/auth/login", AUTH_LOGOUT_PATH,
                     MODELS_PATH, KEYS_PATH, ACCOUNT_GROUPS_PATH)
     entity_pattern = r"/api/(?:keys|account-groups)/[1-9]\d{0,18}"
     asset_pattern = r"/assets/[A-Za-z0-9_-][A-Za-z0-9_.-]*\.(?:js|css)"
@@ -125,7 +126,7 @@ class Probe:
         self.request("PATCH", entity_path(KEYS_PATH, key_id), {"name": marker + "-updated"})
         self.request("GET", MODELS_PATH, token=key["key"])
         self.request("GET", MODELS_PATH, token="invalid-" + uuid4().hex, status=401)
-        self.request("POST", "/api/auth/logout")
+        self.request("POST", AUTH_LOGOUT_PATH)
         self.token = ""
         return {"marker": marker, "group_id": group_id, "key_id": key_id, "client_key": key["key"]}
 
@@ -155,7 +156,7 @@ class Probe:
             raise AssertionError("deleted probe key still exists")
         if any(entry["id"] == group_id for entry in self.request("GET", ACCOUNT_GROUPS_PATH)["groups"]):
             raise AssertionError("deleted probe group still exists")
-        self.request("POST", "/api/auth/logout")
+        self.request("POST", AUTH_LOGOUT_PATH)
 
 
 def state_path(value):
