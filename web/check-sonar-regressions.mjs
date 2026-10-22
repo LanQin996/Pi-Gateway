@@ -25,27 +25,7 @@ assert.throws(() => cloneJson(undefined), /JSON wire/)
 assert.ok(Object.is(cloneJson(-0), 0))
 assert.deepEqual(cloneJson(new Array(2)), [null, null])
 await assert.rejects(loadTestModule('../go.mod', {}), /inside web\/src/)
-const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'crypto')
-const performanceDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'performance')
-const realNow = Date.now, realRandom = Math.random
-try {
-    Object.defineProperty(globalThis, 'crypto', {configurable: true, value: undefined})
-    Object.defineProperty(globalThis, 'performance', {configurable: true, value: {timeOrigin: 1000, now: () => 0}})
-    Date.now = () => 1000
-    let entropy = 0
-    Math.random = () => (++entropy) / 4
-    const firstRealm = await loadTestModule('./src/utils/editorId.ts', {})
-    const secondRealm = await loadTestModule('./src/utils/editorId.ts', {})
-    assert.notEqual(firstRealm.editorId(), secondRealm.editorId(), 'independent editor realms retain entropy even when all clocks match')
-    const ids = Array.from({length: 2000}, () => firstRealm.editorId())
-    assert.equal(new Set(ids).size, ids.length, 'local counter stays unique without crypto and with fixed clocks')
-} finally {
-    Date.now = realNow; Math.random = realRandom
-    if (descriptor) Object.defineProperty(globalThis, 'crypto', descriptor)
-    else delete globalThis.crypto
-    if (performanceDescriptor) Object.defineProperty(globalThis, 'performance', performanceDescriptor)
-    else delete globalThis.performance
-}
+await import('./check-editor-id.mjs')
 await assert.rejects(loadTestModule('./src/utils/ruleEditor.ts', {}), /Unexpected import/)
 const directory = mkdtempSync(join(tmpdir(), 'pi-toolchain-check-'))
 try {

@@ -17,7 +17,7 @@
 | Python S5843 `compose_smoke.py` | 固定路徑集合與 entity／asset 小模式分開 | fullmatch、原允許路徑集合、禁止外部 origin／traversal／query／fragment |
 | Python S6353 同處 | `[0-9]` 改 `\d` 且明確 `re.ASCII` | 不擴大為 Unicode 數字，仍限制無前導 0 的 1–19 位 ASCII ID；真正 API/state ID 仍另驗證正 int64 |
 
-這次 **沒有修改 Go 正式服務邏輯**；沒有刪除測試、降低 assertion、改寫預期結果或新增規則排除。Python 僅重構 disposable CI probe 的允許路徑驗證，不改產品 HTTP/TLS 協定。效能差異限於 probe 的固定集合與最多兩次短正則匹配，不影響 gateway 請求資料面。
+上述六項維護性補修 **沒有修改 Go 正式服務邏輯**；沒有刪除測試、降低 assertion、改寫預期結果或新增規則排除。Python 僅重構 disposable CI probe 的允許路徑驗證，不改產品 HTTP/TLS 協定。效能差異限於 probe 的固定集合與最多兩次短正則匹配，不影響 gateway 請求資料面。
 
 ## 驗證
 
@@ -29,15 +29,26 @@
 
 獨立差異審查核對了六個程式／測試檔：未發現確定的行為回歸；特別確認正則分支與 ASCII 邊界、synctest／子測試邊界、清理順序、原 assertions，以及 converter 計數傳址保持即時值。
 
-## 尚未處置的兩項安全問題
+## 安全問題與後續決策
 
-- **S2245 `editorId.ts`**：現有 crypto 優先；無 crypto fallback 的相容性／跨 realm 防碰撞設計尚待使用者選擇。
-- **S5332 `compose_smoke.py`**：現有 probe 僅允許 loopback HTTP，proxy／redirect 仍禁止；真正 TLS 改造需要明確 endpoint 與信任設定決策。
+### S2245：依批准移除非密碼學亂數備援
 
-兩項仍未解決，未在服務端標記 Safe／Accepted／False Positive。**本次六項維護性補修不應被宣稱已讓 Security 升 A 或 Quality Gate 通過。** 新提交的最終分析與 CI 結果以 PR checks 為準。
+`editorId.ts` 現在只以 `crypto.getRandomValues(new Uint8Array(16))` 的熵建立 UUIDv4，保留既有 UUID 格式與版本／variant 位元。完全移除 `Math.random`、session、時鐘與 counter 備援，也不再依賴 `randomUUID`。
+
+- **HTTP 相容性**：`getRandomValues` 不要求 secure context；一般 HTTP 的現代瀏覽器仍可使用。這不代表任意舊瀏覽器或受限嵌入環境必定提供此 API，也不表示 HTTP 傳輸已加密。
+- **明確的契約變更**：完全沒有 crypto、缺少 getRandomValues 或呼叫拋錯時，不再產生弱亂數 ID，而在要求 ID 時拋出可辨識錯誤。模組載入不取亂數，不會因 crypto 缺失在 import 時崩潰。這項相容性改變經使用者批准；沒有默默以排除或接受議題取代修復。
+- **影響範圍**：編輯器本機識別碼；不改伺服器 rule ID、credential、HTTP/TLS、認證或儲存協定。每個 ID 取 16 bytes 熵，不新增全域可變計數器。
+- **回歸**：共用測試涵蓋 HTTP-like 僅有 getRandomValues、正確 receiver、兩個獨立模組的 10,000 個 UUID 樣本無碰撞、固定輸入的 version／variant 位元、crypto getter／API 缺失與拋錯，以及 import 不請求熵。樣本無碰撞不是數學上的碰撞不可能保證。
+- **瀏覽器測試**：保留無 randomUUID 的 HTTP 新增／追加／複製與未連線節點禁止保存流程；以三個明確錯誤案例取代舊的無 crypto 仍成功契約。完整 Playwright 清單為 57 項，真正瀏覽器結果以新提交 CI 為準，不把清單解析算作測試通過。
+
+S2245 狀態為已實作、等待新提交的 Sonar 重分析，不預先宣稱議題關閉或 Security A。
+
+### S5332：loopback HTTP 仍待決策
+
+`compose_smoke.py` probe 僅允許 loopback HTTP，proxy／redirect 仍禁止；真正 TLS 改造仍需要 endpoint 與信任設定決策。本次未變更 HTTP/TLS，亦未在服務端標記 Safe／Accepted／False Positive。**不能據此宣稱 Quality Gate 已通過。**
 
 ## 服務端重分析回饋
 
 `38e9f61d294054171feb1f8bd32343bb89c27660` 於 06:04 UTC 的 Sonar Code Analysis，GitHub checks 實際頁面列出 3 個 annotations：原有 2 個安全問題，以及新固定路徑清單令 `/api/auth/logout` 達到三次重複的字面值問題（issue `AaFiNgeASWJBroeFAkbt`）。該次 annotations 已不再列出原六項維護性問題；這是 PR check 的證據，不是主分支全部問題清單。
 
-後續將 logout 路徑抽為 `AUTH_LOGOUT_PATH`，清單與兩次 logout request 共用同一常數；不改路徑值、請求方法或次數，再次跑完整 10 項 probe 測試。最新提交仍需以自己的 CI／Sonar 結果判定，2 項安全問題保持待決策。
+後續將 logout 路徑抽為 `AUTH_LOGOUT_PATH`，清單與兩次 logout request 共用同一常數；不改路徑值、請求方法或次數，再次跑完整 10 項 probe 測試。該次 logout 常數補修沒有改變兩項安全契約；後續 S2245 的批准與變更另見上節。每個新提交仍需以自己的 CI／Sonar 結果判定。

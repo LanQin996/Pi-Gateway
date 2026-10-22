@@ -46,7 +46,7 @@
 - 正式 clone 與測試預期值保持獨立：component 測試保留 `JSON.parse(JSON.stringify(...))` 作 reference oracle，該項留待審查。
 - label 字典改成 Map，讓 `then` 僅作查找 key，避免物件外觀與 thenable 混淆；210 對原標籤與新 entries 獨立核對完全一致。真正 wire AST 的 `then` 分支名稱不更動。
 - 拆分 capture key-order 策略，保留原排序；graph 仍只處理初始 owners，不因 append 新節點擴大遍歷。
-- editor ID 優先採用 crypto；無 crypto 舊環境保留非安全用途隨機 salt，以免相同／降精度時鐘的獨立 realm 產生相同 ID。此 fallback 仍需情境審查，不宣稱密碼學保證。
+- editor ID 後續已依批准改成僅使用 getRandomValues 的 UUIDv4，移除非安全 salt 與所有 fallback；無可用 crypto 時明確失敗。一般 HTTP 不受 secure-context 要求限制，詳見 [後續安全契約與回歸](pr2-followup.md#安全問題與後續決策)。
 
 ### 3. Go 可維護性與測試
 
@@ -57,7 +57,7 @@
 
 ## 獨立審查修正記錄
 
-審查曾重現 Go compiler resolver 僅驗證直接父目錄、卻接受可寫祖先的缺口；已改成完整 canonical ancestor／owner 檢查，原負向案例現在拒絕。另重現無 crypto、相同時鐘的兩份 editor module 會碰撞，已恢復非安全 entropy salt 並新增兩份 module 的固定時鐘回歸。
+審查曾重現 Go compiler resolver 僅驗證直接父目錄、卻接受可寫祖先的缺口；已改成完整 canonical ancestor／owner 檢查，原負向案例現在拒絕。當時亦重現無 crypto、相同時鐘的兩份 editor module 會碰撞，曾恢復非安全 entropy salt；該過渡方案已由後續批准的 getRandomValues-only 契約取代，不再保留弱亂數備援。
 
 同時撤回以 production clone 作測試 oracle、以及以 method values 隱藏 context 的做法；相關項目保留 review。這些調整以維持真實行為及可驗證性為優先，不為追求 A 而壓制規則。
 
@@ -67,7 +67,7 @@
 
 使用相同複製流程重新執行 `check:rules`／`check:sonar-regressions` 通過；遠端最終結果以 PR checks 為準。
 
-首個遠端分析（`a981cb788c99cb9e13a8d6ffd87ae09c4f1b100f`）仍因新程式碼 Security C 未通過 Quality Gate。PR 的兩項安全 review comments 為：`editorId.ts` 非 credential 的 PRNG fallback（`AaFh_hhMwr3G9Zas3V9V`），以及 `compose_smoke.py` 固定 loopback HTTP（`AaFh_h1swr3G9Zas3V9Y`）。這些情境審查仍未獲服務端核准；不以改寫字串或刪除防碰撞行為規避規則。維持未解決狀態，不能宣稱全 A。
+首個遠端分析（`a981cb788c99cb9e13a8d6ffd87ae09c4f1b100f`）仍因新程式碼 Security C 未通過 Quality Gate。PR 的兩項安全 review comments 為：`editorId.ts` 非 credential 的 PRNG fallback（`AaFh_hhMwr3G9Zas3V9V`），以及 `compose_smoke.py` 固定 loopback HTTP（`AaFh_h1swr3G9Zas3V9Y`）。這些情境審查仍未獲服務端核准；不以改寫字串或刪除防碰撞行為規避規則。這是首個分析的歷史結果；S2245 後續已按批准移除 fallback、等待重新分析，S5332 仍待決策，不能宣稱全 A。
 
 ## 驗證狀態
 
