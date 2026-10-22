@@ -12,7 +12,7 @@ from threading import Thread
 import unittest
 from urllib.error import URLError
 
-from compose_smoke import Probe, state_path, entity_path, KEYS_PATH, ACCOUNT_GROUPS_PATH, NoRedirects
+from compose_smoke import Probe, state_path, entity_path, KEYS_PATH, ACCOUNT_GROUPS_PATH, NoRedirects, request_path
 from unittest.mock import patch, Mock
 
 
@@ -94,6 +94,36 @@ class ComposeProbeTest(unittest.TestCase):
 
 
 class ProbeBoundaryTest(unittest.TestCase):
+    def test_request_path_preserves_static_allowlist(self):
+        for path in ("/", "/healthz", "/api/auth/login", "/api/auth/logout",
+                     "/v1/models", "/api/keys", "/api/account-groups"):
+            with self.subTest(path=path):
+                self.assertEqual(request_path(path), path)
+        for path in (None, 1, [], "/api/auth", "/api/auth/login/", "/healthz\n"):
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                request_path(path)
+
+    def test_request_path_entity_digits_remain_ascii_and_bounded(self):
+        for collection in (KEYS_PATH, ACCOUNT_GROUPS_PATH):
+            for identifier in ("1", "123", "9223372036854775807", "9999999999999999999"):
+                path = collection + "/" + identifier
+                with self.subTest(path=path):
+                    self.assertEqual(request_path(path), path)
+            for identifier in ("", "0", "01", "-1", "+1", "1" * 20,
+                               "١", "1١", "１", "1１", "1²", "1\n", "1/", "%31"):
+                with self.subTest(collection=collection, identifier=identifier), self.assertRaises(ValueError):
+                    request_path(collection + "/" + identifier)
+
+    def test_request_path_assets_keep_same_filename_boundary(self):
+        for filename in ("a.js", "Z9_-x.css", "_entry.abc-123.js", "-entry.css", "a..js"):
+            path = "/assets/" + filename
+            with self.subTest(path=path):
+                self.assertEqual(request_path(path), path)
+        for filename in (".hidden.js", "../secret.js", "a/b.js", "é.js", "a١.js",
+                         "a.JS", "a.json", "a.js?x=1", "a.js#x", "a.js\n"):
+            with self.subTest(filename=filename), self.assertRaises(ValueError):
+                request_path("/assets/" + filename)
+
     def test_state_ids_cannot_supply_api_path_components(self):
         for field in ("group_id", "key_id"):
             for invalid in ("1", "1/../../auth/logout", "%2f..%2f", "1?enabled=true", "1#fragment", 0, -1, True, 1.0, None, 1 << 63):

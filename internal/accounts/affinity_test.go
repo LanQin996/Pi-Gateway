@@ -258,32 +258,35 @@ func TestAcquireAffinityRevalidatesAfterCacheIO(t *testing.T) {
 
 func TestAcquireAffinityReturnsFreshAccount(t *testing.T) {
 	for _, stage := range []string{"get", "set"} {
-		t.Run(stage, func(t *testing.T) {
-			st := newAccountsTestStore(t)
-			ctx := context.Background()
-			a := routingAccount(t, st, "target", 1)
-			key := routingKey(t, st)
-			mutate := func() {
-				_, err := st.ExecContext(ctx, `UPDATE accounts SET access_token=?, proxy_url=? WHERE id=?`, "fresh-token", "http://fresh-proxy.invalid", a.ID)
-				if err != nil {
-					t.Fatal(err)
-				}
-			}
-			probe := &affinityProbe{}
-			if stage == "get" {
-				probe.get = func(context.Context, session.AffinityKey) (int64, error) { mutate(); return a.ID, nil }
-			} else {
-				probe.set = func(context.Context, session.AffinityKey, int64) error { mutate(); return nil }
-			}
-			m := New(st, nil, nil, Options{Affinity: probe})
-			account, release, err := m.AcquireWithAffinity(ctx, key, "model", "connection")
-			if release != nil {
-				defer release()
-			}
-			if err != nil || account == nil || account.AccessToken != "fresh-token" || account.ProxyURL != "http://fresh-proxy.invalid" {
-				t.Fatalf("cache IO caused stale account forwarding: %v %v", account, err)
-			}
-		})
+		t.Run(stage, func(t *testing.T) { testAcquireAffinityReturnsFreshAccount(t, stage) })
+	}
+}
+
+func testAcquireAffinityReturnsFreshAccount(t *testing.T, stage string) {
+	t.Helper()
+	st := newAccountsTestStore(t)
+	ctx := context.Background()
+	a := routingAccount(t, st, "target", 1)
+	key := routingKey(t, st)
+	mutate := func() {
+		_, err := st.ExecContext(ctx, `UPDATE accounts SET access_token=?, proxy_url=? WHERE id=?`, "fresh-token", "http://fresh-proxy.invalid", a.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	probe := &affinityProbe{}
+	if stage == "get" {
+		probe.get = func(context.Context, session.AffinityKey) (int64, error) { mutate(); return a.ID, nil }
+	} else {
+		probe.set = func(context.Context, session.AffinityKey, int64) error { mutate(); return nil }
+	}
+	m := New(st, nil, nil, Options{Affinity: probe})
+	account, release, err := m.AcquireWithAffinity(ctx, key, "model", "connection")
+	if release != nil {
+		defer release()
+	}
+	if err != nil || account == nil || account.AccessToken != "fresh-token" || account.ProxyURL != "http://fresh-proxy.invalid" {
+		t.Fatalf("cache IO caused stale account forwarding: %v %v", account, err)
 	}
 }
 

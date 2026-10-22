@@ -40,8 +40,15 @@ def entity_path(collection, value):
 
 def request_path(path):
     # No encoded separators, traversal segments, queries, fragments or origins.
-    allowed = r"(?:/|/healthz|/api/auth/(?:login|logout)|/v1/models|/api/(?:keys|account-groups)(?:/[1-9][0-9]{0,18})?|/assets/[A-Za-z0-9_-][A-Za-z0-9_.-]*\.(?:js|css))"
-    if not isinstance(path, str) or not re.fullmatch(allowed, path):
+    if not isinstance(path, str):
+        raise ValueError("unsupported Compose probe request path")
+    static_paths = ("/", "/healthz", "/api/auth/login", "/api/auth/logout",
+                    MODELS_PATH, KEYS_PATH, ACCOUNT_GROUPS_PATH)
+    entity_pattern = r"/api/(?:keys|account-groups)/[1-9]\d{0,18}"
+    asset_pattern = r"/assets/[A-Za-z0-9_-][A-Za-z0-9_.-]*\.(?:js|css)"
+    if not (path in static_paths
+            or re.fullmatch(entity_pattern, path, flags=re.ASCII)
+            or re.fullmatch(asset_pattern, path, flags=re.ASCII)):
         raise ValueError("unsupported Compose probe request path")
     return path
 

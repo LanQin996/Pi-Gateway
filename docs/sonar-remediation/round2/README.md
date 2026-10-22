@@ -1,5 +1,9 @@
 # 第二輪 SonarCloud 修復、審查與影響記錄
 
+## PR #2 追加報告補修
+
+最新 PR 範圍 PDF 為 A／C／A、8 項（6 項可維護性＋2 項安全），並非整體主分支清單。見[完整補修、相容性影響與驗證](pr2-followup.md)及[8 項追蹤表](pr2-followup-findings.csv)。六項維護性補修已實作；兩項安全仍待使用者方案決策，未宣稱全 A。
+
 ## 報告與處置範圍
 
 本目錄記錄第二份 **2026-10-22** SonarCloud PDF（48 頁），保留[第一輪記錄](../README.md)不覆寫。第二輪報告標示 `main`、Quality Gate **FAILED**，整體評級為 **Reliability C／Security D／Maintainability A**；新程式碼評級為 C／C／A。目標是改善至 A，但**程式修改及本地測試無法保證服務端評級**。
