@@ -93,7 +93,7 @@ func (l *Limiter) SetClock(now func() time.Time) {
 // A rejection is immediate rather than queued: the caller decides whether to
 // retry after RetryAfter, so one key can never block the whole gateway.
 func (l *Limiter) Admit(ctx context.Context, keyID int64, lim Limits, now time.Time) (Decision, func(), error) {
-	noop := func() {}
+	noop := func() { /* No reservation exists to release after rejection. */ }
 
 	l.mu.Lock()
 	stamp := now
@@ -131,8 +131,12 @@ func (l *Limiter) Admit(ctx context.Context, keyID int64, lim Limits, now time.T
 		return dec, noop, nil
 	}
 
+	return Decision{Allowed: true}, l.releaseFunc(keyID), nil
+}
+
+func (l *Limiter) releaseFunc(keyID int64) func() {
 	var once sync.Once
-	release := func() {
+	return func() {
 		once.Do(func() {
 			l.mu.Lock()
 			defer l.mu.Unlock()
@@ -144,7 +148,6 @@ func (l *Limiter) Admit(ctx context.Context, keyID int64, lim Limits, now time.T
 			}
 		})
 	}
-	return Decision{Allowed: true}, release, nil
 }
 
 func (l *Limiter) checkBudget(ctx context.Context, keyID int64, lim Limits, now time.Time) (Decision, error) {

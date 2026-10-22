@@ -13,9 +13,9 @@ import (
 
 func TestCompactionURLPreservesEscapedPathAndQuery(t *testing.T) {
 	got, err := compactionURL("https://example.test/a%2Fb/responses/?route=x%2Fy")
-	if err != nil || got != "https://example.test/a%2Fb/responses/compact?route=x%2Fy" {
+	reportTestFailure(t, err != nil || got != "https://example.test/a%2Fb/responses/compact?route=x%2Fy", func() {
 		t.Fatalf("url=%s err=%v", got, err)
-	}
+	})
 }
 
 func TestCompactionMalformedResultsEmitNoSuccess(t *testing.T) {
@@ -33,9 +33,9 @@ func TestCompactionMalformedResultsEmitNoSuccess(t *testing.T) {
 			c := testClient(t, server.URL+"/responses")
 			events := 0
 			_, err := c.Stream(context.Background(), &Request{Compact: true, Body: []byte(`{"model":"test","input":[]}`)}, func(*Event) error { events++; return nil })
-			if err == nil || events != 0 {
+			reportTestFailure(t, err == nil || events != 0, func() {
 				t.Fatalf("invalid compact result succeeded: events=%d err=%v", events, err)
-			}
+			})
 		})
 	}
 }
@@ -51,7 +51,7 @@ func TestCompactionBodyReadIsBoundedByTimeout(t *testing.T) {
 	defer c.Close()
 	start := time.Now()
 	_, err := c.Stream(context.Background(), &Request{Compact: true, Body: []byte(`{"model":"test","input":[]}`)}, func(*Event) error { t.Error("timeout emitted success"); return nil })
-	if err == nil || time.Since(start) > time.Second {
+	reportTestFailure(t, err == nil || time.Since(start) > time.Second, func() {
 		t.Fatalf("timeout err=%v elapsed=%s", err, time.Since(start))
-	}
+	})
 }

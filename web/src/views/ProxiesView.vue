@@ -34,12 +34,12 @@ async function load() {
  loadError.value = ''
  try {
   const result = await api.listProxies({ search: search.value.trim(), page: page.value, page_size: pageSize.value })
-  if (version !== requestID) return
+  if (version !== requestID) { return }
   rows.value = result.items
   total.value = result.total
   if (page.value > pages.value) { page.value = pages.value; await load() }
- } catch (error) { if (version === requestID) loadError.value = errorMessage(error) }
- finally { if (version === requestID) loading.value = false }
+ } catch (error) { if (version === requestID) { loadError.value = errorMessage(error) } }
+ finally { if (version === requestID) { loading.value = false } }
 }
 watch(search, () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { page.value = 1; void load() }, 300) })
 function changePage(value: number) { page.value = value; void load() }
@@ -67,14 +67,14 @@ function openForm(row: SavedProxy | null = null) {
 function closeForm() { if (!formBusy.value) { formOpen.value = false; address.value = '' } }
 watch(address, () => { formTest.value = null })
 async function save() {
- if (formBusy.value) return
+ if (formBusy.value) { return }
  if (!name.value.trim() || (!editing.value && !address.value.trim())) { formError.value = l.value.required; return }
  saving.value = true
  formError.value = ''
  try {
   const payload = { name: name.value.trim(), url: address.value.trim() }
-  if (editing.value) await api.updateProxy(editing.value.id, payload)
-  else await api.createProxy(payload)
+  if (editing.value) { await api.updateProxy(editing.value.id, payload) }
+  else { await api.createProxy(payload) }
   formOpen.value = false
   address.value = ''
   toast.success(l.value.saved)
@@ -83,7 +83,7 @@ async function save() {
  finally { saving.value = false }
 }
 async function testForm() {
- if (formBusy.value) return
+ if (formBusy.value) { return }
  if (!address.value.trim() && !editing.value) { formError.value = l.value.required; return }
  testingForm.value = true
  formError.value = ''
@@ -91,17 +91,17 @@ async function testForm() {
  try {
   const result = address.value.trim() ? await api.probeProxy(address.value.trim()) : await api.testSavedProxy(editing.value!.id)
   formTest.value = result.test
-  if (!address.value.trim()) await load()
+  if (!address.value.trim()) { await load() }
  } catch (error) { formError.value = errorMessage(error) }
  finally { testingForm.value = false }
 }
 async function testRow(row: SavedProxy) {
- if (testing.value.has(row.id)) return
+ if (testing.value.has(row.id)) { return }
  testing.value.add(row.id)
  try {
   const result = await api.testSavedProxy(row.id)
-  if (result.test.success) toast.success(`${row.name}: ${l.value.success} · ${result.test.latency_ms ?? 0} ms`)
-  else toast.error(`${row.name}: ${result.test.error || l.value.failed}`)
+  if (result.test.success) { toast.success(`${row.name}: ${l.value.success} · ${result.test.latency_ms ?? 0} ms`) }
+  else { toast.error(`${row.name}: ${result.test.error || l.value.failed}`) }
   await load()
  } catch (error) { toast.error(errorMessage(error)) }
  finally { testing.value.delete(row.id) }
@@ -111,7 +111,7 @@ const deleteTarget = ref<SavedProxy | null>(null)
 const deleteError = ref('')
 function askDelete(row: SavedProxy) { deleteError.value = ''; deleteTarget.value = row }
 async function remove() {
- if (!deleteTarget.value || deleting.value) return
+ if (!deleteTarget.value || deleting.value) { return }
  deleting.value = true
  try { await api.deleteProxy(deleteTarget.value.id); deleteTarget.value = null; toast.success(l.value.deleted); await load() }
  catch (error) { deleteError.value = error instanceof ApiError && error.status === 409 ? l.value.inUse : errorMessage(error) }
@@ -152,7 +152,7 @@ async function openAccounts(row: SavedProxy) {
  accountPage.value = 1
  try {
   const result = await api.listAccounts()
-  if (accountsProxy.value?.id !== row.id) return
+  if (accountsProxy.value?.id !== row.id) { return }
   allAccounts.value = result.accounts
   selectedIDs.value = result.accounts.filter(account => account.proxy_id === row.id).map(account => account.id)
   originalIDs.value = [...selectedIDs.value]
@@ -160,9 +160,9 @@ async function openAccounts(row: SavedProxy) {
  } catch (error) { accountsError.value = errorMessage(error) }
  finally { accountsLoading.value = false }
 }
-function closeAccounts() { if (!accountsSaving.value) accountsProxy.value = null }
+function closeAccounts() { if (!accountsSaving.value) { accountsProxy.value = null } }
 async function saveAccounts() {
- if (!accountsProxy.value || accountsSaving.value) return
+ if (!accountsProxy.value || accountsSaving.value) { return }
  if (!accountsLoaded.value) { accountsError.value = l.value.assignUnavailable; return }
  accountsSaving.value = true
  accountsError.value = ''
@@ -206,7 +206,7 @@ async function saveAccounts() {
          <button class="btn btn-ghost btn-icon proxy-danger" :disabled="row.account_count > 0 || testing.has(row.id)" :title="row.account_count ? l.inUse : l.remove" :aria-label="row.account_count ? l.inUse : `${l.remove}: ${row.name}`" @click="askDelete(row)"><Trash2 /></button>
         </div></td>
        </tr>
-       <tr v-if="!rows.length"><td colspan="7" class="proxy-empty">{{ loading ? l.loading : loadError ? l.loadFailed : search ? l.noMatch : l.empty }}</td></tr>
+       <tr v-if="!rows.length"><td colspan="7" class="proxy-empty">{{ (() => { if (loading) { return l.loading; } if (loadError) { return l.loadFailed; } if (search) { return l.noMatch; } return l.empty; })() }}</td></tr>
       </tbody>
      </table>
     </div>
@@ -225,7 +225,7 @@ async function saveAccounts() {
     <p v-if="editing" class="proxy-muted break-all font-mono text-xs">{{ editing.url }}</p>
     <p v-if="editing?.account_count && address.trim()" class="proxy-warning text-xs">{{ l.updatedAccounts }} ({{ editing.account_count }})</p>
     <p v-if="formError" class="proxy-danger text-sm" role="alert">{{ formError }}</p>
-    <div v-if="formTest" class="text-sm" :class="formTest.success ? 'proxy-success' : 'proxy-danger'" role="status">{{ formTest.success ? l.success : l.failed }} · {{ formTest.latency_ms ?? 0 }} ms<span v-if="formTest.status"> · HTTP {{ formTest.status }}</span><p v-if="formTest.error" class="mt-1">{{ formTest.error }}</p></div>
+    <output v-if="formTest" class="text-sm" :class="formTest.success ? 'proxy-success' : 'proxy-danger'" >{{ formTest.success ? l.success : l.failed }} · {{ formTest.latency_ms ?? 0 }} ms<span v-if="formTest.status"> · HTTP {{ formTest.status }}</span><span style="display: block" v-if="formTest.error" class="mt-1">{{ formTest.error }}</span></output>
     <p class="proxy-muted text-xs leading-relaxed">{{ l.probeHint }}</p>
    </form>
    <template #footer><button class="btn" :disabled="formBusy" @click="closeForm">{{ l.cancel }}</button><button class="btn" :disabled="formBusy" @click="testForm"><Wifi class="h-4 w-4" />{{ testingForm ? l.testing : l.test }}</button><button class="btn btn-primary" form="proxy-form" type="submit" :disabled="formBusy"><Save class="h-4 w-4" />{{ saving ? l.saving : l.save }}</button></template>
@@ -239,7 +239,7 @@ async function saveAccounts() {
    <p v-if="accountsError" class="proxy-danger mb-3 text-sm" role="alert">{{ accountsError }}</p>
    <div class="table-scroll proxy-accounts-scroll" :aria-busy="accountsLoading"><table class="w-full"><thead><tr><th class="th w-10"></th><th class="th">{{ l.account }}</th><th class="th">{{ l.plan }}</th><th class="th">{{ l.currentProxy }}</th></tr></thead><tbody>
     <tr v-for="account in visibleAccounts" :key="account.id" class="row-hover"><td class="td"><input v-model="selectedIDs" type="checkbox" :value="account.id" :aria-label="`${l.assign}: ${account.name}`" :disabled="accountsSaving" /></td><td class="td"><div class="font-medium">{{ account.name }}</div><div class="proxy-muted text-xs font-mono mt-1">{{ account.email || '—' }}</div></td><td class="td"><Badge tone="neutral">{{ account.plan_type || '—' }}</Badge></td><td class="td proxy-muted"><span v-if="account.proxy_id === accountsProxy?.id">{{ accountsProxy?.name }}</span><code v-else class="text-xs break-all">{{ account.proxy_display === 'direct' ? l.direct : account.proxy_display }}</code></td></tr>
-    <tr v-if="!visibleAccounts.length"><td colspan="4" class="proxy-empty">{{ accountsLoading ? l.loading : !allAccounts.length ? l.noAccounts : l.noLinked }}</td></tr>
+    <tr v-if="!visibleAccounts.length"><td colspan="4" class="proxy-empty">{{ (() => { if (accountsLoading) { return l.loading; } if (!allAccounts.length) { return l.noAccounts; } return l.noLinked; })() }}</td></tr>
    </tbody></table></div>
    <div class="proxy-pagination !px-0"><span>{{ selectedIDs.length }} {{ l.selected }}</span><div class="flex items-center gap-2"><button class="btn btn-ghost btn-icon" :disabled="accountPage <= 1" :aria-label="l.previous" @click="accountPage--"><ChevronLeft /></button><span>{{ accountPage }} / {{ accountPages }}</span><button class="btn btn-ghost btn-icon" :disabled="accountPage >= accountPages" :aria-label="l.next" @click="accountPage++"><ChevronRight /></button></div></div>
    <p class="proxy-warning text-xs leading-relaxed">{{ l.assignmentWarning }}</p><p v-if="disconnectedCount" class="proxy-danger mt-2 text-sm" role="alert">{{ l.confirmDisconnect }}{{ disconnectedCount }}</p>

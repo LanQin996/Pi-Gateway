@@ -125,7 +125,7 @@ func (s *Server) handleUpdateKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if k == nil {
-		writeErr(w, http.StatusNotFound, "key not found")
+		writeErr(w, http.StatusNotFound, keyNotFoundMessage)
 		return
 	}
 
@@ -172,54 +172,13 @@ func (s *Server) applyKeyMutation(r *http.Request, k *store.APIKey, body *keyMut
 	if err := validateKeyOptions(k.Strategy, k.Transport); err != nil {
 		return err
 	}
-	if body.MaxConcurrency != nil {
-		if *body.MaxConcurrency < 0 {
-			return errInvalid("max_concurrency cannot be negative")
-		}
-		k.MaxConcurrency = *body.MaxConcurrency
+	if err := applyKeyLimits(k, body); err != nil {
+		return err
 	}
-	if body.RequestsPerMinute != nil {
-		if *body.RequestsPerMinute < 0 {
-			return errInvalid("requests_per_minute cannot be negative")
-		}
-		k.RequestsPerMinute = *body.RequestsPerMinute
+	if err := s.applyKeyGroups(r, k, body); err != nil {
+		return err
 	}
-	if body.DailyLimitUSD != nil {
-		if *body.DailyLimitUSD < 0 {
-			return errInvalid("daily_limit_usd cannot be negative")
-		}
-		k.DailyLimitUSD = *body.DailyLimitUSD
-	}
-	if body.WeeklyLimitUSD != nil {
-		if *body.WeeklyLimitUSD < 0 {
-			return errInvalid("weekly_limit_usd cannot be negative")
-		}
-		k.WeeklyLimitUSD = *body.WeeklyLimitUSD
-	}
-	if body.GroupIDs != nil {
-		groups, err := s.store.ListAccountGroups(r.Context())
-		if err != nil {
-			return err
-		}
-		known := map[int64]bool{}
-		for _, g := range groups {
-			known[g.ID] = true
-		}
-		seen := map[int64]bool{}
-		clean := make([]int64, 0, len(*body.GroupIDs))
-		for _, gid := range *body.GroupIDs {
-			if !known[gid] {
-				return errInvalid("unknown account group id")
-			}
-			if seen[gid] {
-				continue
-			}
-			seen[gid] = true
-			clean = append(clean, gid)
-		}
-		sort.Slice(clean, func(i, j int) bool { return clean[i] < clean[j] })
-		k.GroupIDs = clean
-	}
+
 	if k.GroupIDs == nil {
 		k.GroupIDs = []int64{}
 	}
@@ -260,7 +219,7 @@ func (s *Server) handleRevealKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if k == nil {
-		writeErr(w, http.StatusNotFound, "key not found")
+		writeErr(w, http.StatusNotFound, keyNotFoundMessage)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"key": k.Key})
@@ -280,7 +239,7 @@ func (s *Server) handleResetKeyBudget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if k == nil {
-		writeErr(w, http.StatusNotFound, "key not found")
+		writeErr(w, http.StatusNotFound, keyNotFoundMessage)
 		return
 	}
 	var body struct {
@@ -342,3 +301,60 @@ func contains(list []string, v string) bool {
 }
 
 func itoa(v int64) string { return strconv.FormatInt(v, 10) }
+
+func applyKeyLimits(k *store.APIKey, body *keyMutation) error {
+	if body.MaxConcurrency != nil {
+		if *body.MaxConcurrency < 0 {
+			return errInvalid("max_concurrency cannot be negative")
+		}
+		k.MaxConcurrency = *body.MaxConcurrency
+	}
+	if body.RequestsPerMinute != nil {
+		if *body.RequestsPerMinute < 0 {
+			return errInvalid("requests_per_minute cannot be negative")
+		}
+		k.RequestsPerMinute = *body.RequestsPerMinute
+	}
+	if body.DailyLimitUSD != nil {
+		if *body.DailyLimitUSD < 0 {
+			return errInvalid("daily_limit_usd cannot be negative")
+		}
+		k.DailyLimitUSD = *body.DailyLimitUSD
+	}
+	if body.WeeklyLimitUSD != nil {
+		if *body.WeeklyLimitUSD < 0 {
+			return errInvalid("weekly_limit_usd cannot be negative")
+		}
+		k.WeeklyLimitUSD = *body.WeeklyLimitUSD
+	}
+
+	return nil
+}
+
+func (s *Server) applyKeyGroups(r *http.Request, k *store.APIKey, body *keyMutation) error {
+	if body.GroupIDs != nil {
+		groups, err := s.store.ListAccountGroups(r.Context())
+		if err != nil {
+			return err
+		}
+		known := map[int64]bool{}
+		for _, g := range groups {
+			known[g.ID] = true
+		}
+		seen := map[int64]bool{}
+		clean := make([]int64, 0, len(*body.GroupIDs))
+		for _, gid := range *body.GroupIDs {
+			if !known[gid] {
+				return errInvalid("unknown account group id")
+			}
+			if seen[gid] {
+				continue
+			}
+			seen[gid] = true
+			clean = append(clean, gid)
+		}
+		sort.Slice(clean, func(i, j int) bool { return clean[i] < clean[j] })
+		k.GroupIDs = clean
+	}
+	return nil
+}

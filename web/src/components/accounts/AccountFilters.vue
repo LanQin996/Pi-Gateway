@@ -13,14 +13,14 @@ const { t } = useI18n()
 </script>
 
 <template>
-	<div class="account-filters" role="group" :aria-label="t('accounts.title')">
+	<fieldset class="account-filters"  :aria-label="t('accounts.title')">
 		<div class="account-filter-fields">
 			<label class="search-field"><Search :size="18" aria-hidden="true" /><input v-model="search" class="input" :placeholder="t('accounts.search')" :aria-label="t('accounts.search')" /></label>
 			<select v-model="status" class="input" :aria-label="t('accounts.col.status')"><option value="">{{ t('common.allStatuses') }}</option><option value="disabled">{{ t('common.disabled') }}</option><option v-for="item in statuses.filter(item => item !== 'disabled')" :key="item" :value="item">{{ accountStatusLabel(item) }}</option></select>
 			<select v-model="group" class="input" :disabled="!groupsLoaded" :aria-label="t('accounts.groups')"><option value="">{{ t('accounts.allGroups') }}</option><option value="ungrouped">{{ t('accounts.ungrouped') }}</option><option v-for="item in groups" :key="item.id" :value="String(item.id)">{{ item.name }}{{ item.enabled ? '' : ` (${t('common.disabled')})` }}</option></select>
 		</div>
 		<div class="account-filter-actions"><button type="button" class="btn btn-ghost refresh-button" :title="t('common.refresh')" :aria-label="t('common.refresh')" :disabled="loading" @click="emit('refresh')"><RefreshCw :size="18" :class="{ 'animate-spin': loading }" /></button><button type="button" class="btn btn-primary" @click="emit('create')"><Plus :size="16" />{{ t('accounts.add') }}</button></div>
-	</div>
+	</fieldset>
 </template>
 
 <style scoped>

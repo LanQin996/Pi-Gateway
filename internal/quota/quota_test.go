@@ -352,72 +352,7 @@ func TestQuotaRejectsMissingCodexAccountID(t *testing.T) {
 // losing its response either before headers or partway through the response body.
 func TestQuotaTransportErrorFallback(t *testing.T) {
 	for _, failure := range []string{"connection_closed", "truncated_response"} {
-		t.Run(failure, func(t *testing.T) {
-			for _, method := range []string{http.MethodPost, http.MethodGet} {
-				t.Run(method, func(t *testing.T) {
-					var firstCalls, secondCalls atomic.Int32
-					first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-						firstCalls.Add(1)
-						if r.Method != method {
-							t.Errorf("first method = %q, want %q", r.Method, method)
-						}
-						// Read the complete request before dropping the response, as if
-						// the backend had already performed the requested operation.
-						if _, err := io.Copy(io.Discard, r.Body); err != nil {
-							t.Errorf("read request: %v", err)
-						}
-						conn, rw, err := w.(http.Hijacker).Hijack()
-						if err != nil {
-							t.Errorf("hijack: %v", err)
-							return
-						}
-						defer conn.Close()
-						if failure == "truncated_response" {
-							_, _ = rw.WriteString("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{")
-							if err := rw.Flush(); err != nil {
-								t.Errorf("flush partial response: %v", err)
-							}
-						}
-					}))
-					defer first.Close()
-					second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-						secondCalls.Add(1)
-						if r.Method != method {
-							t.Errorf("second method = %q, want %q", r.Method, method)
-						}
-						if method == http.MethodPost {
-							_, _ = w.Write([]byte(`{"code":"reset"}`))
-						} else {
-							_, _ = w.Write([]byte(usageSample))
-						}
-					}))
-					defer second.Close()
-
-					client := New(Config{BaseURL: first.URL, OfficialBaseURL: second.URL}, egress.NewFactory(egress.Options{}), nil)
-					account := &store.Account{CodexAccountID: "codex-account"}
-					if method == http.MethodPost {
-						result, err := client.ConsumeResetCredit(context.Background(), account, "codex-token", "credit-1")
-						if err == nil || result != nil {
-							t.Errorf("ConsumeResetCredit = (%+v, %v), want nil result and transport/read error", result, err)
-						}
-						if got := secondCalls.Load(); got != 0 {
-							t.Errorf("second endpoint received %d POSTs, want 0", got)
-						}
-					} else {
-						report, err := client.FetchUsage(context.Background(), account, "codex-token")
-						if err != nil || report == nil || report.PlanType != "pro" {
-							t.Errorf("FetchUsage = (%+v, %v), want fallback report", report, err)
-						}
-						if got := secondCalls.Load(); got != 1 {
-							t.Errorf("second endpoint received %d GETs, want 1", got)
-						}
-					}
-					if got := firstCalls.Load(); got != 1 {
-						t.Errorf("first endpoint received %d requests, want 1", got)
-					}
-				})
-			}
-		})
+		t.Run(failure, func(t *testing.T) { quotaTransportErrorFallbackCase1(t, failure) })
 	}
 }
 
@@ -429,34 +364,124 @@ func TestQuotaResetFallsBackOnEndpointRejection(t *testing.T) {
 			var firstCalls, secondCalls atomic.Int32
 			first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				firstCalls.Add(1)
-				if r.Method != http.MethodPost {
+				reportTestFailure(t, r.Method != http.MethodPost, func() {
 					t.Errorf("first method = %q, want POST", r.Method)
-				}
+				})
 				w.WriteHeader(status)
 			}))
 			defer first.Close()
 			second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				secondCalls.Add(1)
-				if r.Method != http.MethodPost {
+				reportTestFailure(t, r.Method != http.MethodPost, func() {
 					t.Errorf("second method = %q, want POST", r.Method)
-				}
+				})
 				_, _ = w.Write([]byte(`{"code":"reset"}`))
 			}))
 			defer second.Close()
 
 			client := New(Config{BaseURL: first.URL, OfficialBaseURL: second.URL}, egress.NewFactory(egress.Options{}), nil)
 			result, err := client.ConsumeResetCredit(context.Background(), &store.Account{CodexAccountID: "codex-account"}, "codex-token", "credit-1")
-			if err != nil || result == nil || result.Code != CodeReset {
+			reportTestFailure(t, err != nil || result == nil || result.Code != CodeReset, func() {
 				t.Errorf("ConsumeResetCredit = (%+v, %v), want fallback reset result", result, err)
+			})
+			{
+				got := firstCalls.Load()
+				reportTestFailure(t, got != 1, func() {
+					t.Errorf("first endpoint received %d POSTs, want 1", got)
+				})
 			}
-			if got := firstCalls.Load(); got != 1 {
-				t.Errorf("first endpoint received %d POSTs, want 1", got)
-			}
-			if got := secondCalls.Load(); got != 1 {
-				t.Errorf("second endpoint received %d POSTs, want 1", got)
+			{
+				got := secondCalls.Load()
+				reportTestFailure(t, got != 1, func() {
+					t.Errorf("second endpoint received %d POSTs, want 1", got)
+				})
 			}
 		})
 	}
 }
 
 func ptr(v string) *string { return &v }
+
+func quotaTransportErrorFallbackCase1(t *testing.T, failure string) {
+	for _, method := range []string{http.MethodPost, http.MethodGet} {
+		t.Run(method, func(t *testing.T) { quotaTransportErrorFallbackCase1Case1(t, failure, method) })
+	}
+}
+
+func quotaTransportErrorFallbackCase1Case1(t *testing.T, failure, method string) {
+	var firstCalls, secondCalls atomic.Int32
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		firstCalls.Add(1)
+		reportTestFailure(t, r.Method != method, func() {
+			t.Errorf("first method = %q, want %q", r.Method, method)
+		})
+		// Read the complete request before dropping the response, as if
+		// the backend had already performed the requested operation.
+		{
+			_, err := io.Copy(io.Discard, r.Body)
+			reportTestFailure(t, err != nil, func() {
+				t.Errorf("read request: %v", err)
+			})
+		}
+		conn, rw, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		if failure == "truncated_response" {
+			_, _ = rw.WriteString("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{")
+			{
+				err := rw.Flush()
+				reportTestFailure(t, err != nil, func() {
+					t.Errorf("flush partial response: %v", err)
+				})
+			}
+		}
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondCalls.Add(1)
+		reportTestFailure(t, r.Method != method, func() {
+			t.Errorf("second method = %q, want %q", r.Method, method)
+		})
+		if method == http.MethodPost {
+			_, _ = w.Write([]byte(`{"code":"reset"}`))
+		} else {
+			_, _ = w.Write([]byte(usageSample))
+		}
+	}))
+	defer second.Close()
+
+	client := New(Config{BaseURL: first.URL, OfficialBaseURL: second.URL}, egress.NewFactory(egress.Options{}), nil)
+	account := &store.Account{CodexAccountID: "codex-account"}
+	if method == http.MethodPost {
+		result, err := client.ConsumeResetCredit(context.Background(), account, "codex-token", "credit-1")
+		reportTestFailure(t, err == nil || result != nil, func() {
+			t.Errorf("ConsumeResetCredit = (%+v, %v), want nil result and transport/read error", result, err)
+		})
+		{
+			got := secondCalls.Load()
+			reportTestFailure(t, got != 0, func() {
+				t.Errorf("second endpoint received %d POSTs, want 0", got)
+			})
+		}
+	} else {
+		report, err := client.FetchUsage(context.Background(), account, "codex-token")
+		reportTestFailure(t, err != nil || report == nil || report.PlanType != "pro", func() {
+			t.Errorf("FetchUsage = (%+v, %v), want fallback report", report, err)
+		})
+		{
+			got := secondCalls.Load()
+			reportTestFailure(t, got != 1, func() {
+				t.Errorf("second endpoint received %d GETs, want 1", got)
+			})
+		}
+	}
+	{
+		got := firstCalls.Load()
+		reportTestFailure(t, got != 1, func() {
+			t.Errorf("first endpoint received %d requests, want 1", got)
+		})
+	}
+}

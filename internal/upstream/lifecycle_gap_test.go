@@ -39,9 +39,9 @@ func assertNoPoolResources(t *testing.T, c *Client) {
 	t.Helper()
 	c.pool.mu.Lock()
 	defer c.pool.mu.Unlock()
-	if len(c.pool.entries) != 0 || len(c.pool.slots) != 0 || c.pool.reservations != 0 || c.pool.totalBaselineBytes != 0 {
+	reportTestFailure(t, len(c.pool.entries) != 0 || len(c.pool.slots) != 0 || c.pool.reservations != 0 || c.pool.totalBaselineBytes != 0, func() {
 		t.Fatalf("leaked entries=%d slots=%d reservations=%d baseline=%d", len(c.pool.entries), len(c.pool.slots), c.pool.reservations, c.pool.totalBaselineBytes)
-	}
+	})
 }
 func awaitStreamError(t *testing.T, ch <-chan error) error {
 	t.Helper()
@@ -56,82 +56,7 @@ func awaitStreamError(t *testing.T, ch <-chan error) error {
 
 func TestLivePoolSixtyFourWaitersRejectOverflowAndCancelOrCloseCleanly(t *testing.T) {
 	for _, mode := range []string{"cancel", "close"} {
-		t.Run(mode, func(t *testing.T) {
-			entered := make(chan struct{})
-			release := make(chan struct{})
-			var once sync.Once
-			t.Cleanup(func() { once.Do(func() { close(release) }) })
-			f := newContinuationFixture(t, func(_ *websocket.Conn, _, n int64) bool {
-				if n == 1 {
-					close(entered)
-					<-release
-				}
-				return true
-			})
-			c := testClient(t, f.server.URL)
-			c.pool.idleTimeout = 5 * time.Second
-			ownerCtx, ownerCancel := context.WithCancel(context.Background())
-			defer ownerCancel()
-			req := continuationRequest(1, "busy")
-			owner := make(chan error, 1)
-			go func() { _, err := c.Stream(ownerCtx, req, func(*Event) error { return nil }); owner <- err }()
-			select {
-			case <-entered:
-			case <-time.After(2 * time.Second):
-				t.Fatal("owner did not reach upstream")
-			}
-			waiterCtx, waiterCancel := context.WithCancel(context.Background())
-			defer waiterCancel()
-			results := make(chan error, maxPoolWaitersPerKey)
-			for i := 0; i < maxPoolWaitersPerKey; i++ {
-				go func() { _, err := c.Stream(waiterCtx, req, func(*Event) error { return nil }); results <- err }()
-			}
-			key := c.requestPoolKey(req)
-			awaitPoolCondition(t, func() bool {
-				c.pool.mu.Lock()
-				defer c.pool.mu.Unlock()
-				s := c.pool.slots[key]
-				return s != nil && len(s.waiters) == maxPoolWaitersPerKey
-			})
-			if _, err := c.Stream(context.Background(), req, func(*Event) error { return nil }); !errors.Is(err, ErrPoolBusy) {
-				t.Fatalf("65th waiter=%v", err)
-			}
-			if f.dials.Load() != 1 || f.requests.Load() != 1 {
-				t.Fatal("queued request redialed or generated")
-			}
-			if mode == "cancel" {
-				waiterCancel()
-			} else {
-				c.Close()
-			}
-			for i := 0; i < maxPoolWaitersPerKey; i++ {
-				err := awaitStreamError(t, results)
-				if err == nil {
-					t.Fatal("canceled waiter succeeded")
-				}
-				if mode == "cancel" && !errors.Is(err, context.Canceled) {
-					t.Fatalf("waiter cancel=%v", err)
-				}
-			}
-			if mode == "cancel" {
-				c.pool.mu.Lock()
-				s := c.pool.slots[key]
-				valid := s != nil && len(s.waiters) == 0 && s.refs == 1 && s.busy
-				c.pool.mu.Unlock()
-				if !valid {
-					t.Fatal("canceling queue changed owner lease or leaked waiter references")
-				}
-				ownerCancel()
-			}
-			if err := awaitStreamError(t, owner); err == nil {
-				t.Fatal("active owner was not interrupted")
-			}
-			assertNoPoolResources(t, c)
-			once.Do(func() { close(release) })
-			if f.dials.Load() != 1 || f.requests.Load() != 1 || f.httpCalls.Load() != 0 {
-				t.Fatal("shutdown replayed queued requests")
-			}
-		})
+		t.Run(mode, func(t *testing.T) { runLivePoolSixtyFourWaitersRejectOverflowAndCancelOrCloseCleanlyCase(t, &mode) })
 	}
 }
 
@@ -161,103 +86,7 @@ func (c *observedTCPWrite) Write(p []byte) (int, error) {
 func TestActualBlockedUpstreamSocketWriteCanceledClosedOrAgedWithoutReplay(t *testing.T) {
 	for _, mode := range []string{"cancel", "close", "age"} {
 		t.Run(mode, func(t *testing.T) {
-			release := make(chan struct{})
-			var releaseOnce sync.Once
-			defer releaseOnce.Do(func() { close(release) })
-			var dials, posts atomic.Int64
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if !websocket.IsWebSocketUpgrade(r) {
-					posts.Add(1)
-					http.Error(w, "unexpected HTTP retry", 500)
-					return
-				}
-				ws, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
-				if err != nil {
-					return
-				}
-				defer ws.Close()
-				dials.Add(1)
-				if tcp, ok := ws.UnderlyingConn().(*net.TCPConn); ok {
-					_ = tcp.SetReadBuffer(1024)
-				}
-				<-release // deliberately never read the WebSocket request body
-			}))
-			defer server.Close()
-			observed := make(chan *observedTCPWrite, 1)
-			factory := egress.NewFactory(egress.Options{})
-			factory.BaseDialer = func(ctx context.Context, network, addr string) (net.Conn, error) {
-				conn, err := (&net.Dialer{}).DialContext(ctx, network, addr)
-				if err != nil {
-					return nil, err
-				}
-				if tcp, ok := conn.(*net.TCPConn); ok {
-					_ = tcp.SetWriteBuffer(1024)
-				}
-				wrapped := &observedTCPWrite{Conn: conn, started: make(chan struct{})}
-				observed <- wrapped
-				return wrapped, nil
-			}
-			c := New(Config{Pool: true, WSURL: "ws" + strings.TrimPrefix(server.URL, "http"), SSEURL: server.URL, IdleTimeout: time.Second}, factory)
-			defer c.Close()
-			if mode == "age" {
-				c.pool.maxAge = 500 * time.Millisecond
-			}
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			req := continuationRequest(1, "large")
-			req.Transport = "auto"
-			req.Body = []byte(`{"model":"m","input":["` + strings.Repeat("x", 8<<20) + `"]}`)
-			result := make(chan error, 1)
-			go func() { _, err := c.Stream(ctx, req, func(*Event) error { return nil }); result <- err }()
-			var wire *observedTCPWrite
-			select {
-			case wire = <-observed:
-			case <-time.After(2 * time.Second):
-				t.Fatal("dial did not start")
-			}
-			select {
-			case <-wire.started:
-			case <-time.After(2 * time.Second):
-				t.Fatal("socket write did not start")
-			}
-			// Prove a real Write remains in progress while completed-write count is stable.
-			deadline := time.Now().Add(300 * time.Millisecond)
-			blocked := false
-			for time.Now().Before(deadline) {
-				count := wire.completed.Load()
-				timer := time.NewTimer(20 * time.Millisecond)
-				select {
-				case err := <-result:
-					timer.Stop()
-					t.Fatalf("request ended before write backpressure proof: %v", err)
-				case <-timer.C:
-				}
-				if wire.active.Load() && wire.completed.Load() == count {
-					blocked = true
-					break
-				}
-			}
-			if !blocked {
-				t.Fatal("TCP peer did not exert write backpressure")
-			}
-			if mode == "cancel" {
-				cancel()
-			} else if mode == "close" {
-				c.Close()
-			}
-			err := awaitStreamError(t, result)
-			var transport *transportError
-			if err == nil || !errors.As(err, &transport) || transport.requestNotSent {
-				t.Fatalf("blocked write lost send boundary: %v", err)
-			}
-			if wire.active.Load() {
-				t.Fatal("TCP Write remained blocked after stream return")
-			}
-			assertNoPoolResources(t, c)
-			if dials.Load() != 1 || posts.Load() != 0 {
-				t.Fatalf("partial write replayed: dials=%d posts=%d", dials.Load(), posts.Load())
-			}
-			releaseOnce.Do(func() { close(release) })
+			runActualBlockedUpstreamSocketWriteCanceledClosedOrAgedWithoutReplayCase(t, &mode)
 		})
 	}
 }
@@ -307,16 +136,221 @@ func TestSlowConsumerActualSocketWriteReleasesLeaseAfterCancelCloseOrAge(t *test
 			} else if mode == "close" {
 				c.Close()
 			}
-			if err := awaitStreamError(t, result); err == nil {
-				t.Fatal("blocked downstream write succeeded")
+			{
+				err := awaitStreamError(t, result)
+				reportTestFailure(t, err == nil, func() {
+					t.Fatal("blocked downstream write succeeded")
+				})
 			}
 			assertNoPoolResources(t, c)
-			if _, err := c.ResolveContinuation(context.Background(), 1, "r1"); !errors.Is(err, ErrContinuationUnavailable) {
-				t.Fatal("undelivered terminal became ready")
+			{
+				_, err := c.ResolveContinuation(context.Background(), 1, "r1")
+				reportTestFailure(t, !errors.Is(err, ErrContinuationUnavailable), func() {
+					t.Fatal("undelivered terminal became ready")
+				})
 			}
-			if f.requests.Load() != 1 || f.dials.Load() != 1 || f.httpCalls.Load() != 0 {
+			reportTestFailure(t, f.requests.Load() != 1 || f.dials.Load() != 1 || f.httpCalls.Load() != 0, func() {
 				t.Fatal("slow consumer triggered upstream retry")
-			}
+			})
 		})
 	}
+}
+
+// runLivePoolSixtyFourWaitersRejectOverflowAndCancelOrCloseCleanlyCase exercises one isolated test phase with the original shared state.
+func runLivePoolSixtyFourWaitersRejectOverflowAndCancelOrCloseCleanlyCase(t *testing.T, capturedMode *string) {
+	t.Helper()
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(release) }) })
+	f := newContinuationFixture(t, func(_ *websocket.Conn, _, n int64) bool {
+		if n == 1 {
+			close(entered)
+			<-release
+		}
+		return true
+	})
+	c := testClient(t, f.server.URL)
+	c.pool.idleTimeout = 5 * time.Second
+	ownerCtx, ownerCancel := context.WithCancel(context.Background())
+	defer ownerCancel()
+	req := continuationRequest(1, "busy")
+	owner := make(chan error, 1)
+	go func() { _, err := c.Stream(ownerCtx, req, func(*Event) error { return nil }); owner <- err }()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("owner did not reach upstream")
+	}
+	waiterCtx, waiterCancel := context.WithCancel(context.Background())
+	defer waiterCancel()
+	results := make(chan error, maxPoolWaitersPerKey)
+	for i := 0; i < maxPoolWaitersPerKey; i++ {
+		go func() { _, err := c.Stream(waiterCtx, req, func(*Event) error { return nil }); results <- err }()
+	}
+	key := c.requestPoolKey(req)
+	awaitPoolCondition(t, func() bool {
+		c.pool.mu.Lock()
+		defer c.pool.mu.Unlock()
+		s := c.pool.slots[key]
+		return s != nil && len(s.waiters) == maxPoolWaitersPerKey
+	})
+	{
+		_, err := c.Stream(context.Background(), req, func(*Event) error { return nil })
+		reportTestFailure(t, !errors.Is(err, ErrPoolBusy), func() {
+			t.Fatalf("65th waiter=%v", err)
+		})
+	}
+	reportTestFailure(t, f.dials.Load() != 1 || f.requests.Load() != 1, func() {
+		t.Fatal("queued request redialed or generated")
+	})
+	if (*capturedMode) == "cancel" {
+		waiterCancel()
+	} else {
+		c.Close()
+	}
+	for i := 0; i < maxPoolWaitersPerKey; i++ {
+		err := awaitStreamError(t, results)
+		reportTestFailure(t, err == nil, func() {
+			t.Fatal("canceled waiter succeeded")
+		})
+		reportTestFailure(t, (*capturedMode) == "cancel" && !errors.Is(err, context.Canceled), func() {
+			t.Fatalf("waiter cancel=%v", err)
+		})
+	}
+	if (*capturedMode) == "cancel" {
+		c.pool.mu.Lock()
+		s := c.pool.slots[key]
+		valid := s != nil && len(s.waiters) == 0 && s.refs == 1 && s.busy
+		c.pool.mu.Unlock()
+		reportTestFailure(t, !valid, func() {
+			t.Fatal("canceling queue changed owner lease or leaked waiter references")
+		})
+		ownerCancel()
+	}
+	{
+		err := awaitStreamError(t, owner)
+		reportTestFailure(t, err == nil, func() {
+			t.Fatal("active owner was not interrupted")
+		})
+	}
+	assertNoPoolResources(t, c)
+	once.Do(func() { close(release) })
+	reportTestFailure(t, f.dials.Load() != 1 || f.requests.Load() != 1 || f.httpCalls.Load() != 0, func() {
+		t.Fatal("shutdown replayed queued requests")
+	})
+}
+
+// runActualBlockedUpstreamSocketWriteCanceledClosedOrAgedWithoutReplayCase exercises one isolated test phase with the original shared state.
+func runActualBlockedUpstreamSocketWriteCanceledClosedOrAgedWithoutReplayCase(t *testing.T, capturedMode *string) {
+	t.Helper()
+
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+	var dials, posts atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serveActualBlockedUpstreamSocketWriteCanceledClosedOrAgedWithoutReplayRequest(w, r, &release, &dials, &posts)
+	}))
+	defer server.Close()
+	observed := make(chan *observedTCPWrite, 1)
+	factory := egress.NewFactory(egress.Options{})
+	factory.BaseDialer = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return verifyActualBlockedUpstreamSocketWriteCanceledClosedOrAgedWithoutReplay(ctx, network, addr, &observed)
+	}
+	c := New(Config{Pool: true, WSURL: "ws" + strings.TrimPrefix(server.URL, "http"), SSEURL: server.URL, IdleTimeout: time.Second}, factory)
+	defer c.Close()
+	if (*capturedMode) == "age" {
+		c.pool.maxAge = 500 * time.Millisecond
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := continuationRequest(1, "large")
+	req.Transport = "auto"
+	req.Body = []byte(`{"model":"m","input":["` + strings.Repeat("x", 8<<20) + `"]}`)
+	result := make(chan error, 1)
+	go func() { _, err := c.Stream(ctx, req, func(*Event) error { return nil }); result <- err }()
+	var wire *observedTCPWrite
+	select {
+	case wire = <-observed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("dial did not start")
+	}
+	select {
+	case <-wire.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("socket write did not start")
+	}
+	// Prove a real Write remains in progress while completed-write count is stable.
+	deadline := time.Now().Add(300 * time.Millisecond)
+	blocked := false
+	for time.Now().Before(deadline) {
+		count := wire.completed.Load()
+		timer := time.NewTimer(20 * time.Millisecond)
+		select {
+		case err := <-result:
+			timer.Stop()
+			t.Fatalf("request ended before write backpressure proof: %v", err)
+		case <-timer.C:
+		}
+		if wire.active.Load() && wire.completed.Load() == count {
+			blocked = true
+			break
+		}
+	}
+	reportTestFailure(t, !blocked, func() {
+		t.Fatal("TCP peer did not exert write backpressure")
+	})
+	if (*capturedMode) == "cancel" {
+		cancel()
+	} else if (*capturedMode) == "close" {
+		c.Close()
+	}
+	err := awaitStreamError(t, result)
+	var transport *transportError
+	reportTestFailure(t, err == nil || !errors.As(err, &transport) || transport.requestNotSent, func() {
+		t.Fatalf("blocked write lost send boundary: %v", err)
+	})
+	reportTestFailure(t, wire.active.Load(), func() {
+		t.Fatal("TCP Write remained blocked after stream return")
+	})
+	assertNoPoolResources(t, c)
+	reportTestFailure(t, dials.Load() != 1 || posts.Load() != 0, func() {
+		t.Fatalf("partial write replayed: dials=%d posts=%d", dials.Load(), posts.Load())
+	})
+	releaseOnce.Do(func() { close(release) })
+}
+
+// serveActualBlockedUpstreamSocketWriteCanceledClosedOrAgedWithoutReplayRequest exercises one isolated test phase with the original shared state.
+func serveActualBlockedUpstreamSocketWriteCanceledClosedOrAgedWithoutReplayRequest(w http.ResponseWriter, r *http.Request, capturedRelease *chan struct{}, capturedDials *atomic.Int64, capturedPosts *atomic.Int64) {
+	if !websocket.IsWebSocketUpgrade(r) {
+		(*capturedPosts).Add(1)
+		http.Error(w, "unexpected HTTP retry", 500)
+		return
+	}
+	ws, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer ws.Close()
+	(*capturedDials).Add(1)
+	if tcp, ok := ws.UnderlyingConn().(*net.TCPConn); ok {
+		_ = tcp.SetReadBuffer(1024)
+	}
+	<-(*capturedRelease) // deliberately never read the WebSocket request body
+}
+
+// verifyActualBlockedUpstreamSocketWriteCanceledClosedOrAgedWithoutReplay exercises one isolated test phase with the original shared state.
+func verifyActualBlockedUpstreamSocketWriteCanceledClosedOrAgedWithoutReplay(ctx context.Context, network, addr string, capturedObserved *chan *observedTCPWrite) (net.Conn, error) {
+	conn, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+	if err != nil {
+		return nil, err
+	}
+	if tcp, ok := conn.(*net.TCPConn); ok {
+		_ = tcp.SetWriteBuffer(1024)
+	}
+	wrapped := &observedTCPWrite{Conn: conn, started: make(chan struct{})}
+	(*capturedObserved) <- wrapped
+	return wrapped, nil
 }

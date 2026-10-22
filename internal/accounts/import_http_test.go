@@ -34,41 +34,23 @@ func importHarness(t *testing.T, transport http.RoundTripper) (*store.Store, fun
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "import.db")
 	st, err := store.Open(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, err)
 	// TempDir cleanup on Windows fails while SQLite side files (-wal/-shm) are
 	// still present, so drop them after the store closes (cleanups run LIFO).
 	t.Cleanup(func() {
-		for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
-			for attempt := 0; attempt < 50; attempt++ {
-				err := os.Remove(dbPath + suffix)
-				if err == nil || os.IsNotExist(err) {
-					break
-				}
-				if attempt == 49 {
-					t.Errorf("remove SQLite fixture: %v", err)
-					break
-				}
-				time.Sleep(20 * time.Millisecond)
-			}
-		}
+		removeImportFixture(t, dbPath)
 	})
 	t.Cleanup(func() { _ = st.Close() })
 	factory := egress.NewFactory(egress.Options{})
 	httpClient, err := factory.HTTPClient("")
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, err)
 	httpClient.Transport = transport
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	manager := accounts.New(st, oauth.NewClient(nil), factory, accounts.Options{Logger: logger})
 	cfg := &config.Config{}
 	cfg.Admin.Username, cfg.Admin.Password, cfg.Admin.SessionTTLMinute = "audit", "test-password", 5
 	server := admin.New(admin.Options{Config: cfg, Store: st, Accounts: manager, Factory: factory, Logger: logger})
-	if err := server.BootstrapPassword(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, server.BootstrapPassword(context.Background()))
 	mux := http.NewServeMux()
 	server.Routes(mux, nil)
 	login := httptest.NewRecorder()
@@ -79,15 +61,14 @@ func importHarness(t *testing.T, transport http.RoundTripper) (*store.Store, fun
 	var session struct {
 		Token string `json:"token"`
 	}
-	if err := json.Unmarshal(login.Body.Bytes(), &session); err != nil || session.Token == "" {
-		t.Fatalf("invalid login session: %v", err)
+	{
+		err := json.Unmarshal(login.Body.Bytes(), &session)
+		requireDataTruef(t, !(err != nil || session.Token == ""), "invalid login session: %v", err)
 	}
 	return st, func(body map[string]string) *httptest.ResponseRecorder {
 		t.Helper()
 		payload, err := json.Marshal(body)
-		if err != nil {
-			t.Fatal(err)
-		}
+		requireDataNoError(t, err)
 		request := httptest.NewRequest(http.MethodPost, "/api/accounts", bytes.NewReader(payload))
 		request.Header.Set("Authorization", "Bearer "+session.Token)
 		response := httptest.NewRecorder()
@@ -144,9 +125,7 @@ func TestImportHTTPAcceptsVerifiedChatGPTCredential(t *testing.T) {
 		if r.URL.String() != oauth.ChatGPTTokenURL || r.Method != http.MethodPost {
 			t.Fatalf("wrong token endpoint: %s %s", r.Method, r.URL)
 		}
-		if err := r.ParseForm(); err != nil {
-			t.Fatal(err)
-		}
+		requireDataNoError(t, r.ParseForm())
 		for key, want := range map[string]string{
 			"client_id": "issued-client", "refresh_token": "submitted-refresh",
 			"resource": oauth.ChatGPTResource, "grant_type": "refresh_token",
@@ -171,18 +150,14 @@ func TestImportHTTPAcceptsVerifiedChatGPTCredential(t *testing.T) {
 		if response.Code != http.StatusOK {
 			t.Fatalf("import = %d: %s", response.Code, response.Body.String())
 		}
-		if strings.Contains(response.Body.String(), "verified-chatgpt-access") || strings.Contains(response.Body.String(), "rotated-chatgpt-refresh") {
-			t.Fatal("import response exposed credentials")
-		}
+		requireDataCondition(t, !(strings.Contains(response.Body.String(), "verified-chatgpt-access") || strings.Contains(response.Body.String(), "rotated-chatgpt-refresh")), "import response exposed credentials")
 	}
 	rows, err := st.ListAccounts(context.Background())
 	if err != nil || len(rows) != 1 || calls != 2 {
 		t.Fatalf("accounts=%d token calls=%d err=%v", len(rows), calls, err)
 	}
 	got := rows[0]
-	if got.AccessToken != "verified-chatgpt-access" || got.RefreshToken != "rotated-chatgpt-refresh" || got.OAuthClientID != "issued-client" || got.CodexLinked() {
-		t.Fatal("import did not store only the verified ChatGPT credential")
-	}
+	requireDataCondition(t, !(got.AccessToken != "verified-chatgpt-access" || got.RefreshToken != "rotated-chatgpt-refresh" || got.OAuthClientID != "issued-client" || got.CodexLinked()), "import did not store only the verified ChatGPT credential")
 }
 
 func TestImportHTTPRefreshFailureDoesNotPersist(t *testing.T) {
@@ -214,5 +189,22 @@ func TestImportHTTPRefreshFailureDoesNotPersist(t *testing.T) {
 				t.Fatalf("failed import mutated accounts: count=%d err=%v", len(rows), err)
 			}
 		})
+	}
+}
+
+func removeImportFixture(t *testing.T, dbPath string) {
+	t.Helper()
+	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
+		for attempt := 0; attempt < 50; attempt++ {
+			err := os.Remove(dbPath + suffix)
+			if err == nil || os.IsNotExist(err) {
+				break
+			}
+			if attempt == 49 {
+				t.Errorf("remove SQLite fixture: %v", err)
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
 	}
 }

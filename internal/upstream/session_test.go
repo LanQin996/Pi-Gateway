@@ -36,37 +36,7 @@ type continuationFixture struct {
 func newContinuationFixture(t *testing.T, hook func(*websocket.Conn, int64, int64) bool) *continuationFixture {
 	t.Helper()
 	f := &continuationFixture{frames: make(chan observedRequest, 64), hook: hook}
-	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !websocket.IsWebSocketUpgrade(r) {
-			f.httpCalls.Add(1)
-			http.Error(w, "no SSE expected", 500)
-			return
-		}
-		ws, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer ws.Close()
-		connection := f.dials.Add(1)
-		for {
-			_, body, err := ws.ReadMessage()
-			if err != nil {
-				return
-			}
-			var frame map[string]any
-			if json.Unmarshal(body, &frame) != nil {
-				return
-			}
-			n := f.requests.Add(1)
-			f.frames <- observedRequest{connection, frame}
-			if f.hook != nil && !f.hook(ws, connection, n) {
-				return
-			}
-			if err := ws.WriteJSON(map[string]any{"type": "response.completed", "response": map[string]any{"id": fmt.Sprintf("r%d", n), "status": "completed", "output": []any{"answer"}}}); err != nil {
-				return
-			}
-		}
-	}))
+	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { serveNewContinuationFixtureRequest(w, r, &f) }))
 	t.Cleanup(f.server.Close)
 	return f
 }
@@ -85,8 +55,11 @@ func runContinuation(t *testing.T, c *Client, req *Request) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if _, err := c.Stream(ctx, req, func(*Event) error { return nil }); err != nil {
-		t.Fatal(err)
+	{
+		_, err := c.Stream(ctx, req, func(*Event) error { return nil })
+		reportTestFailure(t, err != nil, func() {
+			t.Fatal(err)
+		})
 	}
 }
 
@@ -151,53 +124,65 @@ func TestContinuationCodexBridgeProfileIsolation(t *testing.T) {
 			runContinuation(t, c, req)
 			<-f.frames
 			record, err := c.ResolveContinuation(context.Background(), 1, "r1")
-			if err != nil {
+			reportTestFailure(t, err != nil, func() {
 				t.Fatal(err)
-			}
+			})
 			shared, err := store.Resolve(context.Background(), 1, "r1")
-			if err != nil || shared.CodexBridge != initial || record.CodexBridge != initial {
+			reportTestFailure(t, err != nil || shared.CodexBridge != initial || record.CodexBridge != initial, func() {
 				t.Fatalf("profile not retained: local=%#v shared=%#v err=%v", record, shared, err)
-			}
+			})
 			next := explicitRequest(t, req, "r1", []any{"delta"})
 			next.Continuation = record
 			next.CodexBridge = codexbridge.Profile{Version: 1, Tools: codexbridge.ToolSpawnAgent}
-			if _, err := c.Stream(context.Background(), next, func(*Event) error { return nil }); !errors.Is(err, ErrContinuationUnavailable) {
-				t.Fatalf("cross-profile explicit continuation = %v", err)
+			{
+				_, err := c.Stream(context.Background(), next, func(*Event) error { return nil })
+				reportTestFailure(t, !errors.Is(err, ErrContinuationUnavailable), func() {
+					t.Fatalf("cross-profile explicit continuation = %v", err)
+				})
 			}
 			forged := *record
 			forged.CodexBridge = next.CodexBridge
-			if c.pool.matches(&forged) {
+			reportTestFailure(t, c.pool.matches(&forged), func() {
 				t.Fatal("forged pool profile matched local record")
-			}
+			})
 			next.Continuation = &forged
-			if _, err := c.Stream(context.Background(), next, func(*Event) error { return nil }); !errors.Is(err, ErrContinuationUnavailable) {
-				t.Fatalf("forged-profile continuation = %v", err)
+			{
+				_, err := c.Stream(context.Background(), next, func(*Event) error { return nil })
+				reportTestFailure(t, !errors.Is(err, ErrContinuationUnavailable), func() {
+					t.Fatalf("forged-profile continuation = %v", err)
+				})
 			}
-			if f.requests.Load() != 1 {
+			reportTestFailure(t, f.requests.Load() != 1, func() {
 				t.Fatal("mismatched explicit delta reached upstream")
-			}
+			})
 			// An implicit profile change falls back to full input on the same socket.
 			req.CodexBridge = next.CodexBridge
 			req.Body = []byte(`{"model":"m","input":["one","answer","new"]}`)
 			runContinuation(t, c, req)
 			frame := <-f.frames
-			if _, ok := frame.body["previous_response_id"]; ok {
-				t.Fatal("profile change used cached delta")
+			{
+				_, ok := frame.body["previous_response_id"]
+				reportTestFailure(t, ok, func() {
+					t.Fatal("profile change used cached delta")
+				})
 			}
-			if !reflect.DeepEqual(frame.body["input"], []any{"one", "answer", "new"}) || f.dials.Load() != 1 {
+			reportTestFailure(t, !reflect.DeepEqual(frame.body["input"], []any{"one", "answer", "new"}) || f.dials.Load() != 1, func() {
 				t.Fatalf("profile fallback did not preserve full input/socket: %+v", frame)
-			}
+			})
 			// Matching profile with no tools is valid for an explicit delta, and
 			// must not strip a prefix even if it resembles cached full history.
 			delta := []any{"one", "answer", "new", "explicit"}
 			same := explicitRequest(t, req, "r2", delta)
 			runContinuation(t, c, same)
 			explicitFrame := <-f.frames
-			if explicitFrame.body["previous_response_id"] != "r2" || !reflect.DeepEqual(explicitFrame.body["input"], delta) {
+			reportTestFailure(t, explicitFrame.body["previous_response_id"] != "r2" || !reflect.DeepEqual(explicitFrame.body["input"], delta), func() {
 				t.Fatalf("same-profile explicit delta was changed: %+v", explicitFrame)
-			}
-			if _, ok := explicitFrame.body["tools"]; ok {
-				t.Fatal("explicit delta unexpectedly acquired tool definitions")
+			})
+			{
+				_, ok := explicitFrame.body["tools"]
+				reportTestFailure(t, ok, func() {
+					t.Fatal("explicit delta unexpectedly acquired tool definitions")
+				})
 			}
 		})
 	}
@@ -208,28 +193,34 @@ func TestContinuationRejectsInvalidCodexBridgeProfile(t *testing.T) {
 	c := testClient(t, f.server.URL)
 	req := continuationRequest(1, "invalid-profile")
 	req.CodexBridge = codexbridge.Profile{Version: 99}
-	if _, err := c.Stream(context.Background(), req, func(*Event) error { return nil }); !errors.Is(err, session.ErrInvalid) {
-		t.Fatalf("invalid request profile = %v", err)
+	{
+		_, err := c.Stream(context.Background(), req, func(*Event) error { return nil })
+		reportTestFailure(t, !errors.Is(err, session.ErrInvalid), func() {
+			t.Fatalf("invalid request profile = %v", err)
+		})
 	}
-	if f.dials.Load() != 0 || f.requests.Load() != 0 {
+	reportTestFailure(t, f.dials.Load() != 0 || f.requests.Load() != 0, func() {
 		t.Fatal("invalid profile reached upstream")
-	}
+	})
 	req.CodexBridge = codexbridge.Profile{}
 	runContinuation(t, c, req)
 	<-f.frames
 	record, err := c.ResolveContinuation(context.Background(), 1, "r1")
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatal(err)
-	}
+	})
 	record.CodexBridge = codexbridge.Profile{Version: 99}
-	if c.validRecord(record, 1, "r1") {
+	reportTestFailure(t, c.validRecord(record, 1, "r1"), func() {
 		t.Fatal("invalid persisted profile accepted")
-	}
+	})
 	c.pool.mu.Lock()
 	c.pool.entries[record.SessionID].record = record
 	c.pool.mu.Unlock()
-	if _, err := c.ResolveContinuation(context.Background(), 1, "r1"); !errors.Is(err, session.ErrInvalid) {
-		t.Fatalf("invalid local profile = %v", err)
+	{
+		_, err := c.ResolveContinuation(context.Background(), 1, "r1")
+		reportTestFailure(t, !errors.Is(err, session.ErrInvalid), func() {
+			t.Fatalf("invalid local profile = %v", err)
+		})
 	}
 }
 
@@ -238,25 +229,7 @@ func TestContinuationCodexBridgeClientReplayKeepsRawBaseline(t *testing.T) {
 	rawCall := map[string]any{"type": "function_call", "id": "fc1", "call_id": "call-1", "name": codexbridge.Alias + ".send_message", "arguments": `{"id":"child","message":"complete task"}`}
 	frames := make(chan map[string]any, 4)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ws, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer ws.Close()
-		for n := 1; ; n++ {
-			_, body, err := ws.ReadMessage()
-			if err != nil {
-				return
-			}
-			var frame map[string]any
-			if json.Unmarshal(body, &frame) != nil {
-				return
-			}
-			frames <- frame
-			if err := ws.WriteJSON(map[string]any{"type": "response.completed", "response": map[string]any{"id": fmt.Sprintf("r%d", n), "status": "completed", "output": []any{rawCall}}}); err != nil {
-				return
-			}
-		}
+		serveContinuationCodexBridgeClientReplayKeepsRawBaselineRequest(w, r, &rawCall, &frames)
 	}))
 	defer server.Close()
 	c := testClient(t, server.URL)
@@ -273,47 +246,53 @@ func TestContinuationCodexBridgeClientReplayKeepsRawBaseline(t *testing.T) {
 		clientCall = restored["response"].(map[string]any)["output"].([]any)[0].(map[string]any)
 		return nil
 	})
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatal(err)
-	}
+	})
 	<-frames
-	if clientCall["name"] != "send_message" || clientCall["namespace"] != "collaboration" {
+	reportTestFailure(t, clientCall["name"] != "send_message" || clientCall["namespace"] != "collaboration", func() {
 		t.Fatalf("client identity was not restored: %#v", clientCall)
-	}
-	if marker, ok := clientCall["encrypted_function_args"].([]any); !ok || len(marker) != 0 {
-		t.Fatal("client did not receive empty plaintext marker")
+	})
+	{
+		marker, ok := clientCall["encrypted_function_args"].([]any)
+		reportTestFailure(t, !ok || len(marker) != 0, func() {
+			t.Fatal("client did not receive empty plaintext marker")
+		})
 	}
 	record, err := c.ResolveContinuation(context.Background(), 1, "r1")
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatal(err)
-	}
+	})
 	c.pool.mu.Lock()
 	cont := c.pool.entries[record.SessionID].continuation
 	encodedOutput := append([]byte(nil), cont.encodedResponseItems...)
 	c.pool.mu.Unlock()
 	var baseline []any
-	if err := json.Unmarshal(encodedOutput, &baseline); err != nil {
-		t.Fatal(err)
+	{
+		err := json.Unmarshal(encodedOutput, &baseline)
+		reportTestFailure(t, err != nil, func() {
+			t.Fatal(err)
+		})
 	}
-	if !jsonEqual(baseline, []any{rawCall}) {
+	reportTestFailure(t, !jsonEqual(baseline, []any{rawCall}), func() {
 		t.Fatalf("callback restoration polluted raw baseline: %s", encodedOutput)
-	}
+	})
 	// The API forwards the client's restored replay before upstream comparison.
 	replayed := map[string]any{"model": "m", "input": []any{"one", clientCall, map[string]any{"type": "function_call_output", "call_id": "call-1", "output": "delivered"}}}
 	forwarded, _, err := codexbridge.Forward(replayed, profile)
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatal(err)
-	}
+	})
 	req.Body = mustJSON(t, forwarded)
 	runContinuation(t, c, req)
 	frame := <-frames
-	if frame["previous_response_id"] != "r1" {
+	reportTestFailure(t, frame["previous_response_id"] != "r1", func() {
 		t.Fatalf("actual client replay did not use cached delta: %#v", frame)
-	}
+	})
 	items, _ := frame["input"].([]any)
-	if len(items) != 1 || items[0].(map[string]any)["type"] != "function_call_output" {
+	reportTestFailure(t, len(items) != 1 || items[0].(map[string]any)["type"] != "function_call_output", func() {
 		t.Fatalf("replay delta = %#v", items)
-	}
+	})
 }
 
 func TestContinuationKeyIsolationAndReconnectExplicitDelta(t *testing.T) {
@@ -323,22 +302,28 @@ func TestContinuationKeyIsolationAndReconnectExplicitDelta(t *testing.T) {
 	runContinuation(t, c, req)
 	first := <-f.frames
 	record, err := c.ResolveContinuation(context.Background(), 1, "r1")
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatal(err)
-	}
+	})
 	other := continuationRequest(2, "same")
 	runContinuation(t, c, other)
 	second := <-f.frames
-	if first.connection == second.connection {
+	reportTestFailure(t, first.connection == second.connection, func() {
 		t.Fatal("different owners shared a socket")
-	}
-	if _, err := c.ResolveContinuation(context.Background(), 2, "r1"); !errors.Is(err, ErrContinuationUnavailable) {
-		t.Fatalf("cross-key resolve=%v", err)
+	})
+	{
+		_, err := c.ResolveContinuation(context.Background(), 2, "r1")
+		reportTestFailure(t, !errors.Is(err, ErrContinuationUnavailable), func() {
+			t.Fatalf("cross-key resolve=%v", err)
+		})
 	}
 	bad := explicitRequest(t, other, "r1", []any{"delta"})
 	bad.Continuation = record
-	if _, err := c.Stream(context.Background(), bad, func(*Event) error { return nil }); !errors.Is(err, ErrContinuationUnavailable) {
-		t.Fatalf("cross-key continuation=%v", err)
+	{
+		_, err := c.Stream(context.Background(), bad, func(*Event) error { return nil })
+		reportTestFailure(t, !errors.Is(err, ErrContinuationUnavailable), func() {
+			t.Fatalf("cross-key continuation=%v", err)
+		})
 	}
 	// Matching prefix in an explicit delta must NOT be stripped again.
 	delta := []any{"one", "answer", "new"}
@@ -346,14 +331,17 @@ func TestContinuationKeyIsolationAndReconnectExplicitDelta(t *testing.T) {
 	next.Transport = "sse"
 	runContinuation(t, c, next)
 	third := <-f.frames
-	if third.connection != first.connection || !reflect.DeepEqual(third.body["input"], delta) {
+	reportTestFailure(t, third.connection != first.connection || !reflect.DeepEqual(third.body["input"], delta), func() {
 		t.Fatalf("explicit reconnect=%+v", third)
-	}
-	if third.body["previous_response_id"] != "r1" || f.httpCalls.Load() != 0 || f.dials.Load() != 2 {
+	})
+	reportTestFailure(t, third.body["previous_response_id"] != "r1" || f.httpCalls.Load() != 0 || f.dials.Load() != 2, func() {
 		t.Fatal("explicit parent changed transport or socket")
-	}
-	if _, ok := third.body["pool_session_id"]; ok {
-		t.Fatal("internal scope leaked")
+	})
+	{
+		_, ok := third.body["pool_session_id"]
+		reportTestFailure(t, ok, func() {
+			t.Fatal("internal scope leaked")
+		})
 	}
 }
 
@@ -378,12 +366,12 @@ func TestContinuationImplicitPrefixAndParameterChanges(t *testing.T) {
 			runContinuation(t, c, req)
 			frame := <-f.frames
 			_, parent := frame.body["previous_response_id"]
-			if parent != test.wantParent || !reflect.DeepEqual(frame.body["input"], test.want) {
+			reportTestFailure(t, parent != test.wantParent || !reflect.DeepEqual(frame.body["input"], test.want), func() {
 				t.Fatalf("bad delta: %+v", frame.body)
-			}
-			if f.dials.Load() != 1 {
+			})
+			reportTestFailure(t, f.dials.Load() != 1, func() {
 				t.Fatal("history comparison unexpectedly redialed")
-			}
+			})
 		})
 	}
 }
@@ -397,9 +385,9 @@ func TestContinuationRejectsIdentityChangesAndOldOrDeadSocket(t *testing.T) {
 			runContinuation(t, c, req)
 			<-f.frames
 			record, err := c.ResolveContinuation(context.Background(), 1, "r1")
-			if err != nil {
+			reportTestFailure(t, err != nil, func() {
 				t.Fatal(err)
-			}
+			})
 			next := explicitRequest(t, req, "r1", []any{"delta"})
 			next.Continuation = record
 			next.Transport = "auto"
@@ -430,12 +418,15 @@ func TestContinuationRejectsIdentityChangesAndOldOrDeadSocket(t *testing.T) {
 				next = explicitRequest(t, req, "unknown", []any{"delta"})
 			}
 			count := f.requests.Load()
-			if _, err := c.Stream(context.Background(), next, func(*Event) error { return nil }); !errors.Is(err, ErrContinuationUnavailable) {
-				t.Fatalf("error=%v", err)
+			{
+				_, err := c.Stream(context.Background(), next, func(*Event) error { return nil })
+				reportTestFailure(t, !errors.Is(err, ErrContinuationUnavailable), func() {
+					t.Fatalf("error=%v", err)
+				})
 			}
-			if f.requests.Load() != count || f.httpCalls.Load() != 0 || f.dials.Load() != 1 {
+			reportTestFailure(t, f.requests.Load() != count || f.httpCalls.Load() != 0 || f.dials.Load() != 1, func() {
 				t.Fatal("rejected parent was sent/retried")
-			}
+			})
 		})
 	}
 }
@@ -488,15 +479,21 @@ func TestContinuationBusyWaiterRevalidatesLatestParent(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	close(gate)
-	if err := <-first; err != nil {
-		t.Fatal(err)
+	{
+		err := <-first
+		reportTestFailure(t, err != nil, func() {
+			t.Fatal(err)
+		})
 	}
-	if err := <-waiter; !errors.Is(err, ErrContinuationUnavailable) {
-		t.Fatalf("stale waiter=%v", err)
+	{
+		err := <-waiter
+		reportTestFailure(t, !errors.Is(err, ErrContinuationUnavailable), func() {
+			t.Fatalf("stale waiter=%v", err)
+		})
 	}
-	if f.requests.Load() != 2 || f.dials.Load() != 1 {
+	reportTestFailure(t, f.requests.Load() != 2 || f.dials.Load() != 1, func() {
 		t.Fatal("busy waiter created/replayed a request")
-	}
+	})
 }
 
 func TestContinuationSharedFailureAndLateCommitDoNotRevokeSuccess(t *testing.T) {
@@ -517,13 +514,13 @@ func TestContinuationSharedFailureAndLateCommitDoNotRevokeSuccess(t *testing.T) 
 			started := time.Now()
 			runContinuation(t, c, req)
 			<-f.frames
-			if time.Since(started) > time.Second {
+			reportTestFailure(t, time.Since(started) > time.Second, func() {
 				t.Fatal("shared commit exceeded request bound")
-			}
+			})
 			record, err := c.ResolveContinuation(context.Background(), 1, "r1")
-			if err != nil {
+			reportTestFailure(t, err != nil, func() {
 				t.Fatalf("trusted local fallback=%v", err)
-			}
+			})
 			next := explicitRequest(t, req, "r1", []any{"two"})
 			next.Continuation = record
 			runContinuation(t, c, next)
@@ -534,23 +531,32 @@ func TestContinuationSharedFailureAndLateCommitDoNotRevokeSuccess(t *testing.T) 
 				store.mu.Lock()
 				store.readErr = nil // Redis recovered, and the late record is readable.
 				store.mu.Unlock()
-				if r, err := store.Resolve(context.Background(), 1, "r1"); err != nil || r.ResponseID != "r1" {
-					t.Fatalf("late shared record was not readable: record=%v err=%v", r, err)
+				{
+					r, err := store.Resolve(context.Background(), 1, "r1")
+					reportTestFailure(t, err != nil || r.ResponseID != "r1", func() {
+						t.Fatalf("late shared record was not readable: record=%v err=%v", r, err)
+					})
 				}
 			}
 			hits := store.hits.Load()
-			if _, err := c.ResolveContinuation(context.Background(), 1, "r2"); err != nil {
-				t.Fatal(err)
+			{
+				_, err := c.ResolveContinuation(context.Background(), 1, "r2")
+				reportTestFailure(t, err != nil, func() {
+					t.Fatal(err)
+				})
 			}
-			if _, err := c.Stream(context.Background(), explicitRequest(t, req, "r1", []any{"stale"}), func(*Event) error { return nil }); !errors.Is(err, ErrContinuationUnavailable) {
-				t.Fatalf("late old write revived parent: %v", err)
+			{
+				_, err := c.Stream(context.Background(), explicitRequest(t, req, "r1", []any{"stale"}), func(*Event) error { return nil })
+				reportTestFailure(t, !errors.Is(err, ErrContinuationUnavailable), func() {
+					t.Fatalf("late old write revived parent: %v", err)
+				})
 			}
-			if late && store.hits.Load() != hits+1 {
+			reportTestFailure(t, late && store.hits.Load() != hits+1, func() {
 				t.Fatal("old parent rejection did not read the recovered shared record")
-			}
-			if f.requests.Load() != 2 || f.dials.Load() != 1 || f.httpCalls.Load() != 0 {
+			})
+			reportTestFailure(t, f.requests.Load() != 2 || f.dials.Load() != 1 || f.httpCalls.Load() != 0, func() {
 				t.Fatal("shared failure repeated generation")
-			}
+			})
 		})
 	}
 }
@@ -563,25 +569,31 @@ func TestContinuationCommitOrderingAndCallbackFailure(t *testing.T) {
 	expected := errors.New("downstream closed")
 	_, err := c.Stream(context.Background(), continuationRequest(1, "scope"), func(e *Event) error {
 		if IsTerminal(e.Type) {
-			if store.writes.Load() != 1 {
+			reportTestFailure(t, store.writes.Load() != 1, func() {
 				t.Error("terminal delivered before bounded commit")
-			}
-			if _, err := c.ResolveContinuation(context.Background(), 1, "r1"); !errors.Is(err, ErrContinuationUnavailable) {
-				t.Error("local state advanced before delivery")
+			})
+			{
+				_, err := c.ResolveContinuation(context.Background(), 1, "r1")
+				reportTestFailure(t, !errors.Is(err, ErrContinuationUnavailable), func() {
+					t.Error("local state advanced before delivery")
+				})
 			}
 			return expected
 		}
 		return nil
 	})
-	if !errors.Is(err, expected) {
+	reportTestFailure(t, !errors.Is(err, expected), func() {
 		t.Fatalf("callback=%v", err)
+	})
+	{
+		_, err := c.ResolveContinuation(context.Background(), 1, "r1")
+		reportTestFailure(t, !errors.Is(err, ErrContinuationUnavailable), func() {
+			t.Fatal("undelivered result became resumable")
+		})
 	}
-	if _, err := c.ResolveContinuation(context.Background(), 1, "r1"); !errors.Is(err, ErrContinuationUnavailable) {
-		t.Fatal("undelivered result became resumable")
-	}
-	if c.PoolSize() != 0 {
+	reportTestFailure(t, c.PoolSize() != 0, func() {
 		t.Fatal("failed callback retained socket")
-	}
+	})
 }
 
 func TestContinuationNonSuccessfulTerminalNeverReady(t *testing.T) {
@@ -595,15 +607,18 @@ func TestContinuationNonSuccessfulTerminalNeverReady(t *testing.T) {
 			store := &continuationStore{}
 			c.cfg.Sessions = store
 			_, _ = c.Stream(context.Background(), continuationRequest(1, "scope"), func(*Event) error { return nil })
-			if store.writes.Load() != 0 {
+			reportTestFailure(t, store.writes.Load() != 0, func() {
 				t.Fatal("non-completed record committed")
+			})
+			{
+				_, err := c.ResolveContinuation(context.Background(), 1, "not-ready")
+				reportTestFailure(t, !errors.Is(err, ErrContinuationUnavailable), func() {
+					t.Fatalf("non-completed resolve=%v", err)
+				})
 			}
-			if _, err := c.ResolveContinuation(context.Background(), 1, "not-ready"); !errors.Is(err, ErrContinuationUnavailable) {
-				t.Fatalf("non-completed resolve=%v", err)
-			}
-			if c.PoolSize() != 0 {
+			reportTestFailure(t, c.PoolSize() != 0, func() {
 				t.Fatal("non-success socket retained")
-			}
+			})
 		})
 	}
 }
@@ -631,18 +646,24 @@ func TestContinuationBaselineLimitsDisableOptimizationWithoutTruncation(t *testi
 			req.Body = []byte(`{"model":"m","input":["one","answer","two"]}`)
 			runContinuation(t, c, req)
 			frame := <-f.frames
-			if _, ok := frame.body["previous_response_id"]; ok {
-				t.Fatal("oversize baseline was truncated and reused")
+			{
+				_, ok := frame.body["previous_response_id"]
+				reportTestFailure(t, ok, func() {
+					t.Fatal("oversize baseline was truncated and reused")
+				})
 			}
 			c.pool.mu.Lock()
 			total := c.pool.totalBaselineBytes
 			limit := c.pool.maxTotalBaselineBytes
 			c.pool.mu.Unlock()
-			if total > limit {
+			reportTestFailure(t, total > limit, func() {
 				t.Fatalf("total baseline=%d > %d", total, limit)
-			}
-			if _, err := c.ResolveContinuation(context.Background(), 1, fmt.Sprintf("r%d", f.requests.Load())); err != nil {
-				t.Fatal("baseline limit disabled legal explicit metadata")
+			})
+			{
+				_, err := c.ResolveContinuation(context.Background(), 1, fmt.Sprintf("r%d", f.requests.Load()))
+				reportTestFailure(t, err != nil, func() {
+					t.Fatal("baseline limit disabled legal explicit metadata")
+				})
 			}
 		})
 	}
@@ -650,73 +671,7 @@ func TestContinuationBaselineLimitsDisableOptimizationWithoutTruncation(t *testi
 
 func TestWSActiveAgeLimitAndBusyCapacity(t *testing.T) {
 	for _, age := range []bool{false, true} {
-		t.Run(fmt.Sprint(age), func(t *testing.T) {
-			entered := make(chan struct{})
-			release := make(chan struct{})
-			f := newContinuationFixture(t, func(ws *websocket.Conn, _, n int64) bool {
-				if n == 1 {
-					close(entered)
-					if age {
-						for {
-							if err := ws.WriteJSON(map[string]any{"type": "response.output_text.delta", "delta": "x"}); err != nil {
-								return false
-							}
-							select {
-							case <-release:
-								return false
-							case <-time.After(5 * time.Millisecond):
-							}
-						}
-					}
-					<-release
-				}
-				return true
-			})
-			c := testClient(t, f.server.URL)
-			c.pool.maxConnections = 1
-			if age {
-				c.pool.maxAge = 60 * time.Millisecond
-			}
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			result := make(chan error, 1)
-			go func() {
-				_, err := c.Stream(ctx, continuationRequest(1, "busy"), func(*Event) error { return nil })
-				result <- err
-			}()
-			<-entered
-			if !age {
-				_, err := c.Stream(context.Background(), continuationRequest(2, "other"), func(*Event) error { return nil })
-				if !errors.Is(err, ErrPoolBusy) {
-					close(release)
-					t.Fatalf("capacity=%v", err)
-				}
-				if f.dials.Load() != 1 {
-					close(release)
-					t.Fatal("capacity dialed second socket")
-				}
-				cancel()
-			}
-			select {
-			case err := <-result:
-				if age && !errors.Is(err, ErrWSMaxAge) {
-					t.Fatalf("active age=%v", err)
-				}
-				if !age && !errors.Is(err, context.Canceled) {
-					t.Fatalf("cancel=%v", err)
-				}
-			case <-time.After(time.Second):
-				close(release)
-				t.Fatal("active request not interrupted")
-			}
-			close(release)
-			c.pool.mu.Lock()
-			entries, slots, reservations := len(c.pool.entries), len(c.pool.slots), c.pool.reservations
-			c.pool.mu.Unlock()
-			if entries != 0 || slots != 0 || reservations != 0 {
-				t.Fatalf("resources leaked: %d %d %d", entries, slots, reservations)
-			}
-		})
+		t.Run(fmt.Sprint(age), func(t *testing.T) { runWSActiveAgeLimitAndBusyCapacityCase(t, &age) })
 	}
 }
 
@@ -725,11 +680,145 @@ func TestPoolIdentityDoesNotExposeSecretsAndZeroKeyDoesNotReuse(t *testing.T) {
 	req := continuationRequest(1, "scope")
 	req.ProxyURL = "http://user:private-password@localhost"
 	key := c.requestPoolKey(req)
-	if strings.Contains(key, "private") || strings.Contains(key, "token") || strings.Contains(key, "scope") {
+	reportTestFailure(t, strings.Contains(key, "private") || strings.Contains(key, "token") || strings.Contains(key, "scope"), func() {
 		t.Fatal("pool key leaks raw identity")
-	}
+	})
 	req.ClientKeyID = 0
-	if c.requestPoolKey(req) == c.requestPoolKey(req) {
+	firstAnonymousKey := c.requestPoolKey(req)
+	secondAnonymousKey := c.requestPoolKey(req)
+	reportTestFailure(t, firstAnonymousKey == secondAnonymousKey, func() {
 		t.Fatal("anonymous key shared pool lane")
+	})
+}
+
+// serveNewContinuationFixtureRequest exercises one isolated test phase with the original shared state.
+func serveNewContinuationFixtureRequest(w http.ResponseWriter, r *http.Request, capturedF **continuationFixture) {
+	if !websocket.IsWebSocketUpgrade(r) {
+		(*capturedF).httpCalls.Add(1)
+		http.Error(w, "no SSE expected", 500)
+		return
 	}
+	ws, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer ws.Close()
+	connection := (*capturedF).dials.Add(1)
+	for {
+		_, body, err := ws.ReadMessage()
+		if err != nil {
+			return
+		}
+		var frame map[string]any
+		if json.Unmarshal(body, &frame) != nil {
+			return
+		}
+		n := (*capturedF).requests.Add(1)
+		(*capturedF).frames <- observedRequest{connection, frame}
+		if (*capturedF).hook != nil && !(*capturedF).hook(ws, connection, n) {
+			return
+		}
+		if err := ws.WriteJSON(map[string]any{"type": "response.completed", "response": map[string]any{"id": fmt.Sprintf("r%d", n), "status": "completed", "output": []any{"answer"}}}); err != nil {
+			return
+		}
+	}
+}
+
+// serveContinuationCodexBridgeClientReplayKeepsRawBaselineRequest exercises one isolated test phase with the original shared state.
+func serveContinuationCodexBridgeClientReplayKeepsRawBaselineRequest(w http.ResponseWriter, r *http.Request, capturedRawCall *map[string]any, capturedFrames *chan map[string]any) {
+	ws, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer ws.Close()
+	for n := 1; ; n++ {
+		_, body, err := ws.ReadMessage()
+		if err != nil {
+			return
+		}
+		var frame map[string]any
+		if json.Unmarshal(body, &frame) != nil {
+			return
+		}
+		(*capturedFrames) <- frame
+		if err := ws.WriteJSON(map[string]any{"type": "response.completed", "response": map[string]any{"id": fmt.Sprintf("r%d", n), "status": "completed", "output": []any{(*capturedRawCall)}}}); err != nil {
+			return
+		}
+	}
+}
+
+// runWSActiveAgeLimitAndBusyCapacityCase exercises one isolated test phase with the original shared state.
+func runWSActiveAgeLimitAndBusyCapacityCase(t *testing.T, capturedAge *bool) {
+	t.Helper()
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	f := newContinuationFixture(t, func(ws *websocket.Conn, ignoredParameter1_0, n int64) bool {
+		return verifyWSActiveAgeLimitAndBusyCapacity(ws, ignoredParameter1_0, n, &capturedAge, &entered, &release)
+	})
+	c := testClient(t, f.server.URL)
+	c.pool.maxConnections = 1
+	if *capturedAge {
+		c.pool.maxAge = 60 * time.Millisecond
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := c.Stream(ctx, continuationRequest(1, "busy"), func(*Event) error { return nil })
+		result <- err
+	}()
+	<-entered
+	if !(*capturedAge) {
+		_, err := c.Stream(context.Background(), continuationRequest(2, "other"), func(*Event) error { return nil })
+		if !errors.Is(err, ErrPoolBusy) {
+			close(release)
+			t.Fatalf("capacity=%v", err)
+		}
+		if f.dials.Load() != 1 {
+			close(release)
+			t.Fatal("capacity dialed second socket")
+		}
+		cancel()
+	}
+	select {
+	case err := <-result:
+		reportTestFailure(t, (*capturedAge) && !errors.Is(err, ErrWSMaxAge), func() {
+			t.Fatalf("active age=%v", err)
+		})
+		reportTestFailure(t, !(*capturedAge) && !errors.Is(err, context.Canceled), func() {
+			t.Fatalf("cancel=%v", err)
+		})
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("active request not interrupted")
+	}
+	close(release)
+	c.pool.mu.Lock()
+	entries, slots, reservations := len(c.pool.entries), len(c.pool.slots), c.pool.reservations
+	c.pool.mu.Unlock()
+	reportTestFailure(t, entries != 0 || slots != 0 || reservations != 0, func() {
+		t.Fatalf("resources leaked: %d %d %d", entries, slots, reservations)
+	})
+}
+
+// verifyWSActiveAgeLimitAndBusyCapacity exercises one isolated test phase with the original shared state.
+func verifyWSActiveAgeLimitAndBusyCapacity(ws *websocket.Conn, ignoredParameter1_0, n int64, capturedCapturedAge **bool, capturedEntered *chan struct{}, capturedRelease *chan struct{}) bool {
+	if n == 1 {
+		close((*capturedEntered))
+		if *(*capturedCapturedAge) {
+			for {
+				if err := ws.WriteJSON(map[string]any{"type": "response.output_text.delta", "delta": "x"}); err != nil {
+					return false
+				}
+				select {
+				case <-(*capturedRelease):
+					return false
+				case <-time.After(5 * time.Millisecond):
+				}
+			}
+		}
+		<-(*capturedRelease)
+	}
+	return true
 }

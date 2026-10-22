@@ -43,8 +43,11 @@ func TestCodexCLIMultiAgentV2(t *testing.T) {
 	root := t.TempDir()
 	home, workspace := filepath.Join(root, "codex-home"), filepath.Join(root, "workspace")
 	for _, dir := range []string{home, workspace, filepath.Join(root, "tmp"), filepath.Join(root, "appdata"), filepath.Join(root, "localappdata")} {
-		if err := os.MkdirAll(dir, 0700); err != nil {
-			t.Fatal(err)
+		{
+			err := os.MkdirAll(dir, 0700)
+			reportTestFailure(t, err != nil, func() {
+				t.Fatal(err)
+			})
 		}
 	}
 	// No user environment (including auth, proxies, hooks, or provider URLs) is
@@ -53,9 +56,9 @@ func TestCodexCLIMultiAgentV2(t *testing.T) {
 	versionCmd := exec.CommandContext(ctx, binary, "--version")
 	versionCmd.Env, versionCmd.Dir = env, workspace
 	version, err := versionCmd.CombinedOutput()
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatalf("Codex version: %v: %s", err, version)
-	}
+	})
 	t.Logf("real CLI binary=%s version=%s", binary, bytes.TrimSpace(version))
 
 	script := &codexCLIScript{t: t, cancel: cancel, stages: map[string]int{}, calls: map[string]map[string]any{}, mailDelivered: make(chan struct{}), nestedWaiting: make(chan struct{})}
@@ -97,19 +100,19 @@ func TestCodexCLIMultiAgentV2(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err = codexCLIRun(cmd)
-	if err != nil || ctx.Err() != nil {
+	reportTestFailure(t, err != nil || ctx.Err() != nil, func() {
 		t.Errorf("real Codex execution: %v (deadline: %v)\nstdout:\n%s\nstderr:\n%s", err, ctx.Err(), codexCLITail(stdout.String()), codexCLITail(stderr.String()))
-	}
+	})
 	script.assertFinished(t)
-	if !strings.Contains(stdout.String(), codexCLIFinal) {
+	reportTestFailure(t, !strings.Contains(stdout.String(), codexCLIFinal), func() {
 		t.Errorf("CLI JSONL lacks exact child-derived final answer %q; stdout:\n%s\nstderr:\n%s", codexCLIFinal, codexCLITail(stdout.String()), codexCLITail(stderr.String()))
-	}
+	})
 	// A dedicated empty workspace plus read-only sandbox is intentional: neither
 	// host configuration nor a repository instruction can add executable tools.
 	entries, readErr := os.ReadDir(workspace)
-	if readErr != nil || len(entries) != 0 {
+	reportTestFailure(t, readErr != nil || len(entries) != 0, func() {
 		t.Errorf("read-only workspace changed: entries=%v error=%v", entries, readErr)
-	}
+	})
 }
 
 // Pin model-owned tool/backend selectors too: a catalog leaf model can disable
@@ -127,12 +130,15 @@ func codexCLIWriteCatalog(t *testing.T, root string) string {
 		"base_instructions": "Execute only the scripted collaboration calls. Never run shell commands or edit files.",
 	}}}
 	encoded, err := json.Marshal(catalog)
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatal(err)
-	}
+	})
 	path := filepath.Join(root, "models.json")
-	if err := os.WriteFile(path, encoded, 0600); err != nil {
-		t.Fatal(err)
+	{
+		err := os.WriteFile(path, encoded, 0600)
+		reportTestFailure(t, err != nil, func() {
+			t.Fatal(err)
+		})
 	}
 	return path
 }
@@ -229,16 +235,7 @@ func (s *codexCLIScript) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.reject(w, "%v", err)
 		return
 	}
-	role := "root"
-	for _, text := range messages {
-		if strings.Contains(text, "Message Type: NEW_TASK\nTask name: /root/worker/nested\n") {
-			role = "nested"
-			break
-		}
-		if strings.Contains(text, "Message Type: NEW_TASK\nTask name: /root/worker\n") {
-			role = "worker"
-		}
-	}
+	role := codexCLIRequestRole(messages)
 	s.mu.Lock()
 	stage := s.stages[role]
 	s.stages[role]++
@@ -269,132 +266,23 @@ func (s *codexCLIScript) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return false
 		}
 	}
+	ctx := codexCLIStage{s: s, w: w, role: role, stage: stage, joined: joined, need: need, output: output, call: call, wait: wait, await: await}
 	switch role {
 	case "root":
-		// The grandchild's automatic FINAL_ANSWER must go only to its immediate
-		// parent, not leak as an agent notification into the root mailbox.
-		if strings.Contains(joined, "Sender: /root/worker/nested\n") {
-			s.reject(w, "grandchild notification leaked into root mailbox")
-			return
-		}
-		switch stage {
-		case 0:
-			call("cli_spawn_worker", "spawn_agent", map[string]any{"task_name": "worker", "message": codexCLITask, "fork_turns": "none"})
-		case 1:
-			if !output("cli_spawn_worker") {
-				return
-			}
-			call("cli_send_worker", "send_message", map[string]any{"target": "/root/worker", "message": codexCLIMail})
-		case 2:
-			if !output("cli_send_worker") {
-				return
-			}
-			close(s.mailDelivered)
-			wait("cli_wait_first")
-		case 3:
-			if !output("cli_wait_first") || !need("Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/worker\nPayload:\n"+codexCLIAnswer1) {
-				return
-			}
-			call("cli_followup_worker", "followup_task", map[string]any{"target": "/root/worker", "message": codexCLIFollowup})
-		case 4:
-			if !output("cli_followup_worker") {
-				return
-			}
-			wait("cli_wait_second")
-		case 5:
-			if !output("cli_wait_second") || !need("Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/worker\nPayload:\n"+codexCLIAnswer2) {
-				return
-			}
-			s.stream(w, role, stage, codexCLIMessage("msg_cli_root", codexCLIFinal))
-		default:
-			s.reject(w, "unexpected root stage %d", stage)
-		}
+		ctx.root()
 	case "worker":
-		if !need("Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:\n" + codexCLITask) {
-			return
-		}
-		switch stage {
-		case 0:
-			if !await(s.mailDelivered) {
-				return
-			}
-			wait("cli_worker_mailbox")
-		case 1:
-			if !output("cli_worker_mailbox") || !need("Message Type: MESSAGE\nTask name: /root/worker\nSender: /root\nPayload:\n"+codexCLIMail) {
-				return
-			}
-			call("cli_spawn_nested", "spawn_agent", map[string]any{"task_name": "nested", "message": codexCLINestedTask, "fork_turns": "none"})
-		case 2:
-			if !output("cli_spawn_nested") {
-				return
-			}
-			close(s.nestedWaiting)
-			wait("cli_wait_nested")
-		case 3:
-			if !output("cli_wait_nested") || !need("Message Type: FINAL_ANSWER\nTask name: /root/worker\nSender: /root/worker/nested\nPayload:\n"+codexCLINestedAnswer) {
-				return
-			}
-			s.stream(w, role, stage, codexCLIMessage("msg_cli_worker_first", codexCLIAnswer1))
-		case 4:
-			if !need(codexCLIFollowup) {
-				return
-			}
-			s.stream(w, role, stage, codexCLIMessage("msg_cli_worker_second", codexCLIAnswer2))
-		default:
-			s.reject(w, "unexpected worker stage %d", stage)
-		}
+		ctx.worker()
 	case "nested":
-		if stage != 0 || !need("Message Type: NEW_TASK\nTask name: /root/worker/nested\nSender: /root/worker\nPayload:\n"+codexCLINestedTask) {
-			s.reject(w, "invalid nested task or stage %d", stage)
-			return
-		}
-		if !await(s.nestedWaiting) {
-			return
-		}
-		s.stream(w, role, stage, codexCLIMessage("msg_cli_nested", codexCLINestedAnswer))
+		ctx.nested()
 	}
+
 }
 
 func (s *codexCLIScript) validate(request map[string]any) ([]string, error) {
 	var messages []string
 	alias := false
 	var tools func(any) error
-	tools = func(value any) error {
-		switch v := value.(type) {
-		case []any:
-			for _, child := range v {
-				if err := tools(child); err != nil {
-					return err
-				}
-			}
-		case map[string]any:
-			if v["type"] == "namespace" {
-				if v["name"] == "collaboration" {
-					return fmt.Errorf("native collaboration namespace reached upstream")
-				}
-				if v["name"] == codexCLIAlias {
-					alias = true
-				}
-			}
-			if p, ok := v["parameters"].(map[string]any); ok {
-				if props, ok := p["properties"].(map[string]any); ok {
-					if m, ok := props["message"].(map[string]any); ok {
-						if _, exists := m["encrypted"]; exists {
-							return fmt.Errorf("message.encrypted schema reached upstream")
-						}
-					}
-				}
-			}
-			for _, key := range []string{"tools", "function"} {
-				if child, ok := v[key]; ok {
-					if err := tools(child); err != nil {
-						return err
-					}
-				}
-			}
-		}
-		return nil
-	}
+	tools = func(value any) error { return validateCodexCLIToolTree(value, &alias, &tools) }
 	if err := tools(request["tools"]); err != nil {
 		return nil, err
 	}
@@ -403,49 +291,12 @@ func (s *codexCLIScript) validate(request map[string]any) ([]string, error) {
 		return nil, fmt.Errorf("input is not an array")
 	}
 	for _, raw := range input {
-		item, ok := raw.(map[string]any)
-		if !ok {
-			return nil, fmt.Errorf("non-object input")
-		}
-		if item["type"] == "agent_message" {
-			return nil, fmt.Errorf("agent_message reached strict upstream")
-		}
-		if item["type"] == "function_call" {
-			ns, _ := item["namespace"].(string)
-			name, _ := item["name"].(string)
-			if ns == "collaboration" || strings.HasPrefix(name, "collaboration.") {
-				return nil, fmt.Errorf("native collaboration history reached upstream")
-			}
-			if _, exists := item["encrypted_function_args"]; exists {
-				return nil, fmt.Errorf("encrypted_function_args marker reached alias upstream")
-			}
-		}
-		if err := tools(item["additional_tools"]); err != nil {
+		text, err := codexCLIInputMessage(raw, tools)
+		if err != nil {
 			return nil, err
 		}
-		var text strings.Builder
-		switch content := item["content"].(type) {
-		case string:
-			text.WriteString(content)
-		case []any:
-			for _, rawPart := range content {
-				part, ok := rawPart.(map[string]any)
-				if !ok {
-					continue
-				}
-				if part["type"] == "encrypted_content" {
-					return nil, fmt.Errorf("encrypted_content in message reached upstream")
-				}
-				if value, ok := part["text"].(string); ok {
-					text.WriteString(value)
-				}
-			}
-		}
-		if strings.HasPrefix(text.String(), "Message Type:") {
-			if item["type"] != "message" || item["role"] != "user" {
-				return nil, fmt.Errorf("converted agent item is not message/user")
-			}
-			messages = append(messages, text.String())
+		if text != "" {
+			messages = append(messages, text)
 		}
 	}
 	if !alias {
@@ -461,18 +312,7 @@ func (s *codexCLIScript) validate(request map[string]any) ([]string, error) {
 }
 
 func (s *codexCLIScript) requireOutput(request map[string]any, id string) error {
-	var call, output map[string]any
-	for _, raw := range request["input"].([]any) {
-		item, _ := raw.(map[string]any)
-		if item["call_id"] == id {
-			switch item["type"] {
-			case "function_call":
-				call = item
-			case "function_call_output":
-				output = item
-			}
-		}
-	}
+	call, output := codexCLICallOutput(request, id)
 	if call == nil || output == nil {
 		return fmt.Errorf("missing call/output association for %s", id)
 	}
@@ -568,21 +408,276 @@ func (s *codexCLIScript) assertFinished(t *testing.T) {
 	t.Helper()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.violations) != 0 {
+	reportTestFailure(t, len(s.violations) != 0, func() {
 		t.Errorf("strict upstream violations: %v", s.violations)
-	}
+	})
 	for role, want := range map[string]int{"root": 6, "worker": 5, "nested": 1} {
-		if s.stages[role] != want {
+		reportTestFailure(t, s.stages[role] != want, func() {
 			t.Errorf("%s requests=%d want=%d; all stages=%v", role, s.stages[role], want, s.stages)
-		}
+		})
 	}
 	for _, id := range []string{"cli_spawn_worker", "cli_send_worker", "cli_wait_first", "cli_followup_worker", "cli_wait_second", "cli_worker_mailbox", "cli_spawn_nested", "cli_wait_nested"} {
-		if !s.outputs[id] {
+		reportTestFailure(t, !s.outputs[id], func() {
 			t.Errorf("missing correlated successful tool output %s", id)
+		})
+	}
+	reportTestFailure(t, s.aliasRequests != 12 || s.convertedMessages < 8, func() {
+		t.Errorf("missing alias/converted message evidence: requests=%d messages=%d", s.aliasRequests, s.convertedMessages)
+	})
+	t.Logf("strict upstream: %d aliased requests, %d converted agent-message observations, %d correlated tool outputs", s.aliasRequests, s.convertedMessages, len(s.outputs))
+}
+
+// validateCodexCLIToolTree exercises one isolated test phase with the original shared state.
+func validateCodexCLIToolTree(value any, capturedAlias *bool, capturedTools *func(any) error) error {
+	switch v := value.(type) {
+	case []any:
+		for _, child := range v {
+			if err := (*capturedTools)(child); err != nil {
+				return err
+			}
+		}
+	case map[string]any:
+		return codexCLIValidateToolObject(v, capturedAlias, capturedTools)
+	}
+	return nil
+}
+
+func codexCLIInputMessage(raw any, tools func(any) error) (string, error) {
+	item, ok := raw.(map[string]any)
+	if !ok {
+		return "", fmt.Errorf("non-object input")
+	}
+	if item["type"] == "agent_message" {
+		return "", fmt.Errorf("agent_message reached strict upstream")
+	}
+	if item["type"] == "function_call" {
+		ns, _ := item["namespace"].(string)
+		name, _ := item["name"].(string)
+		if ns == "collaboration" || strings.HasPrefix(name, "collaboration.") {
+			return "", fmt.Errorf("native collaboration history reached upstream")
+		}
+		if _, exists := item["encrypted_function_args"]; exists {
+			return "", fmt.Errorf("encrypted_function_args marker reached alias upstream")
 		}
 	}
-	if s.aliasRequests != 12 || s.convertedMessages < 8 {
-		t.Errorf("missing alias/converted message evidence: requests=%d messages=%d", s.aliasRequests, s.convertedMessages)
+	if err := tools(item["additional_tools"]); err != nil {
+		return "", err
 	}
-	t.Logf("strict upstream: %d aliased requests, %d converted agent-message observations, %d correlated tool outputs", s.aliasRequests, s.convertedMessages, len(s.outputs))
+	text, err := codexCLIMessageText(item["content"])
+	if err != nil {
+		return "", err
+	}
+
+	if strings.HasPrefix(text, "Message Type:") {
+		if item["type"] != "message" || item["role"] != "user" {
+			return "", fmt.Errorf("converted agent item is not message/user")
+		}
+		return text, nil
+	}
+	return "", nil
+}
+
+func codexCLIMessageText(content any) (string, error) {
+	var text strings.Builder
+	switch content := content.(type) {
+	case string:
+		text.WriteString(content)
+	case []any:
+		for _, rawPart := range content {
+			part, ok := rawPart.(map[string]any)
+			if !ok {
+				continue
+			}
+			if part["type"] == "encrypted_content" {
+				return "", fmt.Errorf("encrypted_content in message reached upstream")
+			}
+			if value, ok := part["text"].(string); ok {
+				text.WriteString(value)
+			}
+		}
+	}
+	return text.String(), nil
+}
+
+func codexCLICallOutput(request map[string]any, id string) (map[string]any, map[string]any) {
+	var call, output map[string]any
+	for _, raw := range request["input"].([]any) {
+		item, _ := raw.(map[string]any)
+		if item["call_id"] != id {
+			continue
+		}
+		{
+			switch item["type"] {
+			case "function_call":
+				call = item
+			case "function_call_output":
+				output = item
+			}
+		}
+	}
+	return call, output
+}
+
+func codexCLIValidateMessageSchema(v map[string]any) error {
+	p, ok := v["parameters"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	props, ok := p["properties"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	m, ok := props["message"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	if _, exists := m["encrypted"]; exists {
+		return fmt.Errorf("message.encrypted schema reached upstream")
+	}
+	return nil
+}
+
+func codexCLIValidateToolObject(v map[string]any, capturedAlias *bool, capturedTools *func(any) error) error {
+	if v["type"] == "namespace" {
+		if v["name"] == "collaboration" {
+			return fmt.Errorf("native collaboration namespace reached upstream")
+		}
+		if v["name"] == codexCLIAlias {
+			(*capturedAlias) = true
+		}
+	}
+	if err := codexCLIValidateMessageSchema(v); err != nil {
+		return err
+	}
+	for _, key := range []string{"tools", "function"} {
+		if child, ok := v[key]; ok {
+			if err := (*capturedTools)(child); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+type codexCLIStage struct {
+	s      *codexCLIScript
+	w      http.ResponseWriter
+	role   string
+	stage  int
+	joined string
+	need   func(string) bool
+	output func(string) bool
+	call   func(string, string, map[string]any)
+	wait   func(string)
+	await  func(<-chan struct{}) bool
+}
+
+func (c codexCLIStage) root() {
+	s, w, role, stage, need, output, call, wait, joined := c.s, c.w, c.role, c.stage, c.need, c.output, c.call, c.wait, c.joined
+
+	// The grandchild's automatic FINAL_ANSWER must go only to its immediate
+	// parent, not leak as an agent notification into the root mailbox.
+	if strings.Contains(joined, "Sender: /root/worker/nested\n") {
+		s.reject(w, "grandchild notification leaked into root mailbox")
+		return
+	}
+	switch stage {
+	case 0:
+		call("cli_spawn_worker", "spawn_agent", map[string]any{"task_name": "worker", "message": codexCLITask, "fork_turns": "none"})
+	case 1:
+		if !output("cli_spawn_worker") {
+			return
+		}
+		call("cli_send_worker", "send_message", map[string]any{"target": "/root/worker", "message": codexCLIMail})
+	case 2:
+		if !output("cli_send_worker") {
+			return
+		}
+		close(s.mailDelivered)
+		wait("cli_wait_first")
+	case 3:
+		if !output("cli_wait_first") || !need("Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/worker\nPayload:\n"+codexCLIAnswer1) {
+			return
+		}
+		call("cli_followup_worker", "followup_task", map[string]any{"target": "/root/worker", "message": codexCLIFollowup})
+	case 4:
+		if !output("cli_followup_worker") {
+			return
+		}
+		wait("cli_wait_second")
+	case 5:
+		if !output("cli_wait_second") || !need("Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/worker\nPayload:\n"+codexCLIAnswer2) {
+			return
+		}
+		s.stream(w, role, stage, codexCLIMessage("msg_cli_root", codexCLIFinal))
+	default:
+		s.reject(w, "unexpected root stage %d", stage)
+	}
+
+}
+
+func (c codexCLIStage) worker() {
+	s, w, role, stage, need, output, call, wait, await := c.s, c.w, c.role, c.stage, c.need, c.output, c.call, c.wait, c.await
+
+	if !need("Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:\n" + codexCLITask) {
+		return
+	}
+	switch stage {
+	case 0:
+		if !await(s.mailDelivered) {
+			return
+		}
+		wait("cli_worker_mailbox")
+	case 1:
+		if !output("cli_worker_mailbox") || !need("Message Type: MESSAGE\nTask name: /root/worker\nSender: /root\nPayload:\n"+codexCLIMail) {
+			return
+		}
+		call("cli_spawn_nested", "spawn_agent", map[string]any{"task_name": "nested", "message": codexCLINestedTask, "fork_turns": "none"})
+	case 2:
+		if !output("cli_spawn_nested") {
+			return
+		}
+		close(s.nestedWaiting)
+		wait("cli_wait_nested")
+	case 3:
+		if !output("cli_wait_nested") || !need("Message Type: FINAL_ANSWER\nTask name: /root/worker\nSender: /root/worker/nested\nPayload:\n"+codexCLINestedAnswer) {
+			return
+		}
+		s.stream(w, role, stage, codexCLIMessage("msg_cli_worker_first", codexCLIAnswer1))
+	case 4:
+		if !need(codexCLIFollowup) {
+			return
+		}
+		s.stream(w, role, stage, codexCLIMessage("msg_cli_worker_second", codexCLIAnswer2))
+	default:
+		s.reject(w, "unexpected worker stage %d", stage)
+	}
+
+}
+
+func (c codexCLIStage) nested() {
+	s, w, role, stage, need, await := c.s, c.w, c.role, c.stage, c.need, c.await
+
+	if stage != 0 || !need("Message Type: NEW_TASK\nTask name: /root/worker/nested\nSender: /root/worker\nPayload:\n"+codexCLINestedTask) {
+		s.reject(w, "invalid nested task or stage %d", stage)
+		return
+	}
+	if !await(s.nestedWaiting) {
+		return
+	}
+	s.stream(w, role, stage, codexCLIMessage("msg_cli_nested", codexCLINestedAnswer))
+}
+
+func codexCLIRequestRole(messages []string) string {
+	role := "root"
+	for _, text := range messages {
+		if strings.Contains(text, "Message Type: NEW_TASK\nTask name: /root/worker/nested\n") {
+			role = "nested"
+			break
+		}
+		if strings.Contains(text, "Message Type: NEW_TASK\nTask name: /root/worker\n") {
+			role = "worker"
+		}
+	}
+	return role
 }

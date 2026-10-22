@@ -104,7 +104,7 @@ func (s *Server) handleCreateProxy(w http.ResponseWriter, r *http.Request) {
 		URL  string `json:"url"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
-		writeErr(w, 400, "invalid proxy payload")
+		writeErr(w, 400, invalidProxyPayloadMessage)
 		return
 	}
 	name := strings.TrimSpace(body.Name)
@@ -142,7 +142,7 @@ func (s *Server) handleUpdateProxy(w http.ResponseWriter, r *http.Request) {
 		URL  *string `json:"url"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
-		writeErr(w, 400, "invalid proxy payload")
+		writeErr(w, 400, invalidProxyPayloadMessage)
 		return
 	}
 	if body.Name != nil {
@@ -247,7 +247,7 @@ func (s *Server) handleProbeProxy(w http.ResponseWriter, r *http.Request) {
 		URL string `json:"url"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
-		writeErr(w, 400, "invalid proxy payload")
+		writeErr(w, 400, invalidProxyPayloadMessage)
 		return
 	}
 	endpoint, err := validatedProxyURL(body.URL)
@@ -351,30 +351,35 @@ func (s *Server) bindOAuthProxy() {
 	}
 	s.flows.WrapCompletion(func(next func(*oauth.Flow, *oauth.Token) error) func(*oauth.Flow, *oauth.Token) error {
 		return func(flow *oauth.Flow, token *oauth.Token) error {
-			raw := json.RawMessage(flow.Meta["proxy_id"])
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			p, err := s.resolveProxySelection(ctx, raw)
-			if err != nil {
-				return err
-			}
-			if p != nil {
-				flow.Meta["proxy_url"] = p.URL
-			}
-			if next == nil {
-				return errors.New("OAuth persistence callback unavailable")
-			}
-			if err := next(flow, token); err != nil {
-				return err
-			}
-			if len(raw) > 0 && flow.DBAccountID > 0 {
-				var id int64
-				if p != nil {
-					id = p.ID
-				}
-				return s.store.SetAccountProxy(ctx, flow.DBAccountID, id, flow.Meta["proxy_url"])
-			}
-			return nil
+			return s.completeOAuthWithProxy(next, flow, token)
 		}
 	})
+}
+
+func (s *Server) completeOAuthWithProxy(next func(*oauth.Flow, *oauth.Token) error, flow *oauth.Flow, token *oauth.Token) error {
+
+	raw := json.RawMessage(flow.Meta["proxy_id"])
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	p, err := s.resolveProxySelection(ctx, raw)
+	if err != nil {
+		return err
+	}
+	if p != nil {
+		flow.Meta["proxy_url"] = p.URL
+	}
+	if next == nil {
+		return errors.New("OAuth persistence callback unavailable")
+	}
+	if err := next(flow, token); err != nil {
+		return err
+	}
+	if len(raw) > 0 && flow.DBAccountID > 0 {
+		var id int64
+		if p != nil {
+			id = p.ID
+		}
+		return s.store.SetAccountProxy(ctx, flow.DBAccountID, id, flow.Meta["proxy_url"])
+	}
+	return nil
 }

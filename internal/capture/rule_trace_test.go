@@ -57,27 +57,27 @@ func TestRuleTraceBoundedWithoutStarvingWire(t *testing.T) {
 		for i := 0; i < 3000; i++ {
 			rec.OnRuleTrace(9, traceFixture())
 		}
-		if rec.traceBytes > int(min(maxBytes/2, maxRuleTraceBytes)) || rec.seenBytes > maxBytes {
+		reportTestFailure(t, rec.traceBytes > int(min(maxBytes/2, maxRuleTraceBytes)) || rec.seenBytes > maxBytes, func() {
 			t.Fatalf("trace exceeded reservation for %d: trace=%d seen=%d", maxBytes, rec.traceBytes, rec.seenBytes)
-		}
-		if len(rec.cap.RuleTraces)+rec.cap.RulesTraceOmitted != 3000 {
+		})
+		reportTestFailure(t, len(rec.cap.RuleTraces)+rec.cap.RulesTraceOmitted != 3000, func() {
 			t.Fatal("omitted trace count is not exact")
-		}
-		if rec.truncated {
+		})
+		reportTestFailure(t, rec.truncated, func() {
 			t.Fatal("trace-only clipping must not claim wire bytes were clipped")
-		}
-		if !rec.cap.RulesTraceTruncated {
+		})
+		reportTestFailure(t, !rec.cap.RulesTraceTruncated, func() {
 			t.Fatal("trace overflow not marked")
-		}
+		})
 		available := int(rec.remainingBytesLocked())
 		rec.OnRequestBody([]byte(strings.Repeat("x", available)), false)
-		if len(rec.cap.RequestBody) != available || rec.seenBytes != maxBytes {
+		reportTestFailure(t, len(rec.cap.RequestBody) != available || rec.seenBytes != maxBytes, func() {
 			t.Fatal("wire could not use the remaining record allowance")
-		}
+		})
 		for _, raw := range rec.cap.RuleTraces {
-			if !json.Valid(raw) {
+			reportTestFailure(t, !json.Valid(raw), func() {
 				t.Fatal("partial JSON was retained")
-			}
+			})
 		}
 	}
 }

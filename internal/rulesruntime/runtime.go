@@ -29,6 +29,8 @@ type Service struct {
 	ensured bool
 }
 
+const languageV2Installed = "language-v2-installed"
+
 func New(st *store.Store) *Service { return &Service{store: st} }
 
 // Ensure initializes legacy rules and applies one-time default-rule upgrades.
@@ -196,7 +198,7 @@ func ConvertLegacy(ctx context.Context, rows []*store.MiddlewareRow) ([]*store.R
 	filter.OrderIndex = int64(len(definitions))
 	definitions = append(definitions, filter)
 	definitions = append(definitions, rules.DefaultProfile()...)
-	definitions = append(definitions, rules.Rule{SchemaVersion: rules.SchemaVersion, ID: "language-v2-installed", Name: "Rules V2 installed", Enabled: false, Phase: rules.PhaseRequest, When: rules.Condition{Op: "always"}, Actions: []rules.Action{}, OnError: rules.OnErrorAbort, Source: "system"})
+	definitions = append(definitions, rules.Rule{SchemaVersion: rules.SchemaVersion, ID: languageV2Installed, Name: "Rules V2 installed", Enabled: false, Phase: rules.PhaseRequest, When: rules.Condition{Op: "always"}, Actions: []rules.Action{}, OnError: rules.OnErrorAbort, Source: "system"})
 	result := make([]*store.RuleRow, 0, len(definitions))
 	for _, definition := range definitions {
 		definition, err = rules.ExpandRule(definition)
@@ -238,57 +240,17 @@ func (s *Service) upgrade(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		marker := false
-		for _, row := range snapshot.Rules {
-			if row.ID == "language-v2-installed" {
-				marker = true
-				break
-			}
-		}
-		if marker {
+		if snapshotHas(snapshot, languageV2Installed) {
 			installed, err := s.store.RestoreRulesV2Marker(ctx)
-			if err != nil {
+			if err != nil || installed {
 				return err
-			}
-			if installed {
-				return nil
 			}
 			continue
 		}
-		changes := []store.RuleChange{}
-		for _, row := range snapshot.Rules {
-			definition, err := rules.ParseRule(row.Rule)
-			if err != nil {
-				return err
-			}
-			expanded, err := rules.ExpandRule(definition)
-			if err != nil {
-				return err
-			}
-			raw, err := EditableJSON(expanded)
-			if err != nil {
-				return err
-			}
-			if !bytes.Equal(raw, row.Rule) {
-				changes = append(changes, store.RuleChange{Kind: "update", ID: row.ID, ExpectedRevision: row.Revision, Rule: raw})
-			}
-		}
-		for _, definition := range rules.DefaultProfile() {
-			if snapshotHas(snapshot, definition.ID) {
-				continue
-			}
-			raw, err := EditableJSON(definition)
-			if err != nil {
-				return err
-			}
-			changes = append(changes, store.RuleChange{Kind: "create", ID: definition.ID, Rule: raw, Source: "protocol"})
-		}
-		markerRule := rules.Rule{SchemaVersion: rules.SchemaVersion, ID: "language-v2-installed", Name: "规则 V2 已安装 / Rules V2 installed", Enabled: false, Phase: rules.PhaseRequest, When: rules.Condition{Op: "always"}, Actions: []rules.Action{}, OnError: rules.OnErrorAbort}
-		raw, err := EditableJSON(markerRule)
+		changes, err := upgradeChanges(snapshot)
 		if err != nil {
 			return err
 		}
-		changes = append(changes, store.RuleChange{Kind: "create", ID: markerRule.ID, Rule: raw, Source: "system"})
 		_, err = s.store.PublishRules(ctx, &snapshot.Version, changes, ValidateSnapshot)
 		if errors.Is(err, store.ErrRuleConflict) {
 			continue
@@ -323,4 +285,50 @@ func (s *Service) upgradeProtocolProfile(ctx context.Context) error {
 
 func defaultImageExclusion() rules.Rule {
 	return rules.Rule{SchemaVersion: rules.SchemaVersion, ID: "default-drop-image-generation", Name: "排除图像生成 / Exclude image generation", Enabled: true, Priority: 1000, Phase: rules.PhaseRequest, When: rules.Condition{Op: "always"}, OnError: rules.OnErrorAbort, Actions: []rules.Action{{ID: "drop-image-generation", Type: "drop_tools", Params: map[string]any{"types": []any{"image_generation"}}}}}
+}
+
+func upgradeChanges(snapshot *store.RuleSetSnapshot) ([]store.RuleChange, error) {
+	changes, err := expandedRuleChanges(snapshot)
+	if err != nil {
+		return nil, err
+	}
+	for _, definition := range rules.DefaultProfile() {
+		if snapshotHas(snapshot, definition.ID) {
+			continue
+		}
+		raw, err := EditableJSON(definition)
+		if err != nil {
+			return nil, err
+		}
+		changes = append(changes, store.RuleChange{Kind: "create", ID: definition.ID, Rule: raw, Source: "protocol"})
+	}
+	markerRule := rules.Rule{SchemaVersion: rules.SchemaVersion, ID: languageV2Installed, Name: "规则 V2 已安装 / Rules V2 installed", Enabled: false, Phase: rules.PhaseRequest, When: rules.Condition{Op: "always"}, Actions: []rules.Action{}, OnError: rules.OnErrorAbort}
+	raw, err := EditableJSON(markerRule)
+	if err != nil {
+		return nil, err
+	}
+	changes = append(changes, store.RuleChange{Kind: "create", ID: markerRule.ID, Rule: raw, Source: "system"})
+	return changes, nil
+}
+
+func expandedRuleChanges(snapshot *store.RuleSetSnapshot) ([]store.RuleChange, error) {
+	changes := []store.RuleChange{}
+	for _, row := range snapshot.Rules {
+		definition, err := rules.ParseRule(row.Rule)
+		if err != nil {
+			return nil, err
+		}
+		expanded, err := rules.ExpandRule(definition)
+		if err != nil {
+			return nil, err
+		}
+		raw, err := EditableJSON(expanded)
+		if err != nil {
+			return nil, err
+		}
+		if !bytes.Equal(raw, row.Rule) {
+			changes = append(changes, store.RuleChange{Kind: "update", ID: row.ID, ExpectedRevision: row.Revision, Rule: raw})
+		}
+	}
+	return changes, nil
 }

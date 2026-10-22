@@ -309,41 +309,17 @@ func (s *Store) PublishRules(ctx context.Context, expectedVersion *int64, change
 	if err := validate(ctx, snapshot); err != nil {
 		return nil, err
 	}
-	for _, id := range deleted {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM rules WHERE id=?`, id); err != nil {
-			return nil, err
-		}
+	if err := persistRuleChanges(ctx, tx, changed, deleted); err != nil {
+		return nil, err
 	}
-	for _, row := range changed {
-		if err := persistRuleTx(ctx, tx, row); err != nil {
-			return nil, err
-		}
-	}
-	for _, change := range changes {
-		if change.Legacy == nil {
-			continue
-		}
-		var target *RuleRow
-		for _, row := range changed {
-			if row.ID == change.ID {
-				target = row
-				break
-			}
-		}
-		if change.Kind != "update" || target == nil || target.LegacyName == "" || target.LegacyName != change.Legacy.Name {
-			return nil, fmt.Errorf("%w: legacy mirror must match the updated migration rule", ErrRuleInvalid)
-		}
-		if err := persistLegacyRuleTx(ctx, tx, change.Legacy); err != nil {
-			return nil, err
-		}
+	if err := persistRuleMirrors(ctx, tx, changes, changed); err != nil {
+		return nil, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE rule_set_metadata SET version=?,updated_at=? WHERE singleton=1`, snapshot.Version, snapshot.UpdatedAt); err != nil {
 		return nil, err
 	}
-	if hasV2Marker(snapshot) {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO settings(key,value,updated_at) VALUES('rules.language.v2','installed',?) ON CONFLICT(key) DO NOTHING`, NowMS()); err != nil {
-			return nil, err
-		}
+	if err := persistLanguageV2Marker(ctx, tx, snapshot); err != nil {
+		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
@@ -382,128 +358,170 @@ func (s *Store) tryBeginRulePublication(ctx context.Context) (*storeTx, error) {
 	return tx, nil
 }
 
+type ruleChangeBatch struct {
+	snapshot  *RuleSetSnapshot
+	byID      map[string]*RuleRow
+	seen      map[string]bool
+	nextOrder int64
+	now       int64
+	count     int
+	changed   []*RuleRow
+	deleted   []string
+}
+
 func applyRuleChanges(snapshot *RuleSetSnapshot, changes []RuleChange) ([]*RuleRow, []string, error) {
-	byID, seen := map[string]*RuleRow{}, map[string]bool{}
-	nextOrder := int64(0)
+	batch := ruleChangeBatch{snapshot: snapshot, byID: map[string]*RuleRow{}, seen: map[string]bool{}, now: NowMS(), count: len(changes), changed: []*RuleRow{}, deleted: []string{}}
 	for _, row := range snapshot.Rules {
-		byID[row.ID] = row
-		if row.OrderIndex >= nextOrder {
-			nextOrder = row.OrderIndex + 1
+		batch.byID[row.ID] = row
+		if row.OrderIndex >= batch.nextOrder {
+			batch.nextOrder = row.OrderIndex + 1
 		}
 	}
-	changed, deleted := []*RuleRow{}, []string{}
-	now := NowMS()
 	for _, change := range changes {
-		id := change.ID
-		if change.Kind == "create" && id == "" {
-			id = uuid.NewString()
-		}
-		if strings.TrimSpace(id) == "" || seen[id] {
-			return nil, nil, fmt.Errorf("%w: empty or repeated id %q", ErrRuleInvalid, id)
-		}
-		seen[id] = true
-		old := byID[id]
-		if change.Kind == "create" {
-			if old != nil {
-				return nil, nil, &RuleConflict{ID: id, Expected: 0, Actual: old.Revision}
-			}
-		} else {
-			if old == nil {
-				return nil, nil, fmt.Errorf("%w: %s", ErrRuleNotFound, id)
-			}
-			if change.ExpectedRevision < 1 {
-				return nil, nil, fmt.Errorf("%w: expected_revision is required", ErrRuleInvalid)
-			}
-			if old.Revision != change.ExpectedRevision {
-				return nil, nil, &RuleConflict{ID: id, Expected: change.ExpectedRevision, Actual: old.Revision}
-			}
-		}
-		if change.Kind == "move_up" || change.Kind == "move_down" {
-			if len(changes) != 1 {
-				return nil, nil, fmt.Errorf("%w: adjacent movement must be a single operation", ErrRuleInvalid)
-			}
-			moved, err := moveAdjacentRule(snapshot.Rules, id, change.Kind == "move_up", now)
-			if err != nil {
-				return nil, nil, err
-			}
-			for _, row := range moved {
-				byID[row.ID] = row
-				changed = append(changed, row)
-			}
-			continue
-		}
-		if change.Kind == "delete" {
-			delete(byID, id)
-			deleted = append(deleted, id)
-			continue
-		}
-		row := &RuleRow{ID: id, Revision: 1, CreatedAt: now, UpdatedAt: now, OrderIndex: nextOrder, LegacyName: change.LegacyName, Source: change.Source}
-		if old != nil {
-			*row = *old
-			row.Rule = append(json.RawMessage(nil), old.Rule...)
-			row.Revision++
-			row.UpdatedAt = now
-		}
-		switch change.Kind {
-		case "create":
-			row.Rule = append(json.RawMessage(nil), change.Rule...)
-			nextOrder++
-		case "update":
-			row.Rule = append(json.RawMessage(nil), change.Rule...)
-		case "patch":
-			if change.Enabled == nil && change.Priority == nil && change.OrderIndex == nil {
-				return nil, nil, fmt.Errorf("%w: empty patch", ErrRuleInvalid)
-			}
-		case "duplicate":
-			row.ID = change.NewID
-			if row.ID == "" {
-				row.ID = uuid.NewString()
-			}
-			if byID[row.ID] != nil || seen[row.ID] {
-				return nil, nil, fmt.Errorf("%w: duplicate destination id", ErrRuleConflict)
-			}
-			seen[row.ID] = true
-			row.Revision, row.OrderIndex, row.CreatedAt = 1, nextOrder, now
-			row.LegacyName, row.Source = "", "duplicate:"+id
-			nextOrder++
-			name := change.Name
-			if name == "" {
-				name = old.Name + " (copy)"
-			}
-			if err := patchRuleJSON(row, "name", name); err != nil {
-				return nil, nil, err
-			}
-		default:
-			return nil, nil, fmt.Errorf("%w: unknown change kind %q", ErrRuleInvalid, change.Kind)
-		}
-		if change.Enabled != nil {
-			if err := patchRuleJSON(row, "enabled", *change.Enabled); err != nil {
-				return nil, nil, err
-			}
-		}
-		if change.Priority != nil {
-			if err := patchRuleJSON(row, "priority", *change.Priority); err != nil {
-				return nil, nil, err
-			}
-		}
-		if change.OrderIndex != nil {
-			if *change.OrderIndex < 0 || *change.OrderIndex > 9007199254740991 {
-				return nil, nil, fmt.Errorf("%w: order_index must be a nonnegative safe integer", ErrRuleInvalid)
-			}
-			row.OrderIndex = *change.OrderIndex
-		}
-		if err := indexRule(row); err != nil {
+		if err := batch.apply(change); err != nil {
 			return nil, nil, err
 		}
-		byID[row.ID] = row
-		changed = append(changed, row)
 	}
-	snapshot.Rules = make([]*RuleRow, 0, len(byID))
-	for _, row := range byID {
+	snapshot.Rules = make([]*RuleRow, 0, len(batch.byID))
+	for _, row := range batch.byID {
 		snapshot.Rules = append(snapshot.Rules, row)
 	}
 	sortRules(snapshot.Rules)
-	return changed, deleted, nil
+	return batch.changed, batch.deleted, nil
+}
+
+func (batch *ruleChangeBatch) apply(change RuleChange) error {
+	id := change.ID
+	if change.Kind == "create" && id == "" {
+		id = uuid.NewString()
+	}
+	if strings.TrimSpace(id) == "" || batch.seen[id] {
+		return fmt.Errorf("%w: empty or repeated id %q", ErrRuleInvalid, id)
+	}
+	batch.seen[id] = true
+	old := batch.byID[id]
+	if err := validateRuleChangeRevision(id, old, change); err != nil {
+		return err
+	}
+	switch change.Kind {
+	case "move_up", "move_down":
+		return batch.move(id, change.Kind == "move_up")
+	case "delete":
+		delete(batch.byID, id)
+		batch.deleted = append(batch.deleted, id)
+		return nil
+	}
+	row := &RuleRow{ID: id, Revision: 1, CreatedAt: batch.now, UpdatedAt: batch.now, OrderIndex: batch.nextOrder, LegacyName: change.LegacyName, Source: change.Source}
+	if old != nil {
+		*row = *old
+		row.Rule = append(json.RawMessage(nil), old.Rule...)
+		row.Revision++
+		row.UpdatedAt = batch.now
+	}
+	if err := batch.updateRow(row, old, change); err != nil {
+		return err
+	}
+	if err := applyRulePatch(row, change); err != nil {
+		return err
+	}
+	if err := indexRule(row); err != nil {
+		return err
+	}
+	batch.byID[row.ID] = row
+	batch.changed = append(batch.changed, row)
+	return nil
+}
+
+func validateRuleChangeRevision(id string, old *RuleRow, change RuleChange) error {
+	if change.Kind == "create" {
+		if old != nil {
+			return &RuleConflict{ID: id, Expected: 0, Actual: old.Revision}
+		}
+		return nil
+	}
+	if old == nil {
+		return fmt.Errorf("%w: %s", ErrRuleNotFound, id)
+	}
+	if change.ExpectedRevision < 1 {
+		return fmt.Errorf("%w: expected_revision is required", ErrRuleInvalid)
+	}
+	if old.Revision != change.ExpectedRevision {
+		return &RuleConflict{ID: id, Expected: change.ExpectedRevision, Actual: old.Revision}
+	}
+	return nil
+}
+
+func (batch *ruleChangeBatch) move(id string, up bool) error {
+	if batch.count != 1 {
+		return fmt.Errorf("%w: adjacent movement must be a single operation", ErrRuleInvalid)
+	}
+	moved, err := moveAdjacentRule(batch.snapshot.Rules, id, up, batch.now)
+	if err != nil {
+		return err
+	}
+	for _, row := range moved {
+		batch.byID[row.ID] = row
+		batch.changed = append(batch.changed, row)
+	}
+	return nil
+}
+
+func (batch *ruleChangeBatch) updateRow(row, old *RuleRow, change RuleChange) error {
+	switch change.Kind {
+	case "create":
+		row.Rule = append(json.RawMessage(nil), change.Rule...)
+		batch.nextOrder++
+	case "update":
+		row.Rule = append(json.RawMessage(nil), change.Rule...)
+	case "patch":
+		if change.Enabled == nil && change.Priority == nil && change.OrderIndex == nil {
+			return fmt.Errorf("%w: empty patch", ErrRuleInvalid)
+		}
+	case "duplicate":
+		return batch.duplicate(row, old, change)
+	default:
+		return fmt.Errorf("%w: unknown change kind %q", ErrRuleInvalid, change.Kind)
+	}
+	return nil
+}
+
+func (batch *ruleChangeBatch) duplicate(row, old *RuleRow, change RuleChange) error {
+	row.ID = change.NewID
+	if row.ID == "" {
+		row.ID = uuid.NewString()
+	}
+	if batch.byID[row.ID] != nil || batch.seen[row.ID] {
+		return fmt.Errorf("%w: duplicate destination id", ErrRuleConflict)
+	}
+	batch.seen[row.ID] = true
+	row.Revision, row.OrderIndex, row.CreatedAt = 1, batch.nextOrder, batch.now
+	row.LegacyName, row.Source = "", "duplicate:"+change.ID
+	batch.nextOrder++
+	name := change.Name
+	if name == "" {
+		name = old.Name + " (copy)"
+	}
+	return patchRuleJSON(row, "name", name)
+}
+
+func applyRulePatch(row *RuleRow, change RuleChange) error {
+	if change.Enabled != nil {
+		if err := patchRuleJSON(row, "enabled", *change.Enabled); err != nil {
+			return err
+		}
+	}
+	if change.Priority != nil {
+		if err := patchRuleJSON(row, "priority", *change.Priority); err != nil {
+			return err
+		}
+	}
+	if change.OrderIndex != nil {
+		if *change.OrderIndex < 0 || *change.OrderIndex > 9007199254740991 {
+			return fmt.Errorf("%w: order_index must be a nonnegative safe integer", ErrRuleInvalid)
+		}
+		row.OrderIndex = *change.OrderIndex
+	}
+	return nil
 }
 
 // moveAdjacentRule operates on the complete execution order, not a filtered page.
@@ -528,33 +546,7 @@ func moveAdjacentRule(rows []*RuleRow, id string, up bool, now int64) ([]*RuleRo
 	a, b := rows[at], rows[neighbor]
 	ordered := append([]*RuleRow(nil), rows...)
 	ordered[at], ordered[neighbor] = ordered[neighbor], ordered[at]
-	positions := map[int]int64{}
-	changed := []*RuleRow{}
-	for _, original := range ordered {
-		if original.Phase != a.Phase || (original.Priority != a.Priority && original.Priority != b.Priority) {
-			continue
-		}
-		row := *original
-		if row.ID == a.ID {
-			row.Priority = b.Priority
-		} else if row.ID == b.ID {
-			row.Priority = a.Priority
-		}
-		row.OrderIndex = positions[row.Priority]
-		positions[row.Priority]++
-		if row.ID != a.ID && row.ID != b.ID && row.OrderIndex == original.OrderIndex {
-			continue
-		}
-		row.Revision++
-		row.UpdatedAt = now
-		if row.Priority != original.Priority {
-			if err := patchRuleJSON(&row, "priority", row.Priority); err != nil {
-				return nil, err
-			}
-		}
-		changed = append(changed, &row)
-	}
-	return changed, nil
+	return reorderAdjacentRules(ordered, a, b, now)
 }
 
 func patchRuleJSON(row *RuleRow, field string, value any) error {
@@ -791,4 +783,83 @@ func (s *Store) RulesV2Installed(ctx context.Context) (bool, error) {
 	var n int
 	err := s.QueryRowContext(ctx, `SELECT COUNT(*) FROM settings WHERE key='rules.language.v2'`).Scan(&n)
 	return n > 0, err
+}
+
+func persistRuleChanges(ctx context.Context, tx *storeTx, changed []*RuleRow, deleted []string) error {
+	for _, id := range deleted {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM rules WHERE id=?`, id); err != nil {
+			return err
+		}
+	}
+	for _, row := range changed {
+		if err := persistRuleTx(ctx, tx, row); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func persistRuleMirrors(ctx context.Context, tx *storeTx, changes []RuleChange, changed []*RuleRow) error {
+	for _, change := range changes {
+		if change.Legacy == nil {
+			continue
+		}
+		var target *RuleRow
+		for _, row := range changed {
+			if row.ID == change.ID {
+				target = row
+				break
+			}
+		}
+		if change.Kind != "update" || target == nil || target.LegacyName == "" || target.LegacyName != change.Legacy.Name {
+			return fmt.Errorf("%w: legacy mirror must match the updated migration rule", ErrRuleInvalid)
+		}
+		if err := persistLegacyRuleTx(ctx, tx, change.Legacy); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func reorderAdjacentRules(ordered []*RuleRow, a, b *RuleRow, now int64) ([]*RuleRow, error) {
+	positions := map[int]int64{}
+	changed := []*RuleRow{}
+	for _, original := range ordered {
+		if !ruleAffectedBySwap(original, a, b) {
+			continue
+		}
+		row := *original
+		if row.ID == a.ID {
+			row.Priority = b.Priority
+		} else if row.ID == b.ID {
+			row.Priority = a.Priority
+		}
+		row.OrderIndex = positions[row.Priority]
+		positions[row.Priority]++
+		if row.ID != a.ID && row.ID != b.ID && row.OrderIndex == original.OrderIndex {
+			continue
+		}
+		row.Revision++
+		row.UpdatedAt = now
+		if row.Priority != original.Priority {
+			if err := patchRuleJSON(&row, "priority", row.Priority); err != nil {
+				return nil, err
+			}
+		}
+		changed = append(changed, &row)
+	}
+	return changed, nil
+}
+
+func ruleAffectedBySwap(original, a, b *RuleRow) bool {
+	return original.Phase == a.Phase && (original.Priority == a.Priority || original.Priority == b.Priority)
+}
+
+func persistLanguageV2Marker(ctx context.Context, tx *storeTx, snapshot *RuleSetSnapshot) error {
+	if hasV2Marker(snapshot) {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO settings(key,value,updated_at) VALUES('rules.language.v2','installed',?) ON CONFLICT(key) DO NOTHING`, NowMS()); err != nil {
+			return err
+		}
+	}
+	return nil
 }

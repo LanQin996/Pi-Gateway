@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import OfficialUsagePanel from '../components/usage/OfficialUsagePanel.vue'
 import { copyText as copyToClipboard } from "../utils/clipboard"
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import {useId, computed, onMounted, onUnmounted, ref} from 'vue'
 import { ApiError, api } from '../api/client'
 import type { Account, AccountGroup, OAuthFlow, SavedProxy, Settings } from '../api/types'
 import { useToastStore, formatRelative, formatTime } from '../stores/ui'
@@ -22,6 +22,7 @@ import { transportLabel } from '../utils/uiOptions'
 import { Check, Copy, ExternalLink, Users } from 'lucide-vue-next'
 
 const toast = useToastStore()
+const formId = useId()
 const { t } = useI18n()
 const { c } = useAccountControls()
 const settings = ref<Settings | null>(null)
@@ -78,10 +79,10 @@ const editSupplementalText = ref('')
 const editSupplementalModels = computed(() => [...new Set(editSupplementalText.value.split(/\r?\n/).map(value => value.trim()).filter(Boolean))])
 const editSaving = ref(false)
 const editInherited = computed<Account['inherited_model_restrictions']>(() => {
-	if (!groupsLoaded.value) return editing.value?.inherited_model_restrictions ?? []
+	if (!groupsLoaded.value) { return editing.value?.inherited_model_restrictions ?? [] }
 	const byModel = new Map<string, string[]>()
 	for (const group of groups.value) {
-		if (!group.enabled || !editGroupIds.value.includes(group.id)) continue
+		if (!group.enabled || !editGroupIds.value.includes(group.id)) { continue }
 		for (const model of group.disabled_models ?? []) byModel.set(model, [...(byModel.get(model) ?? []), group.name])
 	}
 	return [...byModel].map(([model, group_names]) => ({ model, group_names }))
@@ -121,7 +122,7 @@ async function loadProxies() {
 			const result = await api.listProxies({ page, page_size: 100 })
 			items.push(...(result.items ?? []))
 			total = result.total
-			if (!result.items?.length) break
+			if (!result.items?.length) { break }
 			page++
 		} while (items.length < total)
 		proxies.value = items
@@ -155,8 +156,8 @@ async function refreshQuota(account: Account) {
 	try {
 		const result = await api.refreshQuota(account.id)
 		applyQuota(account.id, result.quota)
-		if (result.error) toast.error(result.error)
-		else toast.success(`${t('quota.title')} ✓`)
+		if (result.error) { toast.error(result.error) }
+		else { toast.success(`${t('quota.title')} ✓`) }
 	} catch (err) {
 		toast.error(err instanceof Error ? err.message : t('quota.fetchFailed', { error: 'unknown' }))
 	} finally {
@@ -232,19 +233,19 @@ function resetFlow() {
 }
 
 function proxyPatch(mode: string, url: string): Partial<Pick<Account, 'proxy_id' | 'proxy_url'>> {
-	if (mode === 'keep') return {}
-	if (mode === 'default') return { proxy_id: null, proxy_url: '' }
+	if (mode === 'keep') { return {} }
+	if (mode === 'default') { return { proxy_id: null, proxy_url: '' } }
 	if (mode === 'manual') {
-		if (!url.trim()) throw new Error(t('accounts.proxy.urlRequired'))
+		if (!url.trim()) { throw new Error(t('accounts.proxy.urlRequired')) }
 		return { proxy_id: null, proxy_url: url.trim() }
 	}
 	const id = Number(mode.replace('proxy:', ''))
-	if (!Number.isSafeInteger(id) || !proxies.value.some(proxy => proxy.id === id)) throw new Error(t('accounts.proxy.selectRequired'))
+	if (!Number.isSafeInteger(id) || !proxies.value.some(proxy => proxy.id === id)) { throw new Error(t('accounts.proxy.selectRequired')) }
 	return { proxy_id: id }
 }
 
 async function startFlow() {
-	if (starting.value) return
+	if (starting.value) { return }
 	stopPolling()
 	const version = pollingVersion
 	starting.value = true
@@ -257,15 +258,15 @@ async function startFlow() {
 			...proxyPatch(wizardProxyMode.value, wizardProxy.value),
 			account_id: wizardAccountId.value || undefined,
 		})
-		if (version !== pollingVersion || !wizardOpen.value) return
+		if (version !== pollingVersion || !wizardOpen.value) { return }
 		flow.value = result.flow
 		starting.value = false
 		startPolling()
 	} catch (err) {
-		if (version !== pollingVersion) return
+		if (version !== pollingVersion) { return }
 		flowError.value = err instanceof Error ? err.message : t('accounts.wizard.failed')
 	} finally {
-		if (version === pollingVersion) starting.value = false
+		if (version === pollingVersion) { starting.value = false }
 	}
 }
 
@@ -280,7 +281,7 @@ async function finishFlow(account?: Account) {
 	wizardOpen.value = false
 	await load()
 	// Quota is only readable once a Codex credential is attached.
-	if (wizardKind.value === 'chatgpt' && account && account.codex_linked) void refreshQuota(account)
+	if (wizardKind.value === 'chatgpt' && account && account.codex_linked) { void refreshQuota(account) }
 }
 
 function flowHasExpired(current: OAuthFlow): boolean {
@@ -298,34 +299,36 @@ function markFlowExpired() {
 	stopFlow(t('accounts.wizard.expired'))
 }
 
+function flowRequestExpired(err: unknown) {
+    return (flow.value && flowHasExpired(flow.value)) || (err instanceof ApiError && (err.status === 404 || err.status === 410))
+}
+
+async function handleFlowResult(result: Awaited<ReturnType<typeof api.oauthStatus>>) {
+    if (result.flow.status === 'completed') { await finishFlow(result.account); return }
+    if (result.flow.status === 'failed') { stopFlow(result.flow.error ?? t('accounts.wizard.failed')); return }
+    if (flowHasExpired(result.flow)) { markFlowExpired() }
+}
+
 function startPolling() {
 	const version = pollingVersion
 	let inFlight = false
 	const poll = async () => {
-		if (version !== pollingVersion || !flow.value) return
+		if (version !== pollingVersion || !flow.value) { return }
 		// Check the deadline even if an earlier request is still hanging.
 		if (flowHasExpired(flow.value)) {
 			markFlowExpired()
 			return
 		}
-		if (inFlight) return
+		if (inFlight) { return }
 		inFlight = true
 		try {
 			const result = await api.oauthStatus(flow.value.id)
-			if (version !== pollingVersion) return
+			if (version !== pollingVersion) { return }
 			flow.value = result.flow
-			if (result.flow.status === 'completed') {
-				await finishFlow(result.account)
-			} else if (result.flow.status === 'failed') {
-				stopFlow(result.flow.error ?? t('accounts.wizard.failed'))
-			} else if (flowHasExpired(result.flow)) {
-				markFlowExpired()
-			}
+			await handleFlowResult(result)
 		} catch (err) {
-			if (version !== pollingVersion) return
-			if (flow.value && flowHasExpired(flow.value)) {
-				markFlowExpired()
-			} else if (err instanceof ApiError && (err.status === 404 || err.status === 410)) {
+			if (version !== pollingVersion) { return }
+			if (flowRequestExpired(err)) {
 				markFlowExpired()
 			} else if (!(err instanceof TypeError)) {
 				// Fetch network failures are TypeErrors. HTTP and parsing errors are terminal.
@@ -340,14 +343,14 @@ function startPolling() {
 }
 
 function stopPolling() {
-	if (pollTimer !== undefined) window.clearInterval(pollTimer)
+	if (pollTimer !== undefined) { window.clearInterval(pollTimer) }
 	pollTimer = undefined
 	// Ignore late responses from a closed, expired or superseded flow.
 	pollingVersion++
 }
 
 async function submitPastedCode() {
-	if (!flow.value || flowStopped.value || submitting.value || !pasteInput.value.trim()) return
+	if (!flow.value || flowStopped.value || submitting.value || !pasteInput.value.trim()) { return }
 	if (flowHasExpired(flow.value)) {
 		markFlowExpired()
 		return
@@ -357,26 +360,18 @@ async function submitPastedCode() {
 	flowError.value = ''
 	try {
 		const result = await api.completeOAuth(flow.value.id, pasteInput.value.trim())
-		if (version !== pollingVersion) return
+		if (version !== pollingVersion) { return }
 		flow.value = result.flow
-		if (result.flow.status === 'completed') {
-			await finishFlow(result.account)
-		} else if (result.flow.status === 'failed') {
-			stopFlow(result.flow.error ?? t('accounts.wizard.failed'))
-		} else if (flowHasExpired(result.flow)) {
-			markFlowExpired()
-		}
+		await handleFlowResult(result)
 	} catch (err) {
-		if (version !== pollingVersion) return
-		if (flow.value && flowHasExpired(flow.value)) {
-			markFlowExpired()
-		} else if (err instanceof ApiError && (err.status === 404 || err.status === 410)) {
+		if (version !== pollingVersion) { return }
+		if (flowRequestExpired(err)) {
 			markFlowExpired()
 		} else {
 			flowError.value = err instanceof Error ? err.message : t('accounts.wizard.failed')
 		}
 	} finally {
-		if (version === pollingVersion) submitting.value = false
+		if (version === pollingVersion) { submitting.value = false }
 	}
 }
 
@@ -418,7 +413,7 @@ async function recover(account: Account) {
 }
 
 async function remove(account: Account) {
-	if (!confirm(t('accounts.deleteConfirm', { name: account.name }))) return
+	if (!confirm(t('accounts.deleteConfirm', { name: account.name }))) { return }
 	try {
 		await api.deleteAccount(account.id)
 		toast.success(t('common.delete'))
@@ -434,7 +429,7 @@ function linkCodex(account: Account) {
 }
 
 async function unlinkCodex(account: Account) {
-	if (!confirm(t('accounts.unlinkCodexConfirm', { name: account.name }))) return
+	if (!confirm(t('accounts.unlinkCodexConfirm', { name: account.name }))) { return }
 	try {
 		await api.unlinkCodex(account.id)
 		toast.success(t('accounts.unlinkCodexDone'))
@@ -473,7 +468,7 @@ function setEditGroup(id: number, selected: boolean) {
 }
 
 async function saveEdit() {
-	if (!editing.value || editSaving.value) return
+	if (!editing.value || editSaving.value) { return }
 	editSaving.value = true
 	try {
 		await api.updateAccount(editing.value.id, {
@@ -603,7 +598,9 @@ async function copyText(value: string, tag: string) {
 					<p v-if="wizardKind === 'chatgpt'" class="mb-2 text-[11px] text-[color:var(--color-ink-faint)]">
 						{{ t('accounts.wizard.redirectUri', { redirect: flow.redirect_uri }) }}
 					</p>
+					<label class="sr-only" :for="`${formId}-paste`">{{ t(pastePlaceholderKey) }}</label>
 					<textarea
+						:id="`${formId}-paste`"
 						v-model="pasteInput"
 						class="input font-mono"
 						rows="3"

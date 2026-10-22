@@ -48,20 +48,7 @@ func Lookup(model, tier string, overrides map[string]float64) (Rule, string, boo
 		return Rule{}, "", false
 	}
 	r := rates.rule(pricing.cacheWritePercent)
-	// 来源 usage.rs:196-213：模型没有 long_standard 时沿用短价；
-	// 当前 tier 没有对应长档时参考实现返回 None，故标记为未定价。
-	if pricing.unpricedLongContext {
-		r.LongContextThreshold = longContextThreshold
-		r.UnpricedLongContext = true
-	} else if pricing.longStandard != (tokenRates{}) {
-		r.LongContextThreshold = longContextThreshold
-		if longRates != (tokenRates{}) {
-			long := longRates.rule(pricing.cacheWritePercent)
-			r.LongContext = &long
-		} else {
-			r.UnpricedLongContext = true
-		}
-	}
+	applyLongContextPricing(&r, pricing, longRates)
 	for _, key := range []string{model, normalized, canonical} {
 		if multiplier, found := overrides[key]; found {
 			if !scaleRule(&r, multiplier) {
@@ -189,4 +176,21 @@ func Cost(r Rule, input, cached, cacheWrite, output int64) (int64, bool) {
 		return 0, false
 	}
 	return quotient.Int64(), true
+}
+
+func applyLongContextPricing(r *Rule, pricing modelPricing, longRates tokenRates) {
+	// 来源 usage.rs:196-213：模型没有 long_standard 时沿用短价；
+	// 当前 tier 没有对应长档时参考实现返回 None，故标记为未定价。
+	if pricing.unpricedLongContext {
+		r.LongContextThreshold = longContextThreshold
+		r.UnpricedLongContext = true
+	} else if pricing.longStandard != (tokenRates{}) {
+		r.LongContextThreshold = longContextThreshold
+		if longRates != (tokenRates{}) {
+			long := longRates.rule(pricing.cacheWritePercent)
+			r.LongContext = &long
+		} else {
+			r.UnpricedLongContext = true
+		}
+	}
 }

@@ -121,23 +121,15 @@ func TestAcquireRetryWaitsCooldownAndIntervalWithoutHoldingSlot(t *testing.T) {
 				m.SetRequestInterval(120 * time.Millisecond)
 				_, err = st.ExecContext(ctx, `UPDATE accounts SET last_started_at=? WHERE id=?`, start.UnixMilli(), a.ID)
 			}
-			if err != nil {
-				t.Fatal(err)
-			}
+			requireDataNoError(t, err)
 			finished := retryStart(m, ctx, key, a.ID)
 			retryWaitQueue(t, m, a.ID, 1)
-			if m.Inflight(a.ID) != 0 || m.Inflight(decoy.ID) != 0 {
-				t.Fatal("cooling replay held a slot or switched accounts")
-			}
+			requireDataCondition(t, !(m.Inflight(a.ID) != 0 || m.Inflight(decoy.ID) != 0), "cooling replay held a slot or switched accounts")
 			result := retryAssertAcquired(t, m, finished, a.ID)
-			if time.Now().UnixMilli() < readyAt {
-				t.Fatal("replay bypassed scheduling delay")
-			}
+			requireDataCondition(t, !(time.Now().UnixMilli() < readyAt), "replay bypassed scheduling delay")
 			result.release()
 			result.release()
-			if m.Inflight(a.ID) != 0 || retryQueueLength(m, a.ID) != 0 {
-				t.Fatal("successful replay leaked a ticket or reservation")
-			}
+			requireDataCondition(t, !(m.Inflight(a.ID) != 0 || retryQueueLength(m, a.ID) != 0), "successful replay leaked a ticket or reservation")
 		})
 	}
 }
@@ -149,8 +141,8 @@ func TestAcquireRetryFIFOConcurrencyAndOrdinaryPriority(t *testing.T) {
 	m := New(st, nil, nil, Options{})
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if !m.tryReserve(a) || !m.tryReserve(a) {
-		t.Fatal("could not hold both slots")
+	for slot := 0; slot < 2; slot++ {
+		requireDataTruef(t, !(!m.tryReserve(a)), "could not hold slot %d", slot)
 	}
 	firstHeld, secondHeld := m.pinnedRelease(a.ID), m.pinnedRelease(a.ID)
 	defer firstHeld()
@@ -160,9 +152,7 @@ func TestAcquireRetryFIFOConcurrencyAndOrdinaryPriority(t *testing.T) {
 		finished[i] = retryStart(m, ctx, key, a.ID)
 		retryWaitQueue(t, m, a.ID, i+1)
 	}
-	if m.Inflight(a.ID) != 2 {
-		t.Fatal("queued replay exceeded concurrency")
-	}
+	requireDataCondition(t, !(m.Inflight(a.ID) != 2), "queued replay exceeded concurrency")
 	firstHeld()
 	first := retryAssertAcquired(t, m, finished[0], a.ID)
 	retryWaitQueue(t, m, a.ID, 2)
@@ -171,17 +161,13 @@ func TestAcquireRetryFIFOConcurrencyAndOrdinaryPriority(t *testing.T) {
 	secondHeld()
 	second := retryAssertAcquired(t, m, finished[1], a.ID)
 	retryWaitQueue(t, m, a.ID, 1)
-	if m.Inflight(a.ID) != 2 {
-		t.Fatal("concurrent replays lost or exceeded slots")
-	}
+	requireDataCondition(t, !(m.Inflight(a.ID) != 2), "concurrent replays lost or exceeded slots")
 	retryAssertWaiting(t, finished[2])
 	first.release()
 	third := retryAssertAcquired(t, m, finished[2], a.ID)
 	second.release()
 	third.release()
-	if m.Inflight(a.ID) != 0 || retryQueueLength(m, a.ID) != 0 {
-		t.Fatal("FIFO acquisition leaked tickets or slots")
-	}
+	requireDataCondition(t, !(m.Inflight(a.ID) != 0 || retryQueueLength(m, a.ID) != 0), "FIFO acquisition leaked tickets or slots")
 
 	// Directly exercise ordinary admission with free capacity and queued
 	// tickets, without relying on which goroutine the scheduler wakes first.
@@ -191,9 +177,7 @@ func TestAcquireRetryFIFOConcurrencyAndOrdinaryPriority(t *testing.T) {
 		t.Fatal("ordinary acquisition overtook a retry ticket")
 	}
 	m.removeRetry(a.ID, ticket)
-	if !m.tryReserve(a) {
-		t.Fatal("queue removal did not restore ordinary admission")
-	}
+	requireDataCondition(t, !(!m.tryReserve(a)), "queue removal did not restore ordinary admission")
 	m.pinnedRelease(a.ID)()
 }
 
@@ -211,9 +195,7 @@ func TestAcquireRetryCancellationTimeoutAndLiveDenials(t *testing.T) {
 				ctx, cancel = context.WithTimeout(context.Background(), 120*time.Millisecond)
 				defer cancel()
 			}
-			if !m.tryReserve(a) {
-				t.Fatal("could not hold slot")
-			}
+			requireDataCondition(t, !(!m.tryReserve(a)), "could not hold slot")
 			held := m.pinnedRelease(a.ID)
 			defer held()
 			finished := retryStart(m, ctx, key, a.ID)
@@ -249,17 +231,11 @@ func TestAcquireRetryCancellationTimeoutAndLiveDenials(t *testing.T) {
 				other := routingGroup(t, st, "other")
 				err = st.SetKeyGroups(background, key.ID, []int64{other.ID})
 			}
-			if err != nil {
-				t.Fatal(err)
-			}
+			requireDataNoError(t, err)
 			routingAssertDenied(t, routingAwaitAcquire(t, finished), want)
-			if retryQueueLength(m, a.ID) != 0 || m.Inflight(a.ID) != 1 {
-				t.Fatal("denied waiter leaked ticket or changed existing reservation")
-			}
+			requireDataCondition(t, !(retryQueueLength(m, a.ID) != 0 || m.Inflight(a.ID) != 1), "denied waiter leaked ticket or changed existing reservation")
 			held()
-			if m.Inflight(a.ID) != 0 || !m.tryReserve(a) {
-				t.Fatal("removed retry continued blocking ordinary admission")
-			}
+			requireDataCondition(t, !(m.Inflight(a.ID) != 0 || !m.tryReserve(a)), "removed retry continued blocking ordinary admission")
 			m.pinnedRelease(a.ID)()
 		})
 	}
@@ -322,71 +298,7 @@ func TestAcquireRetryExtendedCooldownWhileQueued(t *testing.T) {
 // seam after reading the old account snapshot but before reserving its slot.
 func TestAcquireRetryRevalidatesAfterReservation(t *testing.T) {
 	for _, mutation := range []string{"cooldown", "interval", "disable key", "disable account", "cancel after reserve"} {
-		t.Run(mutation, func(t *testing.T) {
-			st := newRetryTestStore(t)
-			a := routingAccount(t, st, "original", 1)
-			key := routingKey(t, st)
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			calls := 0
-			readyAt := int64(0)
-			releasedBeforeWaiting := false
-			var m *Manager
-			m = New(st, nil, nil, Options{Now: func() time.Time {
-				calls++
-				if calls == 3 && mutation == "cancel after reserve" {
-					cancel()
-				}
-				if calls == 1 {
-					var err error
-					readyAt = time.Now().Add(120 * time.Millisecond).UnixMilli()
-					switch mutation {
-					case "cooldown":
-						_, err = st.ExecContext(ctx, `UPDATE accounts SET cooldown_until=? WHERE id=?`, readyAt, a.ID)
-					case "interval":
-						// Change persisted LastStartedAt rather than the runtime
-						// interval so the initial snapshot still permits reserve.
-						_, err = st.ExecContext(ctx, `UPDATE accounts SET last_started_at=? WHERE id=?`, readyAt-120, a.ID)
-					case "disable key":
-						current := *key
-						current.Enabled = false
-						err = st.UpdateKey(ctx, &current)
-					case "disable account":
-						no := false
-						err = st.PatchAccountManagementFields(ctx, a.ID, store.AccountManagementPatch{Enabled: &no})
-					}
-					if err != nil {
-						t.Fatal(err)
-					}
-				}
-				if calls == 5 && (mutation == "cooldown" || mutation == "interval") {
-					// The fifth clock call is the next eligibility read, outside
-					// m.mu, after the rejected reservation has been released.
-					releasedBeforeWaiting = m.Inflight(a.ID) == 0
-				}
-				return time.Now()
-			}})
-			if mutation == "interval" {
-				m.SetRequestInterval(120 * time.Millisecond)
-			}
-			account, release, err := m.AcquireRetry(ctx, key, a.ID, "model")
-			if mutation == "cancel after reserve" {
-				routingAssertDenied(t, routingAcquireResult{account, release, err}, context.Canceled)
-			} else if mutation == "disable key" || mutation == "disable account" {
-				routingAssertDenied(t, routingAcquireResult{account, release, err}, ErrNoAccounts)
-			} else {
-				if release != nil {
-					defer release()
-				}
-				if err != nil || account == nil || account.ID != a.ID || release == nil || !releasedBeforeWaiting || time.Now().UnixMilli() < readyAt {
-					t.Fatalf("temporary post-reserve change: account=%v err=%v released=%v", account, err, releasedBeforeWaiting)
-				}
-				release()
-			}
-			if retryQueueLength(m, a.ID) != 0 || m.Inflight(a.ID) != 0 {
-				t.Fatal("post-reservation validation leaked a ticket or slot")
-			}
-		})
+		t.Run(mutation, func(t *testing.T) { checkRetryRevalidatesAfterReservation(t, mutation) })
 	}
 }
 
@@ -408,4 +320,82 @@ func TestAcquireRetryAlreadyCanceledAndInvalidArguments(t *testing.T) {
 	if retryQueueLength(m, a.ID) != 0 || m.Inflight(a.ID) != 0 {
 		t.Fatal("invalid replay leaked capacity or tickets")
 	}
+}
+
+func checkRetryRevalidatesAfterReservation(t *testing.T, mutation string) {
+	st := newRetryTestStore(t)
+	a := routingAccount(t, st, "original", 1)
+	key := routingKey(t, st)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	calls := 0
+	readyAt := int64(0)
+	releasedBeforeWaiting := false
+	var m *Manager
+	m = New(st, nil, nil, Options{Now: func() time.Time {
+		return retryReservationClock(ctx, checkRetryRevalidatesAfterReservationPhase1State{capturedT: &t, capturedMutation: &mutation, capturedSt: &st, capturedA: &a, capturedKey: &key, capturedCancel: &cancel, capturedCalls: &calls, capturedReadyAt: &readyAt, capturedReleasedBeforeWaiting: &releasedBeforeWaiting, capturedM: &m})
+	}})
+	if mutation == "interval" {
+		m.SetRequestInterval(120 * time.Millisecond)
+	}
+	account, release, err := m.AcquireRetry(ctx, key, a.ID, "model")
+	if mutation == "cancel after reserve" {
+		routingAssertDenied(t, routingAcquireResult{account, release, err}, context.Canceled)
+	} else if mutation == "disable key" || mutation == "disable account" {
+		routingAssertDenied(t, routingAcquireResult{account, release, err}, ErrNoAccounts)
+	} else {
+		if release != nil {
+			defer release()
+		}
+		requireDataTruef(t, !(err != nil || account == nil || account.ID != a.ID || release == nil || !releasedBeforeWaiting || time.Now().UnixMilli() < readyAt), "temporary post-reserve change: account=%v err=%v released=%v", account, err, releasedBeforeWaiting)
+		release()
+	}
+	requireDataCondition(t, !(retryQueueLength(m, a.ID) != 0 || m.Inflight(a.ID) != 0), "post-reservation validation leaked a ticket or slot")
+}
+
+type checkRetryRevalidatesAfterReservationPhase1State struct {
+	capturedT                     **testing.T
+	capturedMutation              *string
+	capturedSt                    **store.Store
+	capturedA                     **store.Account
+	capturedKey                   **store.APIKey
+	capturedCancel                *context.CancelFunc
+	capturedCalls                 *int
+	capturedReadyAt               *int64
+	capturedReleasedBeforeWaiting *bool
+	capturedM                     **Manager
+}
+
+// retryReservationClock mutates authoritative policy between reservation and revalidation.
+func retryReservationClock(ctx context.Context, state checkRetryRevalidatesAfterReservationPhase1State) time.Time {
+	(*state.capturedCalls)++
+	if (*state.capturedCalls) == 3 && (*state.capturedMutation) == "cancel after reserve" {
+		(*state.capturedCancel)()
+	}
+	if (*state.capturedCalls) == 1 {
+		var err error
+		(*state.capturedReadyAt) = time.Now().Add(120 * time.Millisecond).UnixMilli()
+		switch *state.capturedMutation {
+		case "cooldown":
+			_, err = (*state.capturedSt).ExecContext(ctx, `UPDATE accounts SET cooldown_until=? WHERE id=?`, (*state.capturedReadyAt), (*state.capturedA).ID)
+		case "interval":
+			// Change persisted LastStartedAt rather than the runtime
+			// interval so the initial snapshot still permits reserve.
+			_, err = (*state.capturedSt).ExecContext(ctx, `UPDATE accounts SET last_started_at=? WHERE id=?`, (*state.capturedReadyAt)-120, (*state.capturedA).ID)
+		case "disable key":
+			current := *(*state.capturedKey)
+			current.Enabled = false
+			err = (*state.capturedSt).UpdateKey(ctx, &current)
+		case "disable account":
+			no := false
+			err = (*state.capturedSt).PatchAccountManagementFields(ctx, (*state.capturedA).ID, store.AccountManagementPatch{Enabled: &no})
+		}
+		requireDataNoError((*state.capturedT), err)
+	}
+	if (*state.capturedCalls) == 5 && ((*state.capturedMutation) == "cooldown" || (*state.capturedMutation) == "interval") {
+		// The fifth clock call is the next eligibility read, outside
+		// m.mu, after the rejected reservation has been released.
+		(*state.capturedReleasedBeforeWaiting) = (*state.capturedM).Inflight((*state.capturedA).ID) == 0
+	}
+	return time.Now()
 }

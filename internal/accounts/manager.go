@@ -188,13 +188,7 @@ func (m *Manager) AcquireExcluding(ctx context.Context, key *store.APIKey, reque
 		if err != nil {
 			return nil, nil, err
 		}
-		filtered := candidates[:0]
-		for _, a := range candidates {
-			if !excluded[a.ID] {
-				filtered = append(filtered, a)
-			}
-		}
-		candidates = filtered
+		candidates = excludeAccounts(candidates, excluded)
 		if len(candidates) == 0 {
 			return nil, nil, ErrNoAccounts
 		}
@@ -202,33 +196,9 @@ func (m *Manager) AcquireExcluding(ctx context.Context, key *store.APIKey, reque
 		preferred := hint.load(ctx, m, current, candidates, requestedModel, scope, strategy)
 		ordered := m.order(candidates, strategy)
 		preferAccount(ordered, preferred)
-		for _, chosen := range ordered {
-			if !m.tryReserve(chosen) {
-				continue
-			}
-			release := m.pinnedRelease(chosen.ID)
-			if err := ctx.Err(); err != nil {
-				release()
-				return nil, nil, err
-			}
-			// Selection reads may have begun while all slots were occupied. A
-			// revocation can commit before tryReserve succeeds; validate again
-			// after owning the slot rather than forwarding that older snapshot.
-			fresh, err := m.revalidateReservation(ctx, key, chosen.ID, requestedModel)
-			if err != nil {
-				release()
-				return nil, nil, err
-			}
-			if hint.save(ctx, m, fresh.ID) {
-				// Even best-effort cache IO may wait. Never let a revocation or
-				// credential rotation during that wait return an older account.
-				fresh, err = m.revalidateReservation(ctx, key, chosen.ID, requestedModel)
-				if err != nil {
-					release()
-					return nil, nil, err
-				}
-			}
-			return fresh, release, nil
+		fresh, release, err := m.tryAcquireOrdered(ctx, key, requestedModel, ordered, &hint)
+		if fresh != nil || err != nil {
+			return fresh, release, err
 		}
 		select {
 		case <-ctx.Done():
@@ -306,31 +276,9 @@ func (m *Manager) AcquireSpecific(ctx context.Context, accountID int64, requeste
 		if err := ctx.Err(); err != nil {
 			return nil, nil, err
 		}
-		a, err := m.store.GetAccount(ctx, accountID)
+		a, err := m.specificEligibleAccount(ctx, accountID, requestedModel)
 		if err != nil {
 			return nil, nil, err
-		}
-		if a == nil || !a.Enabled || a.CooldownUntil > m.nowTime().UnixMilli() {
-			return nil, nil, ErrNoAccounts
-		}
-		switch a.Status {
-		case store.AccountStatusExpired, store.AccountStatusInvalid, store.AccountStatusBanned, "quota_exhausted":
-			return nil, nil, ErrNoAccounts
-		}
-		m.mu.Lock()
-		interval := m.requestInterval.Milliseconds()
-		m.mu.Unlock()
-		if interval > 0 && a.LastStartedAt > 0 && m.nowTime().UnixMilli()-a.LastStartedAt < interval {
-			return nil, nil, ErrNoAccounts
-		}
-		models, err := m.store.DisabledModelsForAccount(ctx, a.ID, nil)
-		if err != nil {
-			return nil, nil, err
-		}
-		for _, model := range models {
-			if model == strings.TrimSpace(requestedModel) {
-				return nil, nil, fmt.Errorf("%w: %s", ErrModelUnavailable, model)
-			}
 		}
 		if m.tryReserve(a) {
 			release := m.pinnedRelease(a.ID)
@@ -372,22 +320,7 @@ func (m *Manager) eligibleFor(ctx context.Context, key *store.APIKey, model stri
 	interval := m.requestInterval.Milliseconds()
 	m.mu.Unlock()
 	model = strings.TrimSpace(model)
-	healthy := make([]*store.Account, 0, len(all))
-	ids := make([]int64, 0, len(all))
-	for _, a := range all {
-		if a == nil || !a.Enabled || (accountID > 0 && a.ID != accountID) {
-			continue
-		}
-		if !includeWaiting && accountReadyAt(a, interval) > now {
-			continue
-		}
-		switch a.Status {
-		case store.AccountStatusExpired, store.AccountStatusInvalid, store.AccountStatusBanned, "quota_exhausted":
-			continue
-		}
-		healthy = append(healthy, a)
-		ids = append(ids, a.ID)
-	}
+	healthy, ids := healthyAccounts(all, accountID, includeWaiting, interval, now)
 	if len(healthy) == 0 {
 		return nil, nil
 	}
@@ -398,13 +331,7 @@ func (m *Manager) eligibleFor(ctx context.Context, key *store.APIKey, model stri
 	modelDenied := false
 	out := make([]*store.Account, 0, len(healthy))
 	for _, a := range healthy {
-		blocked := false
-		for _, banned := range disabled[a.ID] {
-			if model != "" && banned == model {
-				blocked = true
-				break
-			}
-		}
+		blocked := modelIsDisabled(model, disabled[a.ID])
 		if blocked {
 			modelDenied = true
 			continue
@@ -715,7 +642,7 @@ func (m *Manager) CreateFromToken(ctx context.Context, name string, tok *oauth.T
 	// Sign in with ChatGPT tokens do not carry a Codex account id, so identify the
 	// account by email when available, then use a fresh stable row identifier.
 	accountID := ""
-	if accountID == "" && tok.Email != "" {
+	if tok.Email != "" {
 		accountID = "chatgpt:" + tok.Email
 	}
 	if accountID == "" {
@@ -738,30 +665,7 @@ func (m *Manager) CreateFromToken(ctx context.Context, name string, tok *oauth.T
 	}
 
 	if existing != nil {
-		existing.AccessToken = tok.Access
-		if tok.Refresh != "" {
-			existing.RefreshToken = tok.Refresh
-		}
-		existing.IDToken = tok.IDToken
-		existing.ExpiresAt = tok.ExpiresAt.UnixMilli()
-		existing.PlanType = tok.PlanType
-		existing.Email = tok.Email
-		if tok.ClientID != "" {
-			existing.OAuthClientID = tok.ClientID
-		}
-		existing.Status = store.AccountStatusReady
-		existing.LastError = ""
-		existing.Enabled = true
-		if proxyURL != "" {
-			existing.ProxyURL = proxyURL
-		}
-		if err := m.store.UpdateAccount(ctx, existing); err != nil {
-			return nil, err
-		}
-		if err := m.store.UpdateAccountCredentials(ctx, existing.ID, existing.AccessToken, tok.Refresh, existing.ExpiresAt, existing.Status, ""); err != nil {
-			return nil, err
-		}
-		return existing, nil
+		return m.updateFromToken(ctx, existing, tok, proxyURL)
 	}
 
 	m.mu.Lock()
@@ -814,7 +718,7 @@ func (m *Manager) LinkChatGPTCredential(ctx context.Context, a *store.Account, t
 	if email == "" {
 		email = a.Email
 	}
-	return m.store.AttachChatGPTCredential(ctx, a.ID, email, tok.PlanType, tok.Access, tok.Refresh, tok.IDToken, tok.ClientID, tok.ExpiresAt.UnixMilli())
+	return m.store.AttachChatGPTCredential(ctx, a.ID, store.ChatGPTCredential{Email: email, Plan: tok.PlanType, Access: tok.Access, Refresh: tok.Refresh, IDToken: tok.IDToken, ClientID: tok.ClientID, ExpiresAt: tok.ExpiresAt.UnixMilli()})
 }
 
 // LinkCodexCredential attaches the optional quota/catalog credential.
@@ -949,3 +853,131 @@ func (m *Manager) refreshDue(ctx context.Context, concurrency int) {
 
 // ValidateProxy checks a proxy URL for an account.
 func ValidateProxy(raw string) error { return egress.Validate(raw) }
+
+func (m *Manager) tryAcquireOrdered(ctx context.Context, key *store.APIKey, requestedModel string, ordered []*store.Account, hint *requestAffinity) (*store.Account, func(), error) {
+	for _, chosen := range ordered {
+		if !m.tryReserve(chosen) {
+			continue
+		}
+		release := m.pinnedRelease(chosen.ID)
+		if err := ctx.Err(); err != nil {
+			release()
+			return nil, nil, err
+		}
+		// Selection reads may have begun while all slots were occupied. A
+		// revocation can commit before tryReserve succeeds; validate again
+		// after owning the slot rather than forwarding that older snapshot.
+		fresh, err := m.revalidateReservation(ctx, key, chosen.ID, requestedModel)
+		if err != nil {
+			release()
+			return nil, nil, err
+		}
+		if hint.save(ctx, m, fresh.ID) {
+			// Even best-effort cache IO may wait. Never let a revocation or
+			// credential rotation during that wait return an older account.
+			fresh, err = m.revalidateReservation(ctx, key, chosen.ID, requestedModel)
+			if err != nil {
+				release()
+				return nil, nil, err
+			}
+		}
+		return fresh, release, nil
+	}
+	return nil, nil, nil
+}
+
+func (m *Manager) specificEligibleAccount(ctx context.Context, accountID int64, requestedModel string) (*store.Account, error) {
+	a, err := m.store.GetAccount(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	if a == nil || !a.Enabled || a.CooldownUntil > m.nowTime().UnixMilli() {
+		return nil, ErrNoAccounts
+	}
+	switch a.Status {
+	case store.AccountStatusExpired, store.AccountStatusInvalid, store.AccountStatusBanned, "quota_exhausted":
+		return nil, ErrNoAccounts
+	}
+	m.mu.Lock()
+	interval := m.requestInterval.Milliseconds()
+	m.mu.Unlock()
+	if interval > 0 && a.LastStartedAt > 0 && m.nowTime().UnixMilli()-a.LastStartedAt < interval {
+		return nil, ErrNoAccounts
+	}
+	models, err := m.store.DisabledModelsForAccount(ctx, a.ID, nil)
+	if err != nil {
+		return nil, err
+	}
+	for _, model := range models {
+		if model == strings.TrimSpace(requestedModel) {
+			return nil, fmt.Errorf("%w: %s", ErrModelUnavailable, model)
+		}
+	}
+	return a, nil
+}
+
+func healthyAccounts(all []*store.Account, accountID int64, includeWaiting bool, interval, now int64) (healthy []*store.Account, ids []int64) {
+	for _, a := range all {
+		if a == nil || !a.Enabled || (accountID > 0 && a.ID != accountID) {
+			continue
+		}
+		if !includeWaiting && accountReadyAt(a, interval) > now {
+			continue
+		}
+		switch a.Status {
+		case store.AccountStatusExpired, store.AccountStatusInvalid, store.AccountStatusBanned, "quota_exhausted":
+			continue
+		}
+		healthy = append(healthy, a)
+		ids = append(ids, a.ID)
+	}
+	return healthy, ids
+}
+
+func modelIsDisabled(model string, disabled []string) bool {
+	blocked := false
+	for _, banned := range disabled {
+		if model != "" && banned == model {
+			blocked = true
+			break
+		}
+	}
+	return blocked
+}
+
+func (m *Manager) updateFromToken(ctx context.Context, existing *store.Account, tok *oauth.Token, proxyURL string) (*store.Account, error) {
+	existing.AccessToken = tok.Access
+	if tok.Refresh != "" {
+		existing.RefreshToken = tok.Refresh
+	}
+	existing.IDToken = tok.IDToken
+	existing.ExpiresAt = tok.ExpiresAt.UnixMilli()
+	existing.PlanType = tok.PlanType
+	existing.Email = tok.Email
+	if tok.ClientID != "" {
+		existing.OAuthClientID = tok.ClientID
+	}
+	existing.Status = store.AccountStatusReady
+	existing.LastError = ""
+	existing.Enabled = true
+	if proxyURL != "" {
+		existing.ProxyURL = proxyURL
+	}
+	if err := m.store.UpdateAccount(ctx, existing); err != nil {
+		return nil, err
+	}
+	if err := m.store.UpdateAccountCredentials(ctx, existing.ID, existing.AccessToken, tok.Refresh, existing.ExpiresAt, existing.Status, ""); err != nil {
+		return nil, err
+	}
+	return existing, nil
+}
+
+func excludeAccounts(candidates []*store.Account, excluded map[int64]bool) []*store.Account {
+	filtered := candidates[:0]
+	for _, a := range candidates {
+		if !excluded[a.ID] {
+			filtered = append(filtered, a)
+		}
+	}
+	return filtered
+}

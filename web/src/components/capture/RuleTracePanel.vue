@@ -21,10 +21,10 @@ const finalWriters = computed(() => lastRuleWriters(props.capture))
 const eventFrames = computed(() => {
     const result = new Map<string, {before: number[]; after: number[]}>()
     for (const frame of props.capture.response_frames ?? []) {
-        if (!frame.rule_event_id) continue
+        if (!frame.rule_event_id) { continue }
         const item = result.get(frame.rule_event_id) ?? {before: [], after: []}
-        if (frame.dir === 'in') item.before.push(frame.seq)
-        if (frame.dir === 'client_out') item.after.push(frame.seq)
+        if (frame.dir === 'in') { item.before.push(frame.seq) }
+        if (frame.dir === 'client_out') { item.after.push(frame.seq) }
         result.set(frame.rule_event_id, item)
     }
     return result
@@ -35,21 +35,42 @@ const statusKeys: Record<string, string> = {
 }
 function actionLabel(action?: string) { return action ? ruleLabel('action', action, locale.value) : '' }
 function phaseLabel(phase?: string) {
-    const key = phase === 'request' ? 'phaseRequest' : phase === 'response_event' ? 'phaseResponseEvent' : phase === 'response_body' ? 'phaseResponseBody' : ''
+    const key = (() => {
+    if (phase === 'request') {
+        return 'phaseRequest'
+    }
+    if (phase === 'response_event') {
+        return 'phaseResponseEvent'
+    }
+    if (phase === 'response_body') {
+        return 'phaseResponseBody'
+    }
+    return ''
+})()
     return key ? t(`capture.rules.${key}`) : phase || c('unrecorded')
 }
 function statusLabel(trace: CaptureRuleTrace) {
-    if (trace.rolled_back) return t('capture.rules.statusRolledBack')
-    const key = Object.prototype.hasOwnProperty.call(statusKeys, trace.status ?? '') ? statusKeys[trace.status!] : ''
+    if (trace.rolled_back) { return t('capture.rules.statusRolledBack') }
+    const key = Object.hasOwn(statusKeys, trace.status ?? '') ? statusKeys[trace.status!] : ''
     return key ? t(`capture.rules.${key}`) : trace.status || c('unrecorded')
 }
 function tone(trace: CaptureRuleTrace) {
-    return trace.error || trace.status === 'error' || trace.status === 'blocked' ? 'danger'
-        : trace.rolled_back || trace.status === 'dropped' ? 'warn' : trace.status === 'changed' ? 'info' : 'neutral'
+    return (() => {
+    if (trace.error || trace.status === 'error' || trace.status === 'blocked') {
+        return 'danger'
+    }
+    if (trace.rolled_back || trace.status === 'dropped') {
+        return 'warn'
+    }
+    if (trace.status === 'changed') {
+        return 'info'
+    }
+    return 'neutral'
+})()
 }
 function toggle(index: string, event: Event) {
-    if ((event.target as HTMLDetailsElement).open) expanded.value.add(index)
-    else expanded.value.delete(index)
+    if ((event.target as HTMLDetailsElement).open) { expanded.value.add(index) }
+    else { expanded.value.delete(index) }
 }
 // Show one representative per array collection/path instead of hundreds of leaf edits.
 function summarizedChanges(trace: CaptureRuleTrace) {
@@ -59,7 +80,7 @@ function summarizedChanges(trace: CaptureRuleTrace) {
         const path = change.path.replace(/\/(?:0|[1-9]\d*)(?=\/|$).*/, '/*')
         const key = `${change.operation}:${path}`
         const previous = seen.get(key)
-        if (previous) previous.count++
+        if (previous) { previous.count++ }
         else { const group = {change, index, count: 1, path}; seen.set(key, group); groups.push(group) }
     }
     return groups
@@ -69,7 +90,7 @@ function summarizedChanges(trace: CaptureRuleTrace) {
 <template>
     <section class="rule-trace-panel" aria-labelledby="rule-trace-title">
         <div class="trace-heading"><h2 id="rule-trace-title">{{ t('capture.rules.title') }}</h2><span>{{ t('capture.rules.version', { version: capture.rules_version ?? 0 }) }}</span></div>
-        <p v-if="capture.rules_trace_truncated || capture.rules_trace_omitted" class="notice notice-warning" role="status">{{ t('capture.rules.truncated', { count: capture.rules_trace_omitted ?? 0 }) }}</p>
+        <output v-if="capture.rules_trace_truncated || capture.rules_trace_omitted" class="notice notice-warning" >{{ t('capture.rules.truncated', { count: capture.rules_trace_omitted ?? 0 }) }}</output>
         <p v-if="!traces.length" class="trace-hint">{{ !capture.rules_version && !capture.rules_trace_truncated ? t('capture.rules.legacy') : t('capture.rules.noChanges') }}</p>
         <p v-else class="trace-hint">{{ t('capture.rules.imprecise') }}</p>
         <details v-for="group in visible" :key="group.key" class="card trace-step" data-testid="trace-rule-group" @toggle="($event.target as HTMLDetailsElement).open ? openRules.add(group.key) : openRules.delete(group.key)">
@@ -108,9 +129,9 @@ function summarizedChanges(trace: CaptureRuleTrace) {
 </template>
 
 <style scoped>
-.trace-step > summary { list-style: none; }
+.trace-step > summary { list-style: none; padding: 12px; cursor: pointer; display: flex; align-items: center; flex-wrap: wrap; gap: 7px; font-size: 12px; overflow-wrap: anywhere; }
 .trace-step > summary::-webkit-details-marker { display: none; }
 .trace-step > summary::before { content: '›'; color: var(--color-ink-muted); font-size: 16px; line-height: 1; flex-shrink: 0; transition: transform .15s; }
 .trace-step[open] > summary::before { transform: rotate(90deg); }
-.rule-trace-panel { display: grid; gap: 10px; min-width: 0; }.trace-heading, .trace-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }.trace-heading h2 { font-size: 14px; margin: 0; }.trace-heading > span, .trace-meta, .trace-hint { font-size: 11px; color: var(--color-ink-muted); line-height: 1.6; overflow-wrap: anywhere; }.trace-hint { margin: 0; }.trace-step { min-width: 0; overflow: hidden; }.trace-step > summary { padding: 12px; cursor: pointer; display: flex; align-items: center; flex-wrap: wrap; gap: 7px; font-size: 12px; overflow-wrap: anywhere; }.trace-order { color: var(--color-ink-faint); }.trace-body { border-top: 1px solid var(--color-line); padding: 12px; display: grid; gap: 10px; min-width: 0; }.trace-change { display: grid; gap: 6px; min-width: 0; }.trace-body code { overflow-wrap: anywhere; }.notice { margin: 0; overflow-wrap: anywhere; }
+.rule-trace-panel { display: grid; gap: 10px; min-width: 0; }.trace-heading, .trace-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }.trace-heading h2 { font-size: 14px; margin: 0; }.trace-heading > span, .trace-meta, .trace-hint { font-size: 11px; color: var(--color-ink-muted); line-height: 1.6; overflow-wrap: anywhere; }.trace-hint { margin: 0; }.trace-step { min-width: 0; overflow: hidden; }.trace-order { color: var(--color-ink-faint); }.trace-body { border-top: 1px solid var(--color-line); padding: 12px; display: grid; gap: 10px; min-width: 0; }.trace-change { display: grid; gap: 6px; min-width: 0; }.trace-body code { overflow-wrap: anywhere; }.notice { margin: 0; overflow-wrap: anywhere; }
 </style>

@@ -350,126 +350,105 @@ func exerciseSQLBackend(t *testing.T, s *Store) {
 	t.Helper()
 	ctx := context.Background()
 	p := &Proxy{Name: "test proxy", URL: "http://user:secret@localhost:8080"}
-	if err := s.CreateProxy(ctx, p); err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, s.CreateProxy(ctx, p))
 	a := &Account{Name: "account", Enabled: true, ProxyID: &p.ID, ProxyURL: "stale"}
-	if err := s.CreateAccount(ctx, a); err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, s.CreateAccount(ctx, a))
 	g := &AccountGroup{Name: "group", Enabled: true, AccountIDs: []int64{a.ID}, DisabledModels: []string{"blocked"}}
-	if err := s.CreateAccountGroup(ctx, g); err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, s.CreateAccountGroup(ctx, g))
 	k := &APIKey{Name: "key", Enabled: true, GroupIDs: []int64{g.ID}}
-	if err := s.CreateKey(ctx, k); err != nil {
-		t.Fatal(err)
-	}
-	if a.ID <= 0 || p.ID <= 0 || g.ID <= 0 || k.ID <= 0 {
-		t.Fatal("missing generated IDs")
-	}
+	requireDataNoError(t, s.CreateKey(ctx, k))
+	requireDataCondition(t, !(a.ID <= 0 || p.ID <= 0 || g.ID <= 0 || k.ID <= 0), "missing generated IDs")
 	got, err := s.GetAccount(ctx, a.ID)
-	if err != nil || got == nil || got.ProxyURL != p.URL || len(got.GroupIDs) != 1 || len(got.InheritedModelRestrictions) != 1 {
-		t.Fatalf("account=%+v, err=%v", got, err)
-	}
-	if err := s.MarkAccountUsed(ctx, a.ID, true); err != nil {
-		t.Fatal(err)
-	}
+	requireDataTruef(t, !(err != nil || got == nil || got.ProxyURL != p.URL || len(got.GroupIDs) != 1 || len(got.InheritedModelRestrictions) != 1), "account=%+v, err=%v", got, err)
+	requireDataNoError(t, s.MarkAccountUsed(ctx, a.ID, true))
 	// Exercise the production scheduling escape hatch with boolean and fractional values.
-	if _, err := s.ExecContext(ctx, `UPDATE accounts SET
+	{
+		_, err := s.ExecContext(ctx, `UPDATE accounts SET
 		cooldown_until=CASE WHEN ? THEN MAX(cooldown_until,?) ELSE cooldown_until END,
 		ewma_first_output_ms=CASE WHEN CAST(? AS DOUBLE PRECISION)<=0 THEN ewma_first_output_ms ELSE ? END
-		WHERE id=?`, true, NowMS(), 12.5, 12.5, a.ID); err != nil {
-		t.Fatal(err)
+		WHERE id=?`, true, NowMS(), 12.5, 12.5, a.ID)
+		requireDataTrue(t, !(err != nil), err)
 	}
 	p.URL = "http://localhost:8081"
-	if err := s.UpdateProxy(ctx, p); err != nil {
-		t.Fatal(err)
+	requireDataNoError(t, s.UpdateProxy(ctx, p))
+	got, err = s.GetAccount(ctx, a.ID)
+	requireDataTruef(t, !(err != nil || got.ProxyURL != p.URL || got.ErrorCount != 1), "updated account=%+v err=%v", got, err)
+	{
+		_, _, err := s.ListProxies(ctx, "localhost", 10, 0)
+		requireDataTrue(t, !(err != nil), err)
+	}
+	{
+		err := s.PatchAccountManagementFields(ctx, a.ID, AccountManagementPatch{GroupIDs: []int64{999999}})
+		requireDataTrue(t, !(err == nil), "invalid group accepted")
 	}
 	got, err = s.GetAccount(ctx, a.ID)
-	if err != nil || got.ProxyURL != p.URL || got.ErrorCount != 1 {
-		t.Fatalf("updated account=%+v err=%v", got, err)
-	}
-	if _, _, err := s.ListProxies(ctx, "localhost", 10, 0); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.PatchAccountManagementFields(ctx, a.ID, AccountManagementPatch{GroupIDs: []int64{999999}}); err == nil {
-		t.Fatal("invalid group accepted")
-	}
-	got, err = s.GetAccount(ctx, a.ID)
-	if err != nil || len(got.GroupIDs) != 1 {
-		t.Fatalf("transaction not rolled back: %+v %v", got, err)
-	}
+	requireDataTruef(t, !(err != nil || len(got.GroupIDs) != 1), "transaction not rolled back: %+v %v", got, err)
 	catalog := &ModelCatalog{Models: []CatalogModel{{ID: "model"}}, FetchedAt: NowMS(), AttemptedAt: NowMS()}
-	if err := s.SaveAccountModelCatalog(ctx, a.ID, catalog); err != nil {
-		t.Fatal(err)
+	requireDataNoError(t, s.SaveAccountModelCatalog(ctx, a.ID, catalog))
+	requireDataNoError(t, s.SaveAccountModelCatalog(ctx, a.ID, catalog))
+	{
+		_, err := s.GetAccountModelCatalog(ctx, a.ID)
+		requireDataTrue(t, !(err != nil), err)
 	}
-	if err := s.SaveAccountModelCatalog(ctx, a.ID, catalog); err != nil {
-		t.Fatal(err)
+	requireDataNoError(t, s.SetSecret(ctx, "test.secret", "value"))
+	requireDataNoError(t, s.SaveSettings(ctx, &Settings{DefaultModel: "model"}))
+	{
+		_, err := s.LoadSettings(ctx, nil)
+		requireDataTrue(t, !(err != nil), err)
 	}
-	if _, err := s.GetAccountModelCatalog(ctx, a.ID); err != nil {
-		t.Fatal(err)
+	requireDataNoError(t, s.UpsertMiddleware(ctx, &MiddlewareRow{Name: "test", Enabled: true}))
+	{
+		_, err := s.ListMiddlewares(ctx)
+		requireDataTrue(t, !(err != nil), err)
 	}
-	if err := s.SetSecret(ctx, "test.secret", "value"); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.SaveSettings(ctx, &Settings{DefaultModel: "model"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.LoadSettings(ctx, nil); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.UpsertMiddleware(ctx, &MiddlewareRow{Name: "test", Enabled: true}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.ListMiddlewares(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.RecordAudit(ctx, "test", "detail"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.ListAudit(ctx, 10); err != nil {
-		t.Fatal(err)
+	requireDataNoError(t, s.RecordAudit(ctx, "test", "detail"))
+	{
+		_, err := s.ListAudit(ctx, 10)
+		requireDataTrue(t, !(err != nil), err)
 	}
 	now := NowMS()
 	for i := 0; i < 2; i++ {
 		settled, err := s.SettleKeyCharge(ctx, "charge", k.ID, 10, now)
-		if err != nil || settled != (i == 0) {
-			t.Fatalf("settled=%v err=%v", settled, err)
-		}
+		requireDataTruef(t, !(err != nil || settled != (i == 0)), "settled=%v err=%v", settled, err)
 	}
-	if windows, err := s.KeyBudgetStatus(ctx, k.ID, now); err != nil || windows[0].UsedMicros != 10 {
-		t.Fatalf("windows=%v err=%v", windows, err)
+	{
+		windows, err := s.KeyBudgetStatus(ctx, k.ID, now)
+		requireDataTruef(t, !(err != nil || windows[0].UsedMicros != 10), "windows=%v err=%v", windows, err)
 	}
 	for _, latency := range []int64{10, 11} {
 		c := &Capture{AccountID: a.ID, Outcome: OutcomeOK, DurationMS: latency}
-		if err := s.InsertCapture(ctx, c, 50); err != nil || c.ID <= 0 {
-			t.Fatalf("capture=%+v err=%v", c, err)
+		{
+			err := s.InsertCapture(ctx, c, 50)
+			requireDataTruef(t, !(err != nil || c.ID <= 0), "capture=%+v err=%v", c, err)
 		}
 	}
-	if stats, err := s.Stats(ctx, 50); err != nil || stats.AvgMS != 10 {
-		t.Fatalf("capture stats=%+v err=%v", stats, err)
+	{
+		stats, err := s.Stats(ctx, 50)
+		requireDataTruef(t, !(err != nil || stats.AvgMS != 10), "capture stats=%+v err=%v", stats, err)
 	}
 	for _, ttft := range []int64{100, 200, 300} {
 		finishTestUsage(t, s, UsageRecord{RequestID: "usage", APIKeyID: k.ID, AccountID: a.ID, Model: "model", Outcome: "succeeded", StartedAt: now, FirstTokenMS: ttft, LatencyMS: 1000, OutputTokens: usageInt(10)})
 	}
 	summary, err := s.UsageSummaryFor(ctx, UsageFilter{})
-	if err != nil || summary.RequestCount != 3 || summary.TTFT.P50 != 200 || summary.TTFT.P95 != 300 {
-		t.Fatalf("summary=%+v err=%v", summary, err)
+	requireDataTruef(t, !(err != nil || summary.RequestCount != 3 || summary.TTFT.P50 != 200 || summary.TTFT.P95 != 300), "summary=%+v err=%v", summary, err)
+	{
+		_, n, err := s.ListUsageRecords(ctx, UsageFilter{Search: "USAGE", Limit: 2})
+		requireDataTruef(t, !(err != nil || n != 3), "usage count=%d err=%v", n, err)
 	}
-	if _, n, err := s.ListUsageRecords(ctx, UsageFilter{Search: "USAGE", Limit: 2}); err != nil || n != 3 {
-		t.Fatalf("usage count=%d err=%v", n, err)
+	{
+		_, err := s.UsageTrend(ctx, UsageFilter{}, "hour")
+		requireDataTrue(t, !(err != nil), err)
 	}
-	if _, err := s.UsageTrend(ctx, UsageFilter{}, "hour"); err != nil {
-		t.Fatal(err)
+	{
+		_, err := s.UsageByModel(ctx, UsageFilter{})
+		requireDataTrue(t, !(err != nil), err)
 	}
-	if _, err := s.UsageByModel(ctx, UsageFilter{}); err != nil {
-		t.Fatal(err)
+	{
+		_, err := s.UsageByKey(ctx, UsageFilter{})
+		requireDataTrue(t, !(err != nil), err)
 	}
-	if _, err := s.UsageByKey(ctx, UsageFilter{}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.UsageByAccount(ctx, UsageFilter{}); err != nil {
-		t.Fatal(err)
+	{
+		_, err := s.UsageByAccount(ctx, UsageFilter{})
+		requireDataTrue(t, !(err != nil), err)
 	}
 }

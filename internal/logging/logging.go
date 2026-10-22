@@ -11,7 +11,7 @@ import (
 
 // Setup installs a slog logger writing to stdout and, optionally, a file.
 // It returns the logger plus a closer for the file sink.
-func Setup(level string, file string) (*slog.Logger, func() error, error) {
+func Setup(level, file string) (*slog.Logger, func() error, error) {
 	var writers []io.Writer
 	writers = append(writers, os.Stdout)
 

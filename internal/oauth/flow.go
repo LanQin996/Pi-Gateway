@@ -75,6 +75,8 @@ type FlowOptions struct {
 	Logger     *slog.Logger
 }
 
+const loginFlowExpiredMessage = "login flow expired"
+
 // WrapCompletion installs persistence middleware before any flows are started.
 // The callback runs for both browser callbacks and manually submitted redirects.
 func (m *FlowManager) WrapCompletion(wrap func(func(*Flow, *Token) error) func(*Flow, *Token) error) {
@@ -262,10 +264,10 @@ func (m *FlowManager) SubmitInput(ctx context.Context, id, input string) (*Flow,
 	}
 	if time.Now().After(flow.ExpiresAt) {
 		flow.Status = FlowFailed
-		flow.Error = "login flow expired"
+		flow.Error = loginFlowExpiredMessage
 		snapshot := snapshotFlowLocked(flow)
 		m.mu.Unlock()
-		return snapshot, errors.New("login flow expired")
+		return snapshot, errors.New(loginFlowExpiredMessage)
 	}
 	// Keep the internal pointer for completeFlow, but parse against a snapshot so
 	// no caller can observe or mutate the live flow.
@@ -309,7 +311,7 @@ func (m *FlowManager) completeFlow(ctx context.Context, flow *Flow, code, client
 	}
 	if time.Now().After(current.ExpiresAt) {
 		current.Status = FlowFailed
-		current.Error = "login flow expired"
+		current.Error = loginFlowExpiredMessage
 		m.mu.Unlock()
 		m.maybeStopCallbackServer()
 		return
@@ -449,12 +451,7 @@ func (m *FlowManager) Close(ctx context.Context) error {
 		for _, cancel := range m.activeCancels {
 			cancel()
 		}
-		for _, flow := range m.flows {
-			if flow.Status == FlowPending || flow.Status == FlowExchanging {
-				flow.Status = FlowFailed
-				flow.Error = "oauth flow manager closed"
-			}
-		}
+		m.failActiveFlowsLocked()
 		server, listener := m.server, m.ln
 		m.server, m.ln = nil, nil
 		m.mu.Unlock()
@@ -499,7 +496,7 @@ func (m *FlowManager) scheduleCleanup(flowID string) {
 		if f, ok := m.flows[flowID]; ok {
 			if f.Status == FlowPending || f.Status == FlowExchanging {
 				f.Status = FlowFailed
-				f.Error = "login flow expired"
+				f.Error = loginFlowExpiredMessage
 			}
 			delete(m.flows, flowID)
 		}
@@ -636,3 +633,12 @@ p { color: #a1a1aa; line-height: 1.6; margin: 0; }
 <svg class="logo" viewBox="0 0 100 100" fill="currentColor" role="img" aria-label="Pi"><path d="M 15 15 L 85 15 L 85 25 L 75 25 L 75 85 L 55 85 L 55 75 L 65 75 L 65 25 L 35 25 L 35 85 L 25 85 L 25 25 L 15 25 Z"/></svg>
 <h1>Authorization received</h1><p>You can close this window and return to Pi.</p>
 </main></body></html>`
+
+func (m *FlowManager) failActiveFlowsLocked() {
+	for _, flow := range m.flows {
+		if flow.Status == FlowPending || flow.Status == FlowExchanging {
+			flow.Status = FlowFailed
+			flow.Error = "oauth flow manager closed"
+		}
+	}
+}

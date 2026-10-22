@@ -40,9 +40,9 @@ const groupMap = computed(() => {
 const filtered = computed(() => {
 	const query = search.value.trim().toLowerCase()
 	return props.accounts.filter(account => {
-		if (status.value && !(status.value === 'disabled' ? !account.enabled : account.status === status.value)) return false
+		if (status.value && !(status.value === 'disabled' ? !account.enabled : account.status === status.value)) { return false }
 		const memberships = groupMap.value.get(account.id) ?? []
-		if (group.value && !(group.value === 'ungrouped' ? !memberships.length : memberships.some(item => String(item.id) === group.value))) return false
+		if (group.value && !(group.value === 'ungrouped' ? !memberships.length : memberships.some(item => String(item.id) === group.value))) { return false }
 		return !query || `${account.name} ${account.email} ${account.account_id}`.toLowerCase().includes(query)
 	})
 })
@@ -63,12 +63,23 @@ function selectPage(checked: boolean) {
 watch(() => props.accounts, accounts => {
 	const existing = new Set(accounts.map(a => a.id))
 	const ids = (props.selectedIds ?? []).filter(id => existing.has(id))
-	if (ids.length !== (props.selectedIds ?? []).length) emit('update:selectedIds', ids)
+	if (ids.length !== (props.selectedIds ?? []).length) { emit('update:selectedIds', ids) }
 })
 watch([search, status, group, pageSize], () => { page.value = 1 })
 watch(pages, value => { page.value = Math.min(page.value, value) })
 function toggleDetails(id: number) { const next = new Set(expanded.value); next.has(id) ? next.delete(id) : next.add(id); expanded.value = next }
-function tone(account: Account) { const category = accountCategory(account); return category === 'normal' ? 'success' : category === 'limited' ? 'warn' : category === 'disabled' ? 'neutral' : 'danger' }
+function tone(account: Account) { const category = accountCategory(account); return (() => {
+    if (category === 'normal') {
+        return 'success'
+    }
+    if (category === 'limited') {
+        return 'warn'
+    }
+    if (category === 'disabled') {
+        return 'neutral'
+    }
+    return 'danger'
+})() }
 </script>
 
 <template>
@@ -93,19 +104,19 @@ function tone(account: Account) { const category = accountCategory(account); ret
 							<td class="td actions-column"><AccountTableActions :account="account" :quota-busy="quotaBusy" @recover="emit('recover', $event)" @edit="emit('edit', $event)" @delete="emit('delete', $event)" @refresh="emit('refreshToken', $event)" @quota="emit('quota', $event)" @refresh-quota="emit('refreshQuota', $event)" @link="emit('link', $event)" @unlink="emit('unlink', $event)" @toggle="emit('toggle', $event)" @test="emit('test', $event)" /></td>
 						</tr>
 						<tr v-if="expanded.has(account.id)" class="detail-row"><td colspan="10"><div class="account-detail-grid">
-							<div><label>{{ t('common.enabled') }}</label><Toggle :model-value="account.enabled" :aria-label="c(account.enabled ? 'disableAccount' : 'enableAccount')" @update:modelValue="emit('toggle', account)" /></div>
-							<div><label>{{ t('accounts.col.token') }}</label><span :class="{ 'text-danger': account.token_expires_in_ms <= 0 }">{{ account.token_expires_in_ms > 0 ? formatUntil(account.token_expires_in_ms) : t('accounts.expired') }}</span><small v-if="!account.has_refresh_token">{{ t('accounts.noRefreshToken') }}</small></div>
-							<div><label>{{ t('accounts.col.codex') }}</label><span>{{ t(account.codex_linked ? 'accounts.codexLinked' : 'accounts.codexNotLinked') }}</span><button class="detail-link" @click="account.codex_linked ? emit('unlink', account) : emit('link', account)">{{ t(account.codex_linked ? 'accounts.unlinkCodex' : 'accounts.linkCodex') }}</button></div>
-							<div><label>{{ t('accounts.col.proxy') }}</label><span class="break-anywhere">{{ account.proxy_display || '—' }}</span><button class="detail-link" @click="emit('edit', account)">{{ t('accounts.edit') }}</button></div>
-							<div><label :for="`account-protocol-${account.id}`">{{ t('accounts.col.protocol') }}</label><select :id="`account-protocol-${account.id}`" class="input protocol-select" :title="c('protocolChain')" :value="account.upstream_protocol ?? ''" @change="emit('protocol', account, ($event.target as HTMLSelectElement).value)"><option value="">{{ protocolDefault }}</option><option value="sse">{{ transportLabel('sse') }}</option><option value="ws">{{ transportLabel('ws') }}</option></select></div>
-							<div><label>{{ t('accounts.capacity') }}</label><span>{{ account.inflight }} / {{ account.concurrency }}</span><small>{{ t('accounts.edit.weight') }} {{ account.weight }}</small></div>
-							<div><label>{{ t('accounts.col.requests') }}</label><span>{{ metric(account.request_count) }}</span><small class="text-danger">{{ t('dashboard.failed') }} {{ metric(account.error_count) }}</small></div>
-							<div><label>{{ t('accounts.edit.lastRefresh') }}</label><span>{{ formatRelative(account.last_refresh_at) }}</span></div>
+							<div><span class="detail-label">{{ t('common.enabled') }}</span><Toggle :model-value="account.enabled" :aria-label="c(account.enabled ? 'disableAccount' : 'enableAccount')" @update:modelValue="emit('toggle', account)" /></div>
+							<div><span class="detail-label">{{ t('accounts.col.token') }}</span><span :class="{ 'text-danger': account.token_expires_in_ms <= 0 }">{{ account.token_expires_in_ms > 0 ? formatUntil(account.token_expires_in_ms) : t('accounts.expired') }}</span><small v-if="!account.has_refresh_token">{{ t('accounts.noRefreshToken') }}</small></div>
+							<div><span class="detail-label">{{ t('accounts.col.codex') }}</span><span>{{ t(account.codex_linked ? 'accounts.codexLinked' : 'accounts.codexNotLinked') }}</span><button class="detail-link" @click="account.codex_linked ? emit('unlink', account) : emit('link', account)">{{ t(account.codex_linked ? 'accounts.unlinkCodex' : 'accounts.linkCodex') }}</button></div>
+							<div><span class="detail-label">{{ t('accounts.col.proxy') }}</span><span class="break-anywhere">{{ account.proxy_display || '—' }}</span><button class="detail-link" @click="emit('edit', account)">{{ t('accounts.edit') }}</button></div>
+							<div><label class="detail-label" :for="`account-protocol-${account.id}`">{{ t('accounts.col.protocol') }}</label><select :id="`account-protocol-${account.id}`" class="input protocol-select" :title="c('protocolChain')" :value="account.upstream_protocol ?? ''" @change="emit('protocol', account, ($event.target as HTMLSelectElement).value)"><option value="">{{ protocolDefault }}</option><option value="sse">{{ transportLabel('sse') }}</option><option value="ws">{{ transportLabel('ws') }}</option></select></div>
+							<div><span class="detail-label">{{ t('accounts.capacity') }}</span><span>{{ account.inflight }} / {{ account.concurrency }}</span><small>{{ t('accounts.edit.weight') }} {{ account.weight }}</small></div>
+							<div><span class="detail-label">{{ t('accounts.col.requests') }}</span><span>{{ metric(account.request_count) }}</span><small class="text-danger">{{ t('dashboard.failed') }} {{ metric(account.error_count) }}</small></div>
+							<div><span class="detail-label">{{ t('accounts.edit.lastRefresh') }}</span><span>{{ formatRelative(account.last_refresh_at) }}</span></div>
 						</div><p v-if="account.last_error" class="account-error">{{ t('accounts.lastError') }}: {{ account.last_error }}</p></td></tr>
 					</template>
 				</tbody>
 			</table>
-			<div v-if="!visible.length" class="empty-state" role="status"><Users :size="30" aria-hidden="true" /><p>{{ loading ? t('stats.loading') : accounts.length ? t('common.noMatches') : t('accounts.empty') }}</p><button v-if="!loading && !accounts.length" class="btn btn-primary" @click="emit('create')"><Plus :size="16" />{{ t('accounts.add') }}</button></div>
+			<output v-if="!visible.length" class="empty-state" ><Users :size="30" aria-hidden="true" /><span style="display: block">{{ (() => { if (loading) { return t('stats.loading'); } if (accounts.length) { return t('common.noMatches'); } return t('accounts.empty'); })() }}</span><button v-if="!loading && !accounts.length" class="btn btn-primary" @click="emit('create')"><Plus :size="16" />{{ t('accounts.add') }}</button></output>
 		</div>
 		<footer class="accounts-pagination"><span>{{ t('accounts.pagination', { total: filtered.length, page, pages }) }}</span><div><select v-model.number="pageSize" class="input page-size" :aria-label="t('accounts.pageSize')"><option v-for="size in [10, 20, 50, 100]" :key="size" :value="size">{{ size }} / {{ t('usage.pageSize') }}</option></select><button class="btn btn-ghost page-button" :disabled="page <= 1" :aria-label="t('usage.previous')" @click="page--"><ChevronLeft :size="15" /></button><span class="page-number">{{ page }}</span><button class="btn btn-ghost page-button" :disabled="page >= pages" :aria-label="t('usage.next')" @click="page++"><ChevronRight :size="15" /></button></div></footer>
 	</section>
@@ -145,7 +156,7 @@ function tone(account: Account) { const category = accountCategory(account); ret
 .detail-row > td { padding: 20px; background: var(--color-surface-2); border-radius: 10px; }
 .account-detail-grid { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 20px; }
 .account-detail-grid > div { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; }
-.account-detail-grid label { font-size: 10px; color: var(--color-ink-faint); }
+.account-detail-grid .detail-label { font-size: 10px; color: var(--color-ink-faint); }
 .account-detail-grid span { font-size: 12px; }
 .account-detail-grid small { font-size: 10px; color: var(--color-ink-faint); }
 .break-anywhere { overflow-wrap: anywhere; }

@@ -15,13 +15,13 @@ const labels = computed(() => locale.value === 'zh-CN'
 	? { tokens: 'TOKEN', cost: '费用', latency: '耗时 / 流速', time: '时间', status: '状态', actions: '操作', compaction: '压缩请求' }
 	: { tokens: 'TOKEN', cost: 'Cost', latency: 'Latency / TPS', time: 'Time', status: 'Status', actions: 'Actions', compaction: 'Compaction request' })
 function statusTone(code: number) {
-	if (!code) return 'neutral'
-	if (code >= 200 && code < 300) return 'success'
-	if (code >= 300 && code < 400) return 'warn'
+	if (!code) { return 'neutral' }
+	if (code >= 200 && code < 300) { return 'success' }
+	if (code >= 300 && code < 400) { return 'warn' }
 	return 'danger'
 }
 function datePart(timestamp: number, part: 'date' | 'time') {
-	if (!timestamp) return '—'
+	if (!timestamp) { return '—' }
 	return new Intl.DateTimeFormat(locale.value, part === 'date' ? { month: '2-digit', day: '2-digit' } : { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(timestamp)
 }
 function transport(value: string) { return value ? ({ websocket: 'WS', ws: 'WS', sse: 'SSE', http_sse: 'SSE', http: 'HTTP' }[value] ?? value) : '—' }
@@ -50,7 +50,7 @@ function transport(value: string) { return value ? ({ websocket: 'WS', ws: 'WS',
 					<td class="td"><time class="record-time" :datetime="new Date(row.started_at).toISOString()" :title="formatDateTime(row.started_at)"><span>{{ datePart(row.started_at, 'time') }}</span><small>{{ datePart(row.started_at, 'date') }}</small></time></td>
 					<td class="td"><button type="button" class="btn btn-ghost btn-icon detail-button" :aria-label="t('common.viewDetails')" :title="t('common.viewDetails')" @click="emit('detail', row)"><Eye :size="14" /></button></td>
 				</tr>
-				<tr v-if="!rows.length"><td colspan="10"><div class="usage-empty" role="status"><FileText :size="28" aria-hidden="true" /><span>{{ loading ? t('stats.loading') : error ? t('stats.loadFailed') : t('stats.empty') }}</span></div></td></tr>
+				<tr v-if="!rows.length"><td colspan="10"><output class="usage-empty" ><FileText :size="28" aria-hidden="true" /><span>{{ (() => { if (loading) { return t('stats.loading'); } if (error) { return t('stats.loadFailed'); } return t('stats.empty'); })() }}</span></output></td></tr>
 			</tbody>
 		</table>
 	</div>

@@ -23,51 +23,43 @@ func TestAcquirePinnedRetainsAccountAndIdempotentRelease(t *testing.T) {
 		// Put the decoy first for ordinary routing. Pinned routing must ignore
 		// ordering and stickiness, not merely return the first eligible account.
 		m.SetRotationStrategy(string(StrategySingle))
-		if err := m.sticky.SetAffinity(ctx, m.affinityKey(key, []*store.Account{decoy, target}, "model", "", string(StrategySticky)), decoy.ID, m.affinityTTL); err != nil {
-			t.Fatal(err)
-		}
+		requireDataNoError(t, m.sticky.SetAffinity(ctx, m.affinityKey(key, []*store.Account{decoy, target}, "model", "", string(StrategySticky)), decoy.ID, m.affinityTTL))
 		holders := make([]func(), 0, 2)
 		for i := 0; i < 2; i++ {
 			got, release, err := m.AcquirePinned(ctx, key, target.ID, "model")
-			if err != nil || got == nil || got.ID != target.ID || release == nil {
-				t.Fatalf("pinned routing changed account: account=%v err=%v", got, err)
-			}
+			requireDataTruef(t, !(err != nil || got == nil || got.ID != target.ID || release == nil), "pinned routing changed account: account=%v err=%v", got, err)
 			defer release()
 			holders = append(holders, release)
 		}
 		finished := routingQueuedAcquire(t, func() (*store.Account, func(), error) {
 			return m.AcquirePinned(ctx, key, target.ID, "model")
 		})
-		if m.Inflight(target.ID) != 2 || m.Inflight(decoy.ID) != 0 {
-			t.Fatal("full pinned account fell back or exceeded its ceiling")
-		}
+		requireDataCondition(t, !(m.Inflight(target.ID) != 2 || m.Inflight(decoy.ID) != 0), "full pinned account fell back or exceeded its ceiling")
 		var releases sync.WaitGroup
 		for i := 0; i < 16; i++ {
 			releases.Go(holders[0])
 		}
 		releases.Wait()
-		if got := m.Inflight(target.ID); got != 1 {
-			t.Fatalf("duplicate release stole the other held slot: inflight=%d", got)
+		{
+			got := m.Inflight(target.ID)
+			requireDataTruef(t, !(got != 1), "duplicate release stole the other held slot: inflight=%d", got)
 		}
 		result := routingAwaitAcquire(t, finished)
 		if result.release != nil {
 			defer result.release()
 		}
-		if result.err != nil || result.account == nil || result.account.ID != target.ID || result.release == nil {
+		reportTestFailure(t, result.err != nil || result.account == nil || result.account.ID != target.ID || result.release == nil, func() {
 			t.Fatalf("woken continuation switched accounts: account=%v err=%v", result.account, result.err)
-		}
-		if m.Inflight(target.ID) != 2 || m.Inflight(decoy.ID) != 0 {
-			t.Fatal("woken continuation reserved the wrong slot")
-		}
+		})
+		requireDataCondition(t, !(m.Inflight(target.ID) != 2 || m.Inflight(decoy.ID) != 0), "woken continuation reserved the wrong slot")
 		result.release()
 		result.release()
-		if got := m.Inflight(target.ID); got != 1 {
-			t.Fatalf("waiter release changed another request's slot: inflight=%d", got)
+		{
+			got := m.Inflight(target.ID)
+			requireDataTruef(t, !(got != 1), "waiter release changed another request's slot: inflight=%d", got)
 		}
 		holders[1]()
-		if m.Inflight(target.ID) != 0 || m.Inflight(decoy.ID) != 0 {
-			t.Fatal("pinned acquisition leaked a reservation")
-		}
+		requireDataCondition(t, !(m.Inflight(target.ID) != 0 || m.Inflight(decoy.ID) != 0), "pinned acquisition leaked a reservation")
 	})
 }
 
@@ -158,9 +150,7 @@ func TestAcquirePinnedWaitingTimeoutAndCancellation(t *testing.T) {
 				wait := 75 * time.Millisecond
 				m.SetConcurrencyWaitTimeout(wait)
 				_, release, err := m.AcquirePinned(ctx, key, target.ID, "model")
-				if err != nil {
-					t.Fatal(err)
-				}
+				requireDataNoError(t, err)
 				defer release()
 				waitCtx, cancel := context.WithCancel(ctx)
 				if tc.name == "deadline" {
@@ -178,20 +168,15 @@ func TestAcquirePinnedWaitingTimeoutAndCancellation(t *testing.T) {
 					wait = 0
 				}
 				routingAssertDenied(t, routingAwaitAcquire(t, finished), tc.want)
-				if elapsed := time.Since(started); elapsed != wait {
-					t.Fatalf("wait ended at %v, want %v (virtual time)", elapsed, wait)
+				{
+					elapsed := time.Since(started)
+					requireDataTruef(t, !(elapsed != wait), "wait ended at %v, want %v (virtual time)", elapsed, wait)
 				}
-				if m.Inflight(target.ID) != 1 || m.Inflight(decoy.ID) != 0 {
-					t.Fatal("timed-out/canceled waiter stole or switched a reservation")
-				}
+				requireDataCondition(t, !(m.Inflight(target.ID) != 1 || m.Inflight(decoy.ID) != 0), "timed-out/canceled waiter stole or switched a reservation")
 				release()
-				if m.Inflight(target.ID) != 0 || m.Inflight(decoy.ID) != 0 {
-					t.Fatal("timed-out/canceled waiter leaked a reservation")
-				}
+				requireDataCondition(t, !(m.Inflight(target.ID) != 0 || m.Inflight(decoy.ID) != 0), "timed-out/canceled waiter leaked a reservation")
 				got, free, err := m.AcquirePinned(ctx, key, target.ID, "model")
-				if err != nil || got == nil || got.ID != target.ID || free == nil {
-					t.Fatalf("slot not reusable after waiter exit: account=%v err=%v", got, err)
-				}
+				requireDataTruef(t, !(err != nil || got == nil || got.ID != target.ID || free == nil), "slot not reusable after waiter exit: account=%v err=%v", got, err)
 				free()
 			})
 		})
@@ -227,19 +212,13 @@ func TestAcquirePinnedStoreErrorsFailClosed(t *testing.T) {
 			} else {
 				_, err = st.ExecContext(ctx, `UPDATE accounts SET disabled_models='broken' WHERE id=?`, target.ID)
 			}
-			if err != nil {
-				t.Fatal(err)
-			}
+			requireDataNoError(t, err)
 			got, release, err := m.AcquirePinned(ctx, key, target.ID, "model")
 			if release != nil {
 				release()
 			}
-			if err == nil || errors.Is(err, ErrNoAccounts) || errors.Is(err, ErrModelUnavailable) || got != nil || release != nil {
-				t.Fatalf("store error became availability or denial: account=%v err=%v", got, err)
-			}
-			if m.Inflight(target.ID) != 0 || m.Inflight(decoy.ID) != 0 {
-				t.Fatal("store error leaked a reservation")
-			}
+			requireDataTruef(t, !(err == nil || errors.Is(err, ErrNoAccounts) || errors.Is(err, ErrModelUnavailable) || got != nil || release != nil), "store error became availability or denial: account=%v err=%v", got, err)
+			requireDataCondition(t, !(m.Inflight(target.ID) != 0 || m.Inflight(decoy.ID) != 0), "store error leaked a reservation")
 		})
 	}
 }

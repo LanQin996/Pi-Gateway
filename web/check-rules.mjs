@@ -33,7 +33,8 @@ const bundled = await build({
     logLevel: 'silent'
 })
 const modules = {}
-for (const output of bundled.outputFiles) Object.assign(modules, await import(`data:text/javascript;base64,${Buffer.from(output.text).toString('base64')}`))
+const loaded = await Promise.all(bundled.outputFiles.map(output => import(`data:text/javascript;base64,${Buffer.from(output.text).toString('base64')}`)))
+Object.assign(modules, ...loaded)
 const schema = modules.adaptSchema(backend)
 assert.equal(schema.rule_fields.find(f => f.name === 'source').readonly, true)
 assert.equal(schema.conditions.find(c => c.id === 'eq').fields.find(f => f.name === 'source').readonly, false)
@@ -44,7 +45,7 @@ assert.throws(() => modules.adaptSchema({
         fields: c.fields.map(f => f.name === 'mode' ? {...f, enum: [...f.enum, 'unknown_mode']} : f)
     } : c)
 }))
-for (const invalid of ['9007199254740993', '9007199254740993e0', '1e309', '{"x":1,"x":2}', '{"x":1,"\\u0078":2}', '[1,]']) assert.throws(() => modules.safeParseJSON(invalid), invalid)
+for (const invalid of ['9007199254740993', '9007199254740993e0', '1e309', '{"x":1,"x":2}', String.raw`{"x":1,"\u0078":2}`, '[1,]']) assert.throws(() => modules.safeParseJSON(invalid), invalid)
 for (const value of [null, false, true, 0, 0.125, Number.MAX_SAFE_INTEGER, 'two\nlines', [], {}, {
     $literal: {
         $ref: {source: 'literal'},
@@ -64,11 +65,11 @@ assert.throws(() => modules.adaptSchema({
     })
 }))
 const missing = []
-const rendererKinds = ['string', 'number', 'boolean', 'enum', 'strings', 'value', 'values', 'condition', 'condition_array', 'action_array']
+const rendererKinds = new Set(['string', 'number', 'boolean', 'enum', 'strings', 'value', 'values', 'condition', 'condition_array', 'action_array'])
 const checkField = (field, path) => {
     if (!field.name) missing.push(`${path}: missing field name`)
     const renderer = field.enum?.length ? 'enum' : modules.backendRenderers[field.type]
-    if (!rendererKinds.includes(renderer)) missing.push(`${path}.${field.name}: missing renderer ${field.type}`)
+    if (!rendererKinds.has(renderer)) missing.push(`${path}.${field.name}: missing renderer ${field.type}`)
     if (!field.description) missing.push(`${path}.${field.name}: missing bilingual help metadata`)
     if (field.enum?.some(value => typeof value !== 'string')) missing.push(`${path}.${field.name}: enum values must be strings`)
 }

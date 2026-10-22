@@ -1,7 +1,7 @@
 import type {Capture, CaptureFrame} from '../api/types'
 import type {CaptureSimulationSample} from '../api/ruleSimulation'
 
-const own = (value: object, key: string) => Object.prototype.hasOwnProperty.call(value, key)
+const own = (value: object, key: string) => Object.hasOwn(value, key)
 
 /** This is a selection list, not a claim that a truncated frame can be replayed. */
 export function recordedRuleEvents(capture: Capture): CaptureFrame[] {
@@ -66,9 +66,12 @@ export function simulationChanges(before: unknown, after: unknown, maximum = 200
             }
             return
         }
+        let operation: SimulationChange['operation'] = 'replace'
+        if (!beforeExists) operation = 'add'
+        else if (!afterExists) operation = 'remove'
         changes.push({
             path,
-            operation: !beforeExists ? 'add' : !afterExists ? 'remove' : 'replace',
+            operation,
             beforeExists,
             afterExists,
             before: left,

@@ -36,7 +36,7 @@ const requestExample = computed(() => JSON.stringify({
 	stream: true,
 	store: false,
 }, null, 2))
-const shellRequestExample = computed(() => requestExample.value.replaceAll("'", "'\\''"))
+const shellRequestExample = computed(() => requestExample.value.replaceAll("'", String.raw`'\''`))
 const search = ref('')
 const statusFilter = ref('')
 const visibleKeys = computed(() => {
@@ -132,7 +132,7 @@ async function save() {
 		} else {
 			const result = await api.createKey(payload)
 			toast.success(t('keys.created'))
-			if (result.key?.key) void copyKey(result.key.key, result.key.id)
+			if (result.key?.key) { void copyKey(result.key.key, result.key.id) }
 		}
 		modalOpen.value = false
 		await load()
@@ -153,7 +153,7 @@ async function toggleEnabled(key: ApiKey) {
 }
 
 async function remove(key: ApiKey) {
-	if (!confirm(t('keys.deleteConfirm', { name: key.name }))) return
+	if (!confirm(t('keys.deleteConfirm', { name: key.name }))) { return }
 	try {
 		await api.deleteKey(key.id)
 		toast.success(t('keys.deleted'))
@@ -252,7 +252,7 @@ function groupLabel(id: number) {
 								</td>
 							</tr>
 							<tr v-if="!visibleKeys.length">
-								<td colspan="8"><div class="empty-state" role="status"><KeyRound aria-hidden="true" /><p>{{ loading ? t('stats.loading') : keys.length ? t('common.noMatches') : t('keys.empty') }}</p><button v-if="!loading && !keys.length" class="btn btn-primary mt-2" @click="openCreate"><Plus class="h-4 w-4" />{{ t('keys.new') }}</button></div></td>
+								<td colspan="8"><output class="empty-state" ><KeyRound aria-hidden="true" /><span style="display: block">{{ (() => { if (loading) { return t('stats.loading'); } if (keys.length) { return t('common.noMatches'); } return t('keys.empty'); })() }}</span><button v-if="!loading && !keys.length" class="btn btn-primary mt-2" @click="openCreate"><Plus class="h-4 w-4" />{{ t('keys.new') }}</button></output></td>
 							</tr>
 						</tbody>
 					</table>
@@ -332,7 +332,7 @@ api_key:  YOUR_KEY
 			<template #footer>
 				<button class="btn" @click="modalOpen = false">{{ t('common.cancel') }}</button>
 				<button class="btn btn-primary" :disabled="saving || loading || groupsFailed || !form.name.trim()" @click="save">
-					{{ saving ? t('settings.saving') : editTarget ? t('common.save') : t('keys.create') }}
+					{{ (() => { if (saving) { return t('settings.saving'); } if (editTarget) { return t('common.save'); } return t('keys.create'); })() }}
 				</button>
 			</template>
 		</Modal>

@@ -120,7 +120,7 @@ export interface MockResponse {
     body: unknown
 }
 
-export function simulationResponse(request: SimulationRequest, options: { hasMore?: boolean; source?: string } = {}) {
+export function simulationResponse(request: SimulationRequest, options: {hasMore?: boolean; source?: string} = {}) {
     const seq = request.frame_seq ?? (request.after_seq ? request.after_seq + 1 : 1)
     const before = request.phase === 'response_event'
         ? {type: 'response.output_text.delta', delta: `fixture event ${seq}`}
@@ -140,12 +140,7 @@ export function simulationResponse(request: SimulationRequest, options: { hasMor
                 traces: request.rule.actions.map((action, index) => ({
                     rule_id: ruleID, rule_name: request.rule.name, action_id: action.id, action_type: action.type,
                     action_index: index, phase: request.phase, matched: true, status: 'changed',
-                    changes: [{
-                        path: request.phase === 'response_event' ? '/delta' : index ? '/model' : '/metadata/reviewed',
-                        operation: 'replace', before_exists: true, after_exists: true,
-                        before: request.phase === 'response_event' ? `fixture event ${seq}` : index ? 'fixture-old-model' : true,
-                        after: request.phase === 'response_event' ? `modified event ${seq}` : index ? 'fixture-new-model' : false
-                    }],
+                    changes: [simulationChange(request.phase, index, seq)],
                 })),
                 condition_traces: [
                     {rule_id: ruleID, path: '/when', status: 'matched', matched: true},
@@ -161,6 +156,13 @@ export function simulationResponse(request: SimulationRequest, options: { hasMor
     }
 }
 
+function simulationChange(phase: string, index: number, seq: number) {
+    const change = {operation: 'replace', before_exists: true, after_exists: true}
+    if (phase === 'response_event') return {...change, path: '/delta', before: `fixture event ${seq}`, after: `modified event ${seq}`}
+    if (index) return {...change, path: '/model', before: 'fixture-old-model', after: 'fixture-new-model'}
+    return {...change, path: '/metadata/reviewed', before: true, after: false}
+}
+
 export class AdminFixture {
     readonly requests: RecordedRequest[] = []
     readonly unexpected: string[] = []
@@ -173,7 +175,7 @@ export class AdminFixture {
     deletedCaptures = new Set<number>()
     version = 7
     conflictNextSave = false
-    private catalog = JSON.parse(readFileSync(process.env.RULES_E2E_CATALOG!, 'utf8'))
+    private readonly catalog = JSON.parse(readFileSync(process.env.RULES_E2E_CATALOG!, 'utf8'))
 
     constructor(readonly page: Page) {
     }
@@ -228,16 +230,21 @@ export class AdminFixture {
             expires_at: 4_102_444_800
         })
         if (request.headers().authorization !== `Bearer ${TOKEN}`) return reply({error: 'authentication required'}, 401)
-        if (path === '/api/auth/me') return reply({username: 'fixture-admin'})
-        if (path === '/api/auth/logout') return reply({ok: true})
-        if (path === '/api/rules/schema') return reply(this.catalog)
-        if (path === '/api/rules/validate') return reply({valid: true, rule: body.rule})
+        const staticResponses: Record<string, () => unknown> = {
+            '/api/auth/me': () => ({username: 'fixture-admin'}),
+            '/api/auth/logout': () => ({ok: true}),
+            '/api/rules/schema': () => (this.catalog),
+            '/api/rules/validate': () => ({valid: true, rule: body.rule}),
+            '/api/accounts': () => ({accounts: [{id: 7, name: 'Fixture account', status: 'active'}]}),
+            '/api/keys': () => ({keys: [{id: 3, name: 'Fixture key'}]}),
+        }
+        if (Object.hasOwn(staticResponses, path)) return reply(staticResponses[path]!())
         if (path === '/api/rules/simulate-capture') {
             if (this.deletedCaptures.has(body.capture_id)) return reply({error: 'capture not found'}, 404)
             const response = await this.simulate(body)
             return reply(response.body, response.status)
         }
-        if (path === '/api/rules' && method === 'GET') {
+        const listRules = () => {
             const pageSize = Number(url.searchParams.get('page_size') ?? 20)
             const page = Number(url.searchParams.get('page') ?? 1)
             const search = url.searchParams.get('search') ?? ''
@@ -251,6 +258,7 @@ export class AdminFixture {
                 version: this.version
             })
         }
+        if (path === '/api/rules' && method === 'GET') return listRules()
         if (path === '/api/rules' && method === 'POST') {
             const rule = {
                 ...clone(body.rule),
@@ -261,9 +269,9 @@ export class AdminFixture {
             this.rules.push(rule)
             return reply({rule, version: ++this.version})
         }
-        const ruleID = path.match(/^\/api\/rules\/([^/]+)$/)?.[1]
-        if (ruleID) {
-            const index = this.rules.findIndex(rule => rule.id === ruleID)
+        const ruleID = /^\/api\/rules\/([^/]+)$/.exec(path)?.[1]
+        const existingRule = (id: string) => {
+            const index = this.rules.findIndex(rule => rule.id === id)
             if (index < 0) return reply({error: 'rule not found'}, 404)
             if (method === 'GET') return reply({rule: clone(this.rules[index]), version: this.version})
             if (method === 'PUT') {
@@ -278,38 +286,42 @@ export class AdminFixture {
                     return reply({error: 'rule revision conflict'}, 409)
                 }
                 if (body.expected_revision !== this.rules[index]!.revision) return reply({error: 'rule revision conflict'}, 409)
-                this.rules[index] = {...clone(body.rule), id: ruleID, revision: this.rules[index]!.revision! + 1}
+                this.rules[index] = {...clone(body.rule), id, revision: this.rules[index]!.revision! + 1}
                 return reply({rule: clone(this.rules[index]), version: ++this.version})
             }
         }
-        if (path === '/api/accounts') return reply({accounts: [{id: 7, name: 'Fixture account', status: 'active'}]})
-        if (path === '/api/keys') return reply({keys: [{id: 3, name: 'Fixture key'}]})
-        if (path === '/api/captures' && method === 'GET') {
-            const limit = Number(url.searchParams.get('limit') ?? 20)
-            const offset = Number(url.searchParams.get('offset') ?? 0)
-            const search = url.searchParams.get('search') ?? ''
-            const filtered = this.captures.filter(capture => !search || capture.model.includes(search))
-            // Summaries intentionally omit body/frames; selecting a capture must load its details.
-            const summaries = filtered.slice(offset, offset + limit).map(({
-                                                                              request_body,
-                                                                              response_frames,
-                                                                              response_text,
-                                                                              ...summary
-                                                                          }) => summary)
-            return reply({captures: summaries, total: filtered.length, limit, offset})
+        if (ruleID && (method === 'GET' || method === 'PUT')) return existingRule(ruleID)
+        const captureResponse = () => {
+            if (path === '/api/captures') {
+                const limit = Number(url.searchParams.get('limit') ?? 20)
+                const offset = Number(url.searchParams.get('offset') ?? 0)
+                const search = url.searchParams.get('search') ?? ''
+                const filtered = this.captures.filter(capture => !search || capture.model.includes(search))
+                // Summaries intentionally omit body/frames; selecting a capture must load its details.
+                const summaries = filtered.slice(offset, offset + limit).map(({
+                    request_body,
+                    response_frames,
+                    response_text,
+                    ...summary
+                }) => summary)
+                return reply({captures: summaries, total: filtered.length, limit, offset})
+            }
+            const captureID = /^\/api\/captures\/(\d+)$/.exec(path)?.[1]
+            if (captureID) {
+                const id = Number(captureID)
+                const capture = this.captures.find(value => value.id === id)
+                return !capture || this.deletedCaptures.has(id) ? reply({error: 'capture not found'}, 404) : reply({capture: clone(capture)})
+            }
+            this.unexpected.push(`${method} ${path}`)
+            return reply({error: `Unmocked administrator endpoint: ${method} ${path}`}, 501)
         }
-        const captureID = path.match(/^\/api\/captures\/(\d+)$/)?.[1]
-        if (captureID && method === 'GET') {
-            const id = Number(captureID)
-            const capture = this.captures.find(value => value.id === id)
-            return !capture || this.deletedCaptures.has(id) ? reply({error: 'capture not found'}, 404) : reply({capture: clone(capture)})
-        }
+        if (path.startsWith('/api/captures') && method === 'GET') return captureResponse()
         this.unexpected.push(`${method} ${path}`)
         return reply({error: `Unmocked administrator endpoint: ${method} ${path}`}, 501)
     }
 }
 
-export const test = base.extend<{ admin: AdminFixture }>({
+export const test = base.extend<{admin: AdminFixture}>({
     admin: async ({page}, use) => {
         const admin = new AdminFixture(page)
         await admin.install()

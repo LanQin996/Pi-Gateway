@@ -141,44 +141,16 @@ func TestModelCatalogRefreshThroughProxyPrimaryTokenAndFailurePreservation(t *te
 	status.Store(200)
 	var targetCalls, codexCalls, proxyCalls atomic.Int64
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/codex/models" {
-			codexCalls.Add(1)
-			if r.Method != http.MethodGet || r.Header.Get("Authorization") != "Bearer codex-secret" ||
-				r.Header.Get("ChatGPT-Account-Id") != "codex-id" || r.Header.Get("User-Agent") != "codex-tui/"+config.DefaultCodexClientVersion ||
-				r.Header.Get("Version") != config.DefaultCodexClientVersion || r.Header.Get("Originator") != codexCatalogOriginator ||
-				r.Header.Get("Proxy-Authorization") != "" || r.URL.Query().Get("client_version") != config.DefaultCodexClientVersion {
-				t.Errorf("incorrect local Codex request: %s %s headers=%v", r.Method, r.URL, r.Header)
-			}
-			w.WriteHeader(int(status.Load()))
-			if status.Load() == http.StatusOK {
-				fmt.Fprint(w, `{"models":[]}`)
-			} else {
-				fmt.Fprint(w, `{"error":"primary-secret codex-secret proxy-password"}`)
-			}
-			return
-		}
-		targetCalls.Add(1)
-		if r.Method != "GET" || r.URL.Path != "/v1/models" || r.Header.Get("Authorization") != "Bearer primary-secret" {
-			t.Errorf("incorrect catalog target/credential: method=%s path=%s auth=%q", r.Method, r.URL.Path, r.Header.Get("Authorization"))
-		}
-		if r.Header.Get("User-Agent") != "catalog-test-pi" || r.Header.Get("ChatGPT-Account-Id") != "" || r.Header.Get("OpenAI-Beta") != "" || r.Header.Get("Proxy-Authorization") != "" {
-			t.Errorf("wrong primary ChatGPT headers: %v", r.Header)
-		}
-		w.WriteHeader(int(status.Load()))
-		if status.Load() != 200 {
-			fmt.Fprint(w, `{"error":"primary-secret codex-secret proxy-password"}`)
-			return
-		}
-		fmt.Fprint(w, `{"data":[{"id":"real-model","display_name":"Live Model","supported_reasoning_levels":[],"supports_reasoning_summary_parameter":false,"context_window":9007199254740993123456789,"unknown":{"nested":[null,false,[]]}},{"id":"real-model","unknown":"duplicate-must-not-win"}]}`)
+		testModelCatalogRefreshThroughProxyPrimaryTokenAndFailurePreservationPhase1(w, r, &t, &status, &targetCalls, &codexCalls)
 	}))
 	defer target.Close()
 	transport := &http.Transport{Proxy: nil}
 	defer transport.CloseIdleConnections()
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		proxyCalls.Add(1)
-		if r.Header.Get("Proxy-Authorization") == "" {
+		reportTestFailure(t, r.Header.Get("Proxy-Authorization") == "", func() {
 			t.Error("proxy credentials were not used")
-		}
+		})
 		forward := r.Clone(r.Context())
 		forward.RequestURI = ""
 		forward.Header.Del("Proxy-Authorization")
@@ -197,47 +169,37 @@ func TestModelCatalogRefreshThroughProxyPrimaryTokenAndFailurePreservation(t *te
 	factory := egress.NewFactory(egress.Options{})
 	manager := New(st, oauth.NewClient(nil), factory, Options{})
 	a := &store.Account{Name: "selected", AccessToken: "primary-secret", ExpiresAt: time.Now().Add(time.Hour).UnixMilli(), ProxyURL: strings.Replace(proxy.URL, "://", "://proxy-user:proxy-password@", 1), Enabled: true}
-	if err := st.CreateAccount(context.Background(), a); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.SaveCodexCredential(context.Background(), a.ID, "codex-secret", "codex-refresh", "", time.Now().Add(time.Hour).UnixMilli(), "codex-id"); err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, st.CreateAccount(context.Background(), a))
+	requireDataNoError(t, st.SaveCodexCredential(context.Background(), a.ID, "codex-secret", "codex-refresh", "", time.Now().Add(time.Hour).UnixMilli(), "codex-id"))
 	a, _ = st.GetAccount(context.Background(), a.ID)
 	cfg := config.Default()
 	cfg.Upstream.BaseURL = target.URL + "/v1"
 	cfg.Models.CodexBaseURL = target.URL + "/codex"
 	cfg.Models.CodexClientVersion = config.DefaultCodexClientVersion
 	first, err := manager.RefreshModelCatalog(context.Background(), a, cfg, "catalog-test-pi")
-	if err != nil || first == nil || len(first.Models) != 1 || first.Models[0].ID != "real-model" || first.FetchedAt == 0 || first.Error != "" {
-		t.Fatalf("refresh=%+v err=%v", first, err)
-	}
+	requireDataTruef(t, !(err != nil || first == nil || len(first.Models) != 1 || first.Models[0].ID != "real-model" || first.FetchedAt == 0 || first.Error != ""), "refresh=%+v err=%v", first, err)
 	for key, want := range map[string]string{
 		"context_window":                       "9007199254740993123456789",
 		"supported_reasoning_levels":           "[]",
 		"supports_reasoning_summary_parameter": "false",
 		"unknown":                              `{"nested":[null,false,[]]}`,
 	} {
-		if string(first.Models[0].Metadata[key]) != want {
+		reportTestFailure(t, string(first.Models[0].Metadata[key]) != want, func() {
 			t.Fatalf("refresh lost metadata %s=%s want=%s", key, first.Models[0].Metadata[key], want)
-		}
+		})
 	}
 	status.Store(403)
 	second, err := manager.RefreshModelCatalog(context.Background(), a, cfg, "catalog-test-pi")
-	if err == nil || second == nil || second.Error == "" || second.FetchedAt != first.FetchedAt || len(second.Models) != 1 {
-		t.Fatalf("error refresh destroyed cache: %+v err=%v", second, err)
-	}
-	if !reflect.DeepEqual(second.Models[0].Metadata, first.Models[0].Metadata) {
+	requireDataTruef(t, !(err == nil || second == nil || second.Error == "" || second.FetchedAt != first.FetchedAt || len(second.Models) != 1), "error refresh destroyed cache: %+v err=%v", second, err)
+	reportTestFailure(t, !reflect.DeepEqual(second.Models[0].Metadata, first.Models[0].Metadata), func() {
 		t.Fatalf("failed refresh changed metadata: got=%v want=%v", second.Models[0].Metadata, first.Models[0].Metadata)
-	}
+	})
 	for _, secret := range []string{"primary-secret", "codex-secret", "proxy-password"} {
-		if strings.Contains(second.Error, secret) || strings.Contains(err.Error(), secret) {
-			t.Fatal("catalog error leaked secret")
-		}
+		requireDataCondition(t, !(strings.Contains(second.Error, secret) || strings.Contains(err.Error(), secret)), "catalog error leaked secret")
 	}
-	if targetCalls.Load() != 2 || codexCalls.Load() != 2 || proxyCalls.Load() != 4 {
+	reportTestFailure(t, targetCalls.Load() != 2 || codexCalls.Load() != 2 || proxyCalls.Load() != 4, func() {
 		t.Fatalf("wrong outbound path: primary=%d codex=%d proxy=%d", targetCalls.Load(), codexCalls.Load(), proxyCalls.Load())
-	}
+	})
 }
 
 // catalogRoundTrip rewrites only the token endpoint to a local test server;
@@ -367,9 +329,7 @@ func TestModelCatalogRefreshBoundsCancellationAndRejectsRedirects(t *testing.T) 
 			st := newAccountsTestStore(t)
 			manager := New(st, oauth.NewClient(nil), egress.NewFactory(egress.Options{}), Options{})
 			a := &store.Account{Name: mode, AccessToken: "primary-secret", ExpiresAt: time.Now().Add(time.Hour).UnixMilli()}
-			if err := st.CreateAccount(context.Background(), a); err != nil {
-				t.Fatal(err)
-			}
+			requireDataNoError(t, st.CreateAccount(context.Background(), a))
 			cfg := config.Default()
 			cfg.Upstream.BaseURL = target.URL + "/v1"
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -378,13 +338,9 @@ func TestModelCatalogRefreshBoundsCancellationAndRejectsRedirects(t *testing.T) 
 				go func() { <-started; cancel() }()
 			}
 			got, err := manager.RefreshModelCatalog(ctx, a, cfg, "")
-			if err == nil || got == nil || got.Error == "" || got.FetchedAt != 0 || len(got.Models) != 0 || got.Models == nil {
-				t.Fatalf("bad response accepted: catalog=%+v err=%v", got, err)
-			}
+			requireDataTruef(t, !(err == nil || got == nil || got.Error == "" || got.FetchedAt != 0 || len(got.Models) != 0 || got.Models == nil), "bad response accepted: catalog=%+v err=%v", got, err)
 			cached, err := st.GetAccountModelCatalog(context.Background(), a.ID)
-			if err != nil || cached == nil || cached.Error != got.Error || cached.AttemptedAt == 0 {
-				t.Fatalf("failed attempt not persisted: %+v %v", cached, err)
-			}
+			requireDataTruef(t, !(err != nil || cached == nil || cached.Error != got.Error || cached.AttemptedAt == 0), "failed attempt not persisted: %+v %v", cached, err)
 		})
 	}
 }
@@ -395,98 +351,7 @@ func TestModelCatalogRefreshBoundsCancellationAndRejectsRedirects(t *testing.T) 
 // rather than relying only on the concurrent HTTP-cancellation regression above.
 func TestModelCatalogCanceledSourcesKeepSnapshotsForPersistence(t *testing.T) {
 	for _, mode := range []string{"cancel", "deadline"} {
-		t.Run(mode, func(t *testing.T) {
-			st := newAccountsTestStore(t)
-			base := context.Background()
-			expires := time.Now().Add(time.Hour).UnixMilli()
-			a := &store.Account{Name: mode, AccessToken: "primary-secret", ExpiresAt: expires}
-			if err := st.CreateAccount(base, a); err != nil {
-				t.Fatal(err)
-			}
-			if err := st.SaveCodexCredential(base, a.ID, "codex-secret", "codex-refresh", "", expires, "codex-id"); err != nil {
-				t.Fatal(err)
-			}
-			var err error
-			a, err = st.GetAccount(base, a.ID)
-			if err != nil || a == nil {
-				t.Fatalf("load linked account: %v", err)
-			}
-			sources := []string{store.ModelSourceChatGPT, store.ModelSourceCodex}
-			seed, err := st.BeginAccountModelCatalogRefresh(base, a.ID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			initial := make(map[string]store.ModelCatalogSourceResult)
-			for _, source := range sources {
-				initial[source] = store.ModelCatalogSourceResult{
-					CredentialFingerprint: store.ModelCatalogCredentialFingerprint(a, source),
-					Catalog:               store.ModelCatalogSource{FetchedAt: store.NowMS(), Models: []store.CatalogModel{{ID: source + "-kept"}}},
-				}
-			}
-			if _, err := st.SaveAccountModelCatalogRefresh(base, a.ID, seed, initial); err != nil {
-				t.Fatal(err)
-			}
-			before, err := st.GetAccountModelCatalog(base, a.ID)
-			if err != nil || before == nil || len(before.Models) != 2 {
-				t.Fatalf("seed catalog: %+v %v", before, err)
-			}
-			attempt, err := st.BeginAccountModelCatalogRefresh(base, a.ID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			factory := egress.NewFactory(egress.Options{})
-			client, err := factory.HTTPClient("")
-			if err != nil {
-				t.Fatal(err)
-			}
-			var networkCalls atomic.Int32
-			client.Transport = catalogRoundTrip(func(*http.Request) (*http.Response, error) {
-				networkCalls.Add(1)
-				return nil, fmt.Errorf("canceled source must not send network requests")
-			})
-			manager := New(st, oauth.NewClient(nil), factory, Options{})
-			ctx, cancel := context.WithCancel(base)
-			cancel()
-			wantError := "model catalog request canceled"
-			if mode == "deadline" {
-				ctx, cancel = context.WithDeadline(base, time.Unix(1, 0))
-				defer cancel()
-				wantError = "model catalog request timed out"
-			}
-			cfg := config.Default()
-			results := make(map[string]store.ModelCatalogSourceResult)
-			for _, source := range sources {
-				result := manager.fetchCatalogSource(ctx, a.ID, source, attempt.AttemptedAt, cfg, "")
-				if result.CredentialFingerprint != initial[source].CredentialFingerprint || result.CredentialFingerprint == "" {
-					t.Fatalf("%s lost its snapshot when the network context ended", source)
-				}
-				if result.Catalog.Error != wantError || result.Catalog.FetchedAt != 0 || result.Catalog.Skipped {
-					t.Fatalf("%s ignored cancellation or misreported the result: %+v", source, result.Catalog)
-				}
-				results[source] = result
-			}
-			if networkCalls.Load() != 0 {
-				t.Fatalf("canceled sources sent %d network requests", networkCalls.Load())
-			}
-			applied, err := st.SaveAccountModelCatalogRefresh(base, a.ID, attempt, results)
-			if err != nil {
-				t.Fatalf("cancellation damaged the store before the detached save: %v", err)
-			}
-			for _, source := range sources {
-				if !applied[source] {
-					t.Fatalf("%s cancellation status was not persisted", source)
-				}
-			}
-			after, err := st.GetAccountModelCatalog(base, a.ID)
-			if err != nil || after == nil || !reflect.DeepEqual(after.Models, before.Models) {
-				t.Fatalf("cancellation destroyed the last good catalogs: before=%+v after=%+v err=%v", before, after, err)
-			}
-			for _, source := range sources {
-				if got := after.SourceCatalogs[source]; got.Error != wantError || got.FetchedAt != before.SourceCatalogs[source].FetchedAt || got.AttemptedAt != attempt.AttemptedAt {
-					t.Fatalf("%s failure status or last-success timestamp changed: %+v", source, got)
-				}
-			}
-		})
+		t.Run(mode, func(t *testing.T) { checkCanceledCatalogSourcesPreserveSnapshots(t, mode) })
 	}
 }
 
@@ -515,56 +380,43 @@ func TestModelCatalogRefreshDecodesCompressedJSON(t *testing.T) {
 				compressor = zlib.NewWriter(&wire)
 			}
 			if compressor != nil {
-				if _, err := io.WriteString(compressor, tc.body); err != nil {
-					t.Fatal(err)
+				{
+					_, err := io.WriteString(compressor, tc.body)
+					requireDataTrue(t, !(err != nil), err)
 				}
-				if err := compressor.Close(); err != nil {
-					t.Fatal(err)
-				}
+				requireDataNoError(t, compressor.Close())
 			}
 			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Header.Get("Accept-Encoding") != "gzip, deflate" {
+				reportTestFailure(t, r.Header.Get("Accept-Encoding") != "gzip, deflate", func() {
 					t.Errorf("catalog compression negotiation changed: %q", r.Header.Get("Accept-Encoding"))
-				}
+				})
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Content-Encoding", tc.encoding)
 				_, _ = w.Write(wire.Bytes())
 			}))
 			defer target.Close()
 			st, err := store.Open(":memory:")
-			if err != nil {
-				t.Fatal(err)
-			}
+			requireDataNoError(t, err)
 			st.DB().SetMaxOpenConns(1)
 			defer st.Close()
 			ctx := context.Background()
 			a := &store.Account{Name: "compressed catalog", AccessToken: "primary-secret", ExpiresAt: time.Now().Add(time.Hour).UnixMilli(), Enabled: true}
-			if err := st.CreateAccount(ctx, a); err != nil {
-				t.Fatal(err)
-			}
+			requireDataNoError(t, st.CreateAccount(ctx, a))
 			previous := &store.ModelCatalog{Models: []store.CatalogModel{{ID: "cached-model", Name: "Cached model"}}, FetchedAt: 123, AttemptedAt: 123}
-			if err := st.SaveAccountModelCatalog(ctx, a.ID, previous); err != nil {
-				t.Fatal(err)
-			}
+			requireDataNoError(t, st.SaveAccountModelCatalog(ctx, a.ID, previous))
 			manager := New(st, oauth.NewClient(nil), egress.NewFactory(egress.Options{}), Options{})
 			cfg := config.Default()
 			cfg.Upstream.BaseURL = target.URL + "/v1"
 			got, err := manager.RefreshModelCatalog(ctx, a, cfg, "catalog-test-pi")
 			if tc.wantError != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				reportTestFailure(t, err == nil || !strings.Contains(err.Error(), tc.wantError), func() {
 					t.Fatalf("error=%v, want %q", err, tc.wantError)
-				}
-				if got == nil || got.FetchedAt != previous.FetchedAt || len(got.Models) != 1 || got.Models[0].ID != "cached-model" {
-					t.Fatalf("decode failure destroyed successful cache: %+v", got)
-				}
-				if strings.Contains(got.Error, "primary-secret") {
-					t.Fatal("decode error leaked response body")
-				}
+				})
+				requireDataTruef(t, !(got == nil || got.FetchedAt != previous.FetchedAt || len(got.Models) != 1 || got.Models[0].ID != "cached-model"), "decode failure destroyed successful cache: %+v", got)
+				requireDataCondition(t, !(strings.Contains(got.Error, "primary-secret")), "decode error leaked response body")
 				return
 			}
-			if err != nil || got == nil || len(got.Models) != 1 || got.Models[0].ID != "compressed-model" || got.Models[0].Name != "Compressed model" || got.Error != "" {
-				t.Fatalf("compressed catalog=%+v error=%v", got, err)
-			}
+			requireDataTruef(t, !(err != nil || got == nil || len(got.Models) != 1 || got.Models[0].ID != "compressed-model" || got.Models[0].Name != "Compressed model" || got.Error != ""), "compressed catalog=%+v error=%v", got, err)
 		})
 	}
 }
@@ -596,4 +448,110 @@ func TestParseModelCatalogDuplicatesFillOnlyAbsentMetadata(t *testing.T) {
 			t.Errorf("metadata[%q]=%s want=%s", field, got, want)
 		}
 	}
+}
+
+func checkCanceledCatalogSourcesPreserveSnapshots(t *testing.T, mode string) {
+	st := newAccountsTestStore(t)
+	base := context.Background()
+	expires := time.Now().Add(time.Hour).UnixMilli()
+	a := &store.Account{Name: mode, AccessToken: "primary-secret", ExpiresAt: expires}
+	requireDataNoError(t, st.CreateAccount(base, a))
+	requireDataNoError(t, st.SaveCodexCredential(base, a.ID, "codex-secret", "codex-refresh", "", expires, "codex-id"))
+	var err error
+	a, err = st.GetAccount(base, a.ID)
+	requireDataTruef(t, !(err != nil || a == nil), "load linked account: %v", err)
+	sources := []string{store.ModelSourceChatGPT, store.ModelSourceCodex}
+	seed, err := st.BeginAccountModelCatalogRefresh(base, a.ID)
+	requireDataNoError(t, err)
+	initial := make(map[string]store.ModelCatalogSourceResult)
+	for _, source := range sources {
+		initial[source] = store.ModelCatalogSourceResult{
+			CredentialFingerprint: store.ModelCatalogCredentialFingerprint(a, source),
+			Catalog:               store.ModelCatalogSource{FetchedAt: store.NowMS(), Models: []store.CatalogModel{{ID: source + "-kept"}}},
+		}
+	}
+	{
+		_, err := st.SaveAccountModelCatalogRefresh(base, a.ID, seed, initial)
+		requireDataTrue(t, !(err != nil), err)
+	}
+	before, err := st.GetAccountModelCatalog(base, a.ID)
+	requireDataTruef(t, !(err != nil || before == nil || len(before.Models) != 2), "seed catalog: %+v %v", before, err)
+	attempt, err := st.BeginAccountModelCatalogRefresh(base, a.ID)
+	requireDataNoError(t, err)
+	factory := egress.NewFactory(egress.Options{})
+	client, err := factory.HTTPClient("")
+	requireDataNoError(t, err)
+	var networkCalls atomic.Int32
+	client.Transport = catalogRoundTrip(func(*http.Request) (*http.Response, error) {
+		networkCalls.Add(1)
+		return nil, fmt.Errorf("canceled source must not send network requests")
+	})
+	manager := New(st, oauth.NewClient(nil), factory, Options{})
+	ctx, cancel := context.WithCancel(base)
+	cancel()
+	wantError := "model catalog request canceled"
+	if mode == "deadline" {
+		ctx, cancel = context.WithDeadline(base, time.Unix(1, 0))
+		defer cancel()
+		wantError = "model catalog request timed out"
+	}
+	cfg := config.Default()
+	results := make(map[string]store.ModelCatalogSourceResult)
+	for _, source := range sources {
+		result := manager.fetchCatalogSource(ctx, a.ID, source, attempt.AttemptedAt, cfg, "")
+		requireDataTruef(t, !(result.CredentialFingerprint != initial[source].CredentialFingerprint || result.CredentialFingerprint == ""), "%s lost its snapshot when the network context ended", source)
+		reportTestFailure(t, result.Catalog.Error != wantError || result.Catalog.FetchedAt != 0 || result.Catalog.Skipped, func() {
+			t.Fatalf("%s ignored cancellation or misreported the result: %+v", source, result.Catalog)
+		})
+		results[source] = result
+	}
+	reportTestFailure(t, networkCalls.Load() != 0, func() {
+		t.Fatalf("canceled sources sent %d network requests", networkCalls.Load())
+	})
+	applied, err := st.SaveAccountModelCatalogRefresh(base, a.ID, attempt, results)
+	requireDataTruef(t, !(err != nil), "cancellation damaged the store before the detached save: %v", err)
+	for _, source := range sources {
+		requireDataTruef(t, !(!applied[source]), "%s cancellation status was not persisted", source)
+	}
+	after, err := st.GetAccountModelCatalog(base, a.ID)
+	requireDataTruef(t, !(err != nil || after == nil || !reflect.DeepEqual(after.Models, before.Models)), "cancellation destroyed the last good catalogs: before=%+v after=%+v err=%v", before, after, err)
+	for _, source := range sources {
+		{
+			got := after.SourceCatalogs[source]
+			requireDataTruef(t, !(got.Error != wantError || got.FetchedAt != before.SourceCatalogs[source].FetchedAt || got.AttemptedAt != attempt.AttemptedAt), "%s failure status or last-success timestamp changed: %+v", source, got)
+		}
+	}
+}
+
+// testModelCatalogRefreshThroughProxyPrimaryTokenAndFailurePreservationPhase1 exercises one isolated test phase with the original shared state.
+func testModelCatalogRefreshThroughProxyPrimaryTokenAndFailurePreservationPhase1(w http.ResponseWriter, r *http.Request, capturedT **testing.T, capturedStatus *atomic.Int64, capturedTargetCalls *atomic.Int64, capturedCodexCalls *atomic.Int64) {
+	if r.URL.Path == "/codex/models" {
+		(*capturedCodexCalls).Add(1)
+		reportTestFailure((*capturedT), r.Method != http.MethodGet || r.Header.Get("Authorization") != "Bearer codex-secret" ||
+			r.Header.Get("ChatGPT-Account-Id") != "codex-id" || r.Header.Get("User-Agent") != "codex-tui/"+config.DefaultCodexClientVersion ||
+			r.Header.Get("Version") != config.DefaultCodexClientVersion || r.Header.Get("Originator") != codexCatalogOriginator ||
+			r.Header.Get("Proxy-Authorization") != "" || r.URL.Query().Get("client_version") != config.DefaultCodexClientVersion, func() {
+			(*capturedT).Errorf("incorrect local Codex request: %s %s headers=%v", r.Method, r.URL, r.Header)
+		})
+		w.WriteHeader(int((*capturedStatus).Load()))
+		if (*capturedStatus).Load() == http.StatusOK {
+			fmt.Fprint(w, `{"models":[]}`)
+		} else {
+			fmt.Fprint(w, `{"error":"primary-secret codex-secret proxy-password"}`)
+		}
+		return
+	}
+	(*capturedTargetCalls).Add(1)
+	reportTestFailure((*capturedT), r.Method != "GET" || r.URL.Path != "/v1/models" || r.Header.Get("Authorization") != "Bearer primary-secret", func() {
+		(*capturedT).Errorf("incorrect catalog target/credential: method=%s path=%s auth=%q", r.Method, r.URL.Path, r.Header.Get("Authorization"))
+	})
+	reportTestFailure((*capturedT), r.Header.Get("User-Agent") != "catalog-test-pi" || r.Header.Get("ChatGPT-Account-Id") != "" || r.Header.Get("OpenAI-Beta") != "" || r.Header.Get("Proxy-Authorization") != "", func() {
+		(*capturedT).Errorf("wrong primary ChatGPT headers: %v", r.Header)
+	})
+	w.WriteHeader(int((*capturedStatus).Load()))
+	if (*capturedStatus).Load() != 200 {
+		fmt.Fprint(w, `{"error":"primary-secret codex-secret proxy-password"}`)
+		return
+	}
+	fmt.Fprint(w, `{"data":[{"id":"real-model","display_name":"Live Model","supported_reasoning_levels":[],"supports_reasoning_summary_parameter":false,"context_window":9007199254740993123456789,"unknown":{"nested":[null,false,[]]}},{"id":"real-model","unknown":"duplicate-must-not-win"}]}`)
 }

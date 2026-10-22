@@ -53,39 +53,7 @@ func (s *Store) LoadSettings(ctx context.Context, defaults *Settings) (*Settings
 	if defaults != nil {
 		out = *defaults
 	}
-	out.SwitchOn429 = true
-	if out.CompactionMode == "" {
-		out.CompactionMode = DefaultCompactionMode
-	}
-	if out.CompactionModel == "" {
-		out.CompactionModel = DefaultCompactionModel
-	}
-	if strings.TrimSpace(out.CompactionPrompt) == "" {
-		out.CompactionPrompt = compactprompt.Default
-	}
-	// New knobs have store-level defaults so older config callers also get the
-	// frozen behavior. Persisted values (including zero) still override these.
-	if out.RotationStrategy == "" {
-		out.RotationStrategy = "smart"
-	}
-	if out.ConcurrencyWaitTimeoutSeconds == 0 {
-		out.ConcurrencyWaitTimeoutSeconds = 30
-	}
-	if out.AccountCooldownSeconds == 0 {
-		out.AccountCooldownSeconds = 60
-	}
-	if out.MaxAttempts == 0 {
-		out.MaxAttempts = 2
-	}
-	if out.UsageRetentionDays == 0 {
-		out.UsageRetentionDays = 31
-	}
-	if out.SmartSchedulingJSON == "" {
-		out.SmartSchedulingJSON = "{}"
-	}
-	if out.PricingOverridesJSON == "" {
-		out.PricingOverridesJSON = "{}"
-	}
+	out.applyDefaults()
 	rows, err := s.QueryContext(ctx, `SELECT key, value FROM settings WHERE key LIKE ?`, settingPrefix+"%")
 	if err != nil {
 		return nil, fmt.Errorf("store: load settings: %w", err)
@@ -104,81 +72,7 @@ func (s *Store) LoadSettings(ctx context.Context, defaults *Settings) (*Settings
 		return nil, err
 	}
 
-	getStr := func(name string) (string, bool) {
-		v, ok := values[name]
-		return v, ok
-	}
-	getInt := func(name string, dst *int) {
-		if v, ok := values[name]; ok {
-			var n int
-			if _, err := fmt.Sscanf(v, "%d", &n); err == nil {
-				*dst = n
-			}
-		}
-	}
-	getBool := func(name string, dst *bool) {
-		if v, ok := values[name]; ok {
-			*dst = v == "true" || v == "1"
-		}
-	}
-
-	if v, ok := getStr("upstream_transport"); ok && v != "" {
-		out.UpstreamTransport = v
-	}
-	getBool("switch_on_429", &out.SwitchOn429)
-	if v, ok := getStr("compaction_mode"); ok && v != "" {
-		out.CompactionMode = v
-	}
-	if v, ok := getStr("compaction_model"); ok && v != "" {
-		out.CompactionModel = v
-	}
-	if v, ok := getStr("compaction_prompt"); ok && strings.TrimSpace(v) != "" {
-		out.CompactionPrompt = v
-	}
-	getBool("capture_enabled", &out.CaptureEnabled)
-	getInt("capture_limit", &out.CaptureLimit)
-	if v, ok := getStr("default_model"); ok {
-		out.DefaultModel = v
-	}
-	if v, ok := getStr("model_mappings"); ok && v != "" {
-		m := map[string]string{}
-		if err := jsonUnmarshal(v, &m); err == nil {
-			out.ModelMappings = m
-		}
-	}
-	if v, ok := getStr("default_strategy"); ok && v != "" {
-		out.DefaultStrategy = v
-	}
-	getInt("max_concurrent_per_account", &out.MaxPerAccount)
-	getInt("refresh_margin_seconds", &out.RefreshMarginSecs)
-	if v, ok := getStr("reasoning_default_effort"); ok {
-		out.ReasoningEffort = v
-	}
-	if v, ok := getStr("reasoning_default_summary"); ok {
-		out.ReasoningSummary = v
-	}
-	if v, ok := getStr("default_proxy_url"); ok {
-		out.DefaultProxyURL = v
-	}
-	if v, ok := getStr("user_agent"); ok {
-		out.UserAgent = v
-	}
-	if v, ok := getStr("rotation_strategy"); ok && v != "" {
-		out.RotationStrategy = v
-	}
-	getInt("request_interval_ms", &out.RequestIntervalMS)
-	getInt("max_waiting_per_key", &out.MaxWaitingPerKey)
-	getInt("max_waiting_per_account", &out.MaxWaitingPerAccount)
-	getInt("concurrency_wait_timeout_seconds", &out.ConcurrencyWaitTimeoutSeconds)
-	getInt("account_cooldown_seconds", &out.AccountCooldownSeconds)
-	getInt("max_attempts", &out.MaxAttempts)
-	getInt("usage_retention_days", &out.UsageRetentionDays)
-	if v, ok := getStr("smart_scheduling_json"); ok && v != "" {
-		out.SmartSchedulingJSON = v
-	}
-	if v, ok := getStr("pricing_overrides_json"); ok && v != "" {
-		out.PricingOverridesJSON = v
-	}
+	out.applyValues(values)
 	return &out, nil
 }
 
@@ -297,4 +191,99 @@ func (s *Store) ListAudit(ctx context.Context, limit int) ([]*AuditEvent, error)
 		out = append(out, &e)
 	}
 	return out, rows.Err()
+}
+
+func (out *Settings) applyDefaults() {
+	out.SwitchOn429 = true
+	for field, fallback := range map[*string]string{
+		&out.CompactionMode:       DefaultCompactionMode,
+		&out.CompactionModel:      DefaultCompactionModel,
+		&out.RotationStrategy:     "smart",
+		&out.SmartSchedulingJSON:  "{}",
+		&out.PricingOverridesJSON: "{}",
+	} {
+		if *field == "" {
+			*field = fallback
+		}
+	}
+	if strings.TrimSpace(out.CompactionPrompt) == "" {
+		out.CompactionPrompt = compactprompt.Default
+	}
+	for field, fallback := range map[*int]int{
+		&out.ConcurrencyWaitTimeoutSeconds: 30,
+		&out.AccountCooldownSeconds:        60,
+		&out.MaxAttempts:                   2,
+		&out.UsageRetentionDays:            31,
+	} {
+		if *field == 0 {
+			*field = fallback
+		}
+	}
+}
+
+func (out *Settings) applyValues(values map[string]string) {
+	out.applyStringValues(values)
+	for name, field := range map[string]*bool{
+		"switch_on_429":   &out.SwitchOn429,
+		"capture_enabled": &out.CaptureEnabled,
+	} {
+		if value, exists := values[name]; exists {
+			*field = value == "true" || value == "1"
+		}
+	}
+	for name, field := range map[string]*int{
+		"capture_limit":                    &out.CaptureLimit,
+		"max_concurrent_per_account":       &out.MaxPerAccount,
+		"refresh_margin_seconds":           &out.RefreshMarginSecs,
+		"request_interval_ms":              &out.RequestIntervalMS,
+		"max_waiting_per_key":              &out.MaxWaitingPerKey,
+		"max_waiting_per_account":          &out.MaxWaitingPerAccount,
+		"concurrency_wait_timeout_seconds": &out.ConcurrencyWaitTimeoutSeconds,
+		"account_cooldown_seconds":         &out.AccountCooldownSeconds,
+		"max_attempts":                     &out.MaxAttempts,
+		"usage_retention_days":             &out.UsageRetentionDays,
+	} {
+		if value, exists := values[name]; exists {
+			var parsed int
+			if _, err := fmt.Sscanf(value, "%d", &parsed); err == nil {
+				*field = parsed
+			}
+		}
+	}
+	if value := values["model_mappings"]; value != "" {
+		mappings := map[string]string{}
+		if err := jsonUnmarshal(value, &mappings); err == nil {
+			out.ModelMappings = mappings
+		}
+	}
+}
+
+func (out *Settings) applyStringValues(values map[string]string) {
+	for name, field := range map[string]*string{
+		"upstream_transport":     &out.UpstreamTransport,
+		"compaction_mode":        &out.CompactionMode,
+		"compaction_model":       &out.CompactionModel,
+		"default_strategy":       &out.DefaultStrategy,
+		"rotation_strategy":      &out.RotationStrategy,
+		"smart_scheduling_json":  &out.SmartSchedulingJSON,
+		"pricing_overrides_json": &out.PricingOverridesJSON,
+	} {
+		if value := values[name]; value != "" {
+			*field = value
+		}
+	}
+	for name, field := range map[string]*string{
+		"default_model":             &out.DefaultModel,
+		"reasoning_default_effort":  &out.ReasoningEffort,
+		"reasoning_default_summary": &out.ReasoningSummary,
+		"default_proxy_url":         &out.DefaultProxyURL,
+		"user_agent":                &out.UserAgent,
+	} {
+		if value, exists := values[name]; exists {
+			*field = value
+		}
+	}
+	if value := values["compaction_prompt"]; strings.TrimSpace(value) != "" {
+		out.CompactionPrompt = value
+	}
 }

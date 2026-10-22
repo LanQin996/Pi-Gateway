@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -87,7 +88,7 @@ func (s *Server) handleExportAccounts(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	bundle := accountBundle{Type: "pi-gateway-accounts", Version: 1, ExportedAt: time.Now().UTC().Format(time.RFC3339), Accounts: []portableAccount{}}
+	bundle := accountBundle{Type: gatewayAccountsFormat, Version: 1, ExportedAt: time.Now().UTC().Format(time.RFC3339), Accounts: []portableAccount{}}
 	for _, id := range ids {
 		a, err := s.store.GetAccount(r.Context(), id)
 		if err != nil {
@@ -143,7 +144,7 @@ func (s *Server) handleImportAccounts(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "import must contain 1 to 1000 accounts")
 		return
 	}
-	if request.TargetAccountID < 0 || (request.TargetAccountID > 0 && (format == "pi-gateway" || len(records) != 1)) {
+	if request.TargetAccountID < 0 || (request.TargetAccountID > 0 && (format == gatewayFormat || len(records) != 1)) {
 		writeErr(w, 400, "an explicit target requires one Codex credential")
 		return
 	}
@@ -154,80 +155,8 @@ func (s *Server) handleImportAccounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for i, raw := range records {
-		result := accountOperationResult{Index: i, Status: "failed"}
-		var entry portableAccount
-		if format == "pi-gateway" {
-			err = json.Unmarshal(raw, &entry)
-		} else {
-			entry, err = decodeExternalCodex(format, raw)
-		}
-		if err == nil {
-			err = validatePortableAccount(&entry)
-		}
-		if err != nil {
-			result.Error = "invalid account: " + safeImportError(err)
-			results = append(results, result)
-			continue
-		}
-		result.Name = entry.displayName()
-		account, findErr := matchImportedAccount(existing, entry, request.TargetAccountID)
-		if findErr != nil {
-			result.Error = safeImportError(findErr)
-			results = append(results, result)
-			continue
-		}
-		if format == "pi-gateway" && account != nil {
-			// Backup import is idempotent and never overwrites live rotating credentials.
-			result.ID = account.ID
-			result.Status = "skipped"
-			results = append(results, result)
-			continue
-		}
-		if account != nil {
-			if entry.Codex == nil {
-				result.Error = "no Codex credential to attach"
-			} else if account.CodexAccountID != "" && account.CodexAccountID != entry.Codex.AccountID {
-				result.Error = "Codex identity does not match the existing account"
-			} else {
-				c := entry.Codex
-				err = s.accounts.LinkCodexCredential(r.Context(), account, &oauth.Token{Access: c.AccessToken, Refresh: c.RefreshToken, IDToken: c.IDToken, AccountID: c.AccountID, ExpiresAt: time.UnixMilli(c.ExpiresAt)})
-				if err == nil {
-					result.Status = "linked"
-					result.ID = account.ID
-				} else {
-					result.Error = "could not attach Codex credential"
-				}
-			}
-		} else {
-			a := &store.Account{Name: entry.displayName(), Email: entry.Email, AccountID: entry.identity(), PlanType: entry.planType(), Enabled: entry.ChatGPT != nil, Weight: 1, Concurrency: 3, Status: store.AccountStatusReady}
-
-			if entry.ChatGPT != nil {
-				c := entry.ChatGPT
-				a.AccessToken = c.AccessToken
-				a.RefreshToken = c.RefreshToken
-				a.IDToken = c.IDToken
-				a.ExpiresAt = c.ExpiresAt
-				a.OAuthClientID = c.ClientID
-			} else {
-				a.Enabled = false
-				a.Status = store.AccountStatusUnknown
-			}
-			if entry.Codex != nil {
-				c := entry.Codex
-				a.CodexAccessToken = c.AccessToken
-				a.CodexRefreshToken = c.RefreshToken
-				a.CodexIDToken = c.IDToken
-				a.CodexExpiresAt = c.ExpiresAt
-				a.CodexAccountID = c.AccountID
-			}
-			if err = s.store.CreateAccount(r.Context(), a); err != nil {
-				result.Error = "could not persist imported account"
-			} else {
-				result.ID = a.ID
-				result.Status = "created"
-				existing = append(existing, a)
-			}
-		}
+		var result accountOperationResult
+		result, existing = s.importAccountRecord(r.Context(), i, raw, format, request.TargetAccountID, existing)
 		results = append(results, result)
 	}
 	_ = s.store.RecordAudit(r.Context(), "account.imported", fmt.Sprintf("%s: %d records", format, len(records)))
@@ -240,12 +169,7 @@ func safeImportError(err error) string {
 }
 
 func decodeAccountImport(format string, data json.RawMessage) ([]json.RawMessage, string, error) {
-	var envelope struct {
-		Type     string            `json:"type"`
-		Version  int               `json:"version"`
-		Accounts []json.RawMessage `json:"accounts"`
-		Data     json.RawMessage   `json:"data"`
-	}
+	var envelope accountImportEnvelope
 	if len(data) == 0 {
 		return nil, "", fmt.Errorf("select an account JSON file")
 	}
@@ -254,68 +178,27 @@ func decodeAccountImport(format string, data json.RawMessage) ([]json.RawMessage
 		return nil, "", fmt.Errorf("account data must be a JSON object or array")
 	}
 	if format == "" || format == "auto" {
-		if strings.HasPrefix(strings.TrimSpace(string(data)), "[") {
-			var items []json.RawMessage
-			if json.Unmarshal(data, &items) != nil || len(items) == 0 {
-				return nil, "", fmt.Errorf("invalid or empty account array")
-			}
-			_, detected, err := decodeAccountImport("auto", items[0])
-			if err != nil {
-				return nil, "", err
-			}
-			return decodeAccountImport(detected, data)
-		}
-		_ = json.Unmarshal(data, &envelope)
-		var probe struct {
-			Platform    string          `json:"platform"`
-			Credentials json.RawMessage `json:"credentials"`
-		}
-		_ = json.Unmarshal(data, &probe)
-		switch {
-		case envelope.Type == "pi-gateway-accounts":
-			format = "pi-gateway"
-		case envelope.Type == "sub2api-data" || envelope.Type == "sub2api-bundle" || len(envelope.Accounts) > 0 || len(envelope.Data) > 0 || (probe.Platform == "openai" && len(probe.Credentials) > 0):
-			format = "sub2api"
-		default:
-			format = "cliproxyapi"
+		var err error
+		format, err = detectAccountImportFormat(data)
+		if err != nil {
+			return nil, "", err
 		}
 	}
-	if format != "pi-gateway" && format != "sub2api" && format != "cliproxyapi" {
+	if format != gatewayFormat && format != "sub2api" && format != "cliproxyapi" {
 		return nil, "", fmt.Errorf("unsupported import format")
 	}
 	trimmed := strings.TrimSpace(string(data))
 	if strings.HasPrefix(trimmed, "[") {
-		if format == "pi-gateway" {
-			return nil, "", fmt.Errorf("pi-gateway import requires a versioned account bundle")
-		}
-		var records []json.RawMessage
-		if json.Unmarshal(data, &records) != nil {
-			return nil, "", fmt.Errorf("invalid account array")
-		}
-		return records, format, nil
+		return decodeAccountArray(format, data)
 	}
 	if json.Unmarshal(data, &envelope) != nil {
 		return nil, "", fmt.Errorf("invalid account document")
 	}
-	if format == "pi-gateway" {
-		if envelope.Type != "pi-gateway-accounts" || envelope.Version != 1 {
-			return nil, "", fmt.Errorf("unsupported pi-gateway account bundle type or version")
-		}
-		return envelope.Accounts, format, nil
+	if format == gatewayFormat {
+		return decodeGatewayEnvelope(envelope)
 	}
 	if format == "sub2api" {
-		if len(envelope.Data) > 0 {
-			return decodeAccountImport("sub2api", envelope.Data)
-		}
-		if envelope.Type != "" && envelope.Type != "sub2api-data" && envelope.Type != "sub2api-bundle" && envelope.Type != "oauth" {
-			return nil, "", fmt.Errorf("unsupported sub2api bundle type")
-		}
-		if (envelope.Type == "sub2api-data" || envelope.Type == "sub2api-bundle") && envelope.Version != 1 {
-			return nil, "", fmt.Errorf("unsupported sub2api bundle version")
-		}
-		if envelope.Accounts != nil {
-			return envelope.Accounts, format, nil
-		}
+		return decodeSub2APIEnvelope(envelope, data)
 	}
 	return []json.RawMessage{data}, format, nil
 }
@@ -373,11 +256,7 @@ func decodeExternalCodex(format string, raw json.RawMessage) (portableAccount, e
 	if src.Email == "" {
 		src.Email = tok.Email
 	}
-	if c.ExpiresAt == 0 {
-		if expiry, ok := oauth.TokenExpiry(c.AccessToken); ok {
-			c.ExpiresAt = expiry.UnixMilli()
-		}
-	}
+	fillPortableExpiry(c)
 	return portableAccount{Email: src.Email, Codex: c}, nil
 }
 
@@ -423,32 +302,11 @@ func validatePortableAccount(a *portableAccount) error {
 	if a.ChatGPT == nil && a.Codex == nil {
 		return fmt.Errorf("ChatGPT or Codex credentials are required")
 	}
-	if a.ChatGPT != nil {
-		c := a.ChatGPT
-		if c.AccessToken == "" || c.RefreshToken == "" {
-			return fmt.Errorf("ChatGPT access_token and refresh_token are required")
-		}
-		if err := oauth.ValidateChatGPTAccessToken(c.AccessToken); err != nil {
-			return fmt.Errorf("ChatGPT access_token contains Codex claims")
-		}
-		if err := oauth.ValidateChatGPTClientID(c.ClientID); err != nil {
-			return fmt.Errorf("invalid ChatGPT client_id")
-		}
-		if c.ExpiresAt < 0 || (c.ExpiresAt > 0 && c.ExpiresAt < 100000000000) {
-			return fmt.Errorf("ChatGPT expires_at must use Unix milliseconds")
-		}
+	if err := validatePortableChatGPT(a.ChatGPT); err != nil {
+		return err
 	}
-	if a.Codex != nil {
-		c := a.Codex
-		if strings.TrimSpace(c.AccessToken) == "" || strings.TrimSpace(c.RefreshToken) == "" || strings.TrimSpace(c.AccountID) == "" {
-			return fmt.Errorf("Codex access_token, refresh_token and account_id are required")
-		}
-		if tokenID, err := oauth.AccountIDFromToken(c.AccessToken); err == nil && tokenID != c.AccountID {
-			return fmt.Errorf("Codex account_id conflicts with token claims")
-		}
-		if c.ExpiresAt < 0 || (c.ExpiresAt > 0 && c.ExpiresAt < 100000000000) {
-			return fmt.Errorf("Codex expires_at must use Unix milliseconds")
-		}
+	if err := validatePortableCodex(a.Codex); err != nil {
+		return err
 	}
 
 	return nil
@@ -463,7 +321,7 @@ func matchImportedAccount(accounts []*store.Account, entry portableAccount, targ
 			}
 			continue
 		}
-		if (entry.Codex != nil && a.CodexAccountID == entry.Codex.AccountID) || (entry.Email != "" && strings.EqualFold(a.Email, entry.Email)) || (entry.Email == "" && entry.ChatGPT != nil && a.RefreshToken == entry.ChatGPT.RefreshToken) {
+		if importedAccountMatches(a, entry) {
 			matches = append(matches, a)
 		}
 	}
@@ -481,4 +339,211 @@ func matchImportedAccount(accounts []*store.Account, entry portableAccount, targ
 		return nil, fmt.Errorf("credential email does not match the target account")
 	}
 	return a, nil
+}
+
+func validatePortableChatGPT(credential *portableCredential) error {
+	if credential != nil {
+		c := credential
+		if c.AccessToken == "" || c.RefreshToken == "" {
+			return fmt.Errorf("ChatGPT access_token and refresh_token are required")
+		}
+		if err := oauth.ValidateChatGPTAccessToken(c.AccessToken); err != nil {
+			return fmt.Errorf("ChatGPT access_token contains Codex claims")
+		}
+		if err := oauth.ValidateChatGPTClientID(c.ClientID); err != nil {
+			return fmt.Errorf("invalid ChatGPT client_id")
+		}
+		if c.ExpiresAt < 0 || (c.ExpiresAt > 0 && c.ExpiresAt < 100000000000) {
+			return fmt.Errorf("ChatGPT expires_at must use Unix milliseconds")
+		}
+	}
+	return nil
+}
+
+func validatePortableCodex(credential *portableCredential) error {
+	if credential != nil {
+		c := credential
+		if strings.TrimSpace(c.AccessToken) == "" || strings.TrimSpace(c.RefreshToken) == "" || strings.TrimSpace(c.AccountID) == "" {
+			return fmt.Errorf("Codex access_token, refresh_token and account_id are required")
+		}
+		if tokenID, err := oauth.AccountIDFromToken(c.AccessToken); err == nil && tokenID != c.AccountID {
+			return fmt.Errorf("Codex account_id conflicts with token claims")
+		}
+		if c.ExpiresAt < 0 || (c.ExpiresAt > 0 && c.ExpiresAt < 100000000000) {
+			return fmt.Errorf("Codex expires_at must use Unix milliseconds")
+		}
+	}
+	return nil
+}
+
+func importedAccountMatches(a *store.Account, entry portableAccount) bool {
+	return (entry.Codex != nil && a.CodexAccountID == entry.Codex.AccountID) || (entry.Email != "" && strings.EqualFold(a.Email, entry.Email)) || (entry.Email == "" && entry.ChatGPT != nil && a.RefreshToken == entry.ChatGPT.RefreshToken)
+}
+
+func fillPortableExpiry(c *portableCredential) {
+	if c.ExpiresAt == 0 {
+		if expiry, ok := oauth.TokenExpiry(c.AccessToken); ok {
+			c.ExpiresAt = expiry.UnixMilli()
+		}
+	}
+}
+
+type accountImportEnvelope struct {
+	Type     string            `json:"type"`
+	Version  int               `json:"version"`
+	Accounts []json.RawMessage `json:"accounts"`
+	Data     json.RawMessage   `json:"data"`
+}
+
+func detectAccountImportFormat(data json.RawMessage) (string, error) {
+	var envelope accountImportEnvelope
+	format := ""
+	if strings.HasPrefix(strings.TrimSpace(string(data)), "[") {
+		var items []json.RawMessage
+		if json.Unmarshal(data, &items) != nil || len(items) == 0 {
+			return "", fmt.Errorf("invalid or empty account array")
+		}
+		_, detected, err := decodeAccountImport("auto", items[0])
+		if err != nil {
+			return "", err
+		}
+		return detected, nil
+	}
+	_ = json.Unmarshal(data, &envelope)
+	var probe struct {
+		Platform    string          `json:"platform"`
+		Credentials json.RawMessage `json:"credentials"`
+	}
+	_ = json.Unmarshal(data, &probe)
+	switch {
+	case envelope.Type == gatewayAccountsFormat:
+		format = gatewayFormat
+	case envelope.Type == sub2apiDataFormat || envelope.Type == sub2apiBundleFormat || len(envelope.Accounts) > 0 || len(envelope.Data) > 0 || (probe.Platform == "openai" && len(probe.Credentials) > 0):
+		format = "sub2api"
+	default:
+		format = "cliproxyapi"
+	}
+	return format, nil
+}
+
+func decodeSub2APIEnvelope(envelope accountImportEnvelope, data json.RawMessage) ([]json.RawMessage, string, error) {
+	format := "sub2api"
+	if len(envelope.Data) > 0 {
+		return decodeAccountImport("sub2api", envelope.Data)
+	}
+	if envelope.Type != "" && envelope.Type != sub2apiDataFormat && envelope.Type != sub2apiBundleFormat && envelope.Type != "oauth" {
+		return nil, "", fmt.Errorf("unsupported sub2api bundle type")
+	}
+	if (envelope.Type == sub2apiDataFormat || envelope.Type == sub2apiBundleFormat) && envelope.Version != 1 {
+		return nil, "", fmt.Errorf("unsupported sub2api bundle version")
+	}
+	if envelope.Accounts != nil {
+		return envelope.Accounts, format, nil
+	}
+	return []json.RawMessage{data}, format, nil
+}
+
+func (s *Server) importAccountRecord(ctx context.Context, i int, raw json.RawMessage, format string, target int64, existing []*store.Account) (accountOperationResult, []*store.Account) {
+	var err error
+	result := accountOperationResult{Index: i, Status: "failed"}
+	var entry portableAccount
+	if format == gatewayFormat {
+		err = json.Unmarshal(raw, &entry)
+	} else {
+		entry, err = decodeExternalCodex(format, raw)
+	}
+	if err == nil {
+		err = validatePortableAccount(&entry)
+	}
+	if err != nil {
+		result.Error = "invalid account: " + safeImportError(err)
+		return result, existing
+	}
+	result.Name = entry.displayName()
+	account, findErr := matchImportedAccount(existing, entry, target)
+	if findErr != nil {
+		result.Error = safeImportError(findErr)
+		return result, existing
+	}
+	if format == gatewayFormat && account != nil {
+		// Backup import is idempotent and never overwrites live rotating credentials.
+		result.ID = account.ID
+		result.Status = "skipped"
+		return result, existing
+	}
+	if account != nil {
+		s.attachImportedCodex(ctx, account, entry, &result)
+	} else {
+		a := importedStoreAccount(entry)
+		if err = s.store.CreateAccount(ctx, a); err != nil {
+			result.Error = "could not persist imported account"
+		} else {
+			result.ID = a.ID
+			result.Status = "created"
+			existing = append(existing, a)
+		}
+	}
+	return result, existing
+}
+
+func (s *Server) attachImportedCodex(ctx context.Context, account *store.Account, entry portableAccount, result *accountOperationResult) {
+	var err error
+	if entry.Codex == nil {
+		result.Error = "no Codex credential to attach"
+	} else if account.CodexAccountID != "" && account.CodexAccountID != entry.Codex.AccountID {
+		result.Error = "Codex identity does not match the existing account"
+	} else {
+		c := entry.Codex
+		err = s.accounts.LinkCodexCredential(ctx, account, &oauth.Token{Access: c.AccessToken, Refresh: c.RefreshToken, IDToken: c.IDToken, AccountID: c.AccountID, ExpiresAt: time.UnixMilli(c.ExpiresAt)})
+		if err == nil {
+			result.Status = "linked"
+			result.ID = account.ID
+		} else {
+			result.Error = "could not attach Codex credential"
+		}
+	}
+}
+
+func importedStoreAccount(entry portableAccount) *store.Account {
+	a := &store.Account{Name: entry.displayName(), Email: entry.Email, AccountID: entry.identity(), PlanType: entry.planType(), Enabled: entry.ChatGPT != nil, Weight: 1, Concurrency: 3, Status: store.AccountStatusReady}
+
+	if entry.ChatGPT != nil {
+		c := entry.ChatGPT
+		a.AccessToken = c.AccessToken
+		a.RefreshToken = c.RefreshToken
+		a.IDToken = c.IDToken
+		a.ExpiresAt = c.ExpiresAt
+		a.OAuthClientID = c.ClientID
+	} else {
+		a.Enabled = false
+		a.Status = store.AccountStatusUnknown
+	}
+	if entry.Codex != nil {
+		c := entry.Codex
+		a.CodexAccessToken = c.AccessToken
+		a.CodexRefreshToken = c.RefreshToken
+		a.CodexIDToken = c.IDToken
+		a.CodexExpiresAt = c.ExpiresAt
+		a.CodexAccountID = c.AccountID
+	}
+	return a
+}
+
+func decodeAccountArray(format string, data json.RawMessage) ([]json.RawMessage, string, error) {
+	if format == gatewayFormat {
+		return nil, "", fmt.Errorf("pi-gateway import requires a versioned account bundle")
+	}
+	var records []json.RawMessage
+	if json.Unmarshal(data, &records) != nil {
+		return nil, "", fmt.Errorf("invalid account array")
+	}
+	return records, format, nil
+}
+
+func decodeGatewayEnvelope(envelope accountImportEnvelope) ([]json.RawMessage, string, error) {
+	format := gatewayFormat
+	if envelope.Type != gatewayAccountsFormat || envelope.Version != 1 {
+		return nil, "", fmt.Errorf("unsupported pi-gateway account bundle type or version")
+	}
+	return envelope.Accounts, format, nil
 }

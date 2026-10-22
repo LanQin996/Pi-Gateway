@@ -1,5 +1,6 @@
 // Editor-only identity, never use for credentials or server-managed rule IDs.
 let counter = 0
+// Non-security fallback salt prevents collisions between independent editor realms.
 const session = Math.random().toString(36).slice(2) || 'session'
 
 export function editorId(): string {

@@ -89,14 +89,12 @@ func TestParseCodexReleaseVersion(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := parseCodexReleaseVersion([]byte(tc.body))
 			if tc.want == "" {
-				if err == nil || got != "" {
-					t.Fatalf("invalid release accepted: version=%q err=%v", got, err)
-				}
+				requireDataTruef(t, !(err == nil || got != ""), "invalid release accepted: version=%q err=%v", got, err)
 				return
 			}
-			if err != nil || got != tc.want {
+			reportTestFailure(t, err != nil || got != tc.want, func() {
 				t.Fatalf("version=%q err=%v, want %q", got, err, tc.want)
-			}
+			})
 		})
 	}
 	for _, version := range []string{
@@ -108,11 +106,10 @@ func TestParseCodexReleaseVersion(t *testing.T) {
 	} {
 		t.Run("invalid_version_"+version, func(t *testing.T) {
 			raw, err := json.Marshal(map[string]string{"tag_name": version, "name": "0.161.0"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got, err := parseCodexReleaseVersion(raw); err == nil || got != "" {
-				t.Fatalf("invalid tag %q accepted or rescued by name: %q %v", version, got, err)
+			requireDataNoError(t, err)
+			{
+				got, err := parseCodexReleaseVersion(raw)
+				requireDataTruef(t, !(err == nil || got != ""), "invalid tag %q accepted or rescued by name: %q %v", version, got, err)
 			}
 		})
 	}
@@ -189,59 +186,7 @@ func TestFetchLatestCodexClientVersionResponses(t *testing.T) {
 		{name: "rate_limited", body: "response-body-secret", status: http.StatusTooManyRequests, wantError: "HTTP 429"},
 		{name: "server_error", body: "response-body-secret", status: http.StatusInternalServerError, wantError: "HTTP 500"},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			wire := []byte(tc.body)
-			if tc.encoding != "" && !tc.corrupt {
-				var compressed bytes.Buffer
-				var writer io.WriteCloser = gzip.NewWriter(&compressed)
-				if tc.encoding == "deflate" {
-					writer = zlib.NewWriter(&compressed)
-				}
-				if _, err := io.WriteString(writer, tc.body); err != nil {
-					t.Fatal(err)
-				}
-				if err := writer.Close(); err != nil {
-					t.Fatal(err)
-				}
-				wire = compressed.Bytes()
-				if strings.Contains(tc.name, "expansion_limit") && len(wire) >= limit {
-					t.Fatal("test payload must exceed the limit only after decompression")
-				}
-			}
-			body := &codexVersionTestBody{Reader: bytes.NewReader(wire)}
-			if tc.readError {
-				body.Reader = codexVersionTestReadError{}
-			}
-			var calls atomic.Int64
-			manager, _ := newCodexVersionTestManager(t, "", func(r *http.Request) (*http.Response, error) {
-				calls.Add(1)
-				status := tc.status
-				if status == 0 {
-					status = http.StatusOK
-				}
-				resp := codexVersionTestResponse(status, "")
-				resp.Header.Set("Content-Encoding", tc.encoding)
-				resp.Body = body
-				return resp, nil
-			})
-			got, err := manager.fetchLatestCodexClientVersion(context.Background(), "")
-			if tc.wantError == "" {
-				if err != nil || got != "0.161.0" {
-					t.Fatalf("version=%q err=%v", got, err)
-				}
-			} else if err == nil || got != "" || !strings.Contains(err.Error(), tc.wantError) {
-				t.Fatalf("version=%q err=%v, want error containing %q", got, err, tc.wantError)
-			}
-			if err != nil && strings.Contains(err.Error(), "response-body-secret") {
-				t.Fatal("response body leaked through the public error")
-			}
-			if calls.Load() != 1 || !body.closed {
-				t.Fatalf("calls=%d body.closed=%v", calls.Load(), body.closed)
-			}
-			if tc.encoding == "" && body.read > limit+1 {
-				t.Fatalf("read %d bytes beyond the bounded response reader", body.read)
-			}
-		})
+		t.Run(tc.name, func(t *testing.T) { testFetchLatestCodexClientVersionResponsesPhase1(t, limit, &tc) })
 	}
 }
 
@@ -261,22 +206,19 @@ func TestFetchLatestCodexClientVersionNeverFollowsRedirects(t *testing.T) {
 				return resp, nil
 			})
 			client, err := manager.factory.HTTPClient("")
-			if err != nil {
-				t.Fatal(err)
-			}
+			requireDataNoError(t, err)
 			client.CheckRedirect = func(*http.Request, []*http.Request) error {
 				redirectPolicyCalls.Add(1)
 				return nil
 			}
 			got, err := manager.fetchLatestCodexClientVersion(context.Background(), "")
-			if err == nil || got != "" || !strings.Contains(err.Error(), fmt.Sprint(status)) {
-				t.Fatalf("redirect accepted: version=%q err=%v", got, err)
-			}
-			if calls.Load() != 1 || redirectPolicyCalls.Load() != 0 || !body.closed {
+			requireDataTruef(t, !(err == nil || got != "" || !strings.Contains(err.Error(), fmt.Sprint(status))), "redirect accepted: version=%q err=%v", got, err)
+			reportTestFailure(t, calls.Load() != 1 || redirectPolicyCalls.Load() != 0 || !body.closed, func() {
 				t.Fatalf("calls=%d shared redirect policy calls=%d closed=%v", calls.Load(), redirectPolicyCalls.Load(), body.closed)
-			}
-			if err := client.CheckRedirect(nil, nil); err != nil || redirectPolicyCalls.Load() != 1 {
-				t.Fatal("release lookup mutated the shared client's redirect policy")
+			})
+			{
+				err := client.CheckRedirect(nil, nil)
+				requireDataTrue(t, !(err != nil || redirectPolicyCalls.Load() != 1), "release lookup mutated the shared client's redirect policy")
 			}
 		})
 	}
@@ -526,58 +468,7 @@ func TestResolveCodexClientVersionCanceledWaiterDoesNotCancelLeader(t *testing.T
 
 func TestResolveCodexClientVersionCanceledLeaderAllowsWaiterRetry(t *testing.T) {
 	for _, cached := range []string{"", "0.161.0"} {
-		t.Run("previous_"+cached, func(t *testing.T) {
-			started, retryStarted, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
-			releaseAll := sync.OnceFunc(func() { close(release) })
-			defer releaseAll()
-			var calls atomic.Int64
-			manager, clock := newCodexVersionTestManager(t, "", func(r *http.Request) (*http.Response, error) {
-				if calls.Add(1) == 1 {
-					close(started)
-					<-r.Context().Done()
-					return nil, r.Context().Err()
-				}
-				close(retryStarted)
-				select {
-				case <-release:
-					return codexVersionTestRelease("0.162.0"), nil
-				case <-r.Context().Done():
-					return nil, r.Context().Err()
-				}
-			})
-			manager.codexVersions.version = cached
-			if cached != "" {
-				manager.codexVersions.nextCheck = clock.now()
-			}
-			previousDeadline := manager.codexVersions.nextCheck
-			leaderCtx, cancelLeader := context.WithCancel(context.Background())
-			defer cancelLeader()
-			leader := startCodexVersionTestResolve(manager, leaderCtx)
-			receiveCodexVersionTest(t, started)
-			waiterCtx, cancelWaiter := context.WithCancel(context.Background())
-			defer cancelWaiter()
-			waiter := &codexVersionTestWaitContext{Context: waiterCtx, waiting: make(chan struct{})}
-			result := startCodexVersionTestResolve(manager, waiter)
-			receiveCodexVersionTest(t, waiter.waiting)
-			cancelLeader()
-			if got := receiveCodexVersionTest(t, leader); !errors.Is(got.err, context.Canceled) || got.version != "" {
-				t.Fatalf("canceled leader=%+v", got)
-			}
-			receiveCodexVersionTest(t, retryStarted)
-			manager.codexVersions.mu.Lock()
-			untouched := manager.codexVersions.version == cached && manager.codexVersions.nextCheck.Equal(previousDeadline) && manager.codexVersions.inflight != nil
-			manager.codexVersions.mu.Unlock()
-			if !untouched || calls.Load() != 2 {
-				t.Fatal("leader cancellation installed fallback/backoff or prevented immediate waiter retry")
-			}
-			releaseAll()
-			if got := receiveCodexVersionTest(t, result); got.err != nil || got.version != "0.162.0" {
-				t.Fatalf("retrying waiter=%+v", got)
-			}
-			if got, err := manager.resolveCodexClientVersion(context.Background(), config.AutoCodexClientVersion, ""); err != nil || got != "0.162.0" || calls.Load() != 2 {
-				t.Fatalf("retry result not cached: %q %v calls=%d", got, err, calls.Load())
-			}
-		})
+		t.Run("previous_"+cached, func(t *testing.T) { testResolveCodexClientVersionCanceledLeaderAllowsWaiterRetryPhase1(t, &cached) })
 	}
 }
 
@@ -616,6 +507,7 @@ func (b *codexVersionTestObservedBody) Read(p []byte) (int, error) {
 func newCodexVersionBodyTestManager(t *testing.T, handler http.HandlerFunc) (*Manager, *codexVersionTestClock, <-chan context.Context) {
 	t.Helper()
 	serverCtx, cancelServer := context.WithCancel(context.Background())
+	t.Cleanup(cancelServer) // Register immediately; the server cleanup also cancels before closing.
 	server := httptest.NewUnstartedServer(handler)
 	server.Config.BaseContext = func(net.Listener) context.Context { return serverCtx }
 	server.Start()
@@ -625,9 +517,7 @@ func newCodexVersionBodyTestManager(t *testing.T, handler http.HandlerFunc) (*Ma
 		server.Close()
 	})
 	localURL, err := url.Parse(server.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, err)
 	transport := &http.Transport{Proxy: nil, DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 		if addr != localURL.Host {
 			return nil, errors.New("body test refuses any dial except its local release server")
@@ -706,95 +596,26 @@ func TestResolveCodexClientVersionRequestTimeoutIsFiveSeconds(t *testing.T) {
 
 func TestResolveCodexClientVersionBodyCancellationAllowsWaiterRetry(t *testing.T) {
 	for _, cached := range []string{"", "0.161.0"} {
-		t.Run("previous_"+cached, func(t *testing.T) {
-			var calls atomic.Int64
-			serverStopped, releaseRetry := make(chan struct{}), make(chan struct{})
-			releaseAll := sync.OnceFunc(func() { close(releaseRetry) })
-			t.Cleanup(releaseAll)
-			manager, clock, bodyStarted := newCodexVersionBodyTestManager(t, func(w http.ResponseWriter, r *http.Request) {
-				call := calls.Add(1)
-				w.WriteHeader(http.StatusOK)
-				w.(http.Flusher).Flush()
-				if call == 1 {
-					<-r.Context().Done()
-					close(serverStopped)
-					return
-				}
-				select {
-				case <-releaseRetry:
-					_, _ = io.WriteString(w, `{"tag_name":"rust-v0.162.0"}`)
-				case <-r.Context().Done():
-				}
-			})
-			manager.codexVersions.version = cached
-			if cached != "" {
-				manager.codexVersions.nextCheck = clock.now()
-			}
-			previousDeadline := manager.codexVersions.nextCheck
-			leaderCtx, cancelLeader := context.WithCancel(context.Background())
-			t.Cleanup(cancelLeader)
-			leader := startCodexVersionTestResolve(manager, leaderCtx)
-			firstBodyCtx := receiveCodexVersionTest(t, bodyStarted)
-			waiterCtx, cancelWaiter := context.WithCancel(context.Background())
-			t.Cleanup(cancelWaiter)
-			waiter := &codexVersionTestWaitContext{Context: waiterCtx, waiting: make(chan struct{})}
-			result := startCodexVersionTestResolve(manager, waiter)
-			receiveCodexVersionTest(t, waiter.waiting)
-			cancelLeader()
-			if got := receiveCodexVersionTest(t, leader); !errors.Is(got.err, context.Canceled) || got.version != "" {
-				t.Fatalf("leader did not immediately cancel its real body read: %+v", got)
-			}
-			if !errors.Is(firstBodyCtx.Err(), context.Canceled) {
-				t.Fatalf("first body context=%v, want parent cancellation", firstBodyCtx.Err())
-			}
-			receiveCodexVersionTest(t, serverStopped)
-			retryBodyCtx := receiveCodexVersionTest(t, bodyStarted)
-			manager.codexVersions.mu.Lock()
-			untouched := manager.codexVersions.version == cached && manager.codexVersions.nextCheck.Equal(previousDeadline) && manager.codexVersions.inflight != nil
-			manager.codexVersions.mu.Unlock()
-			if !untouched || calls.Load() != 2 || retryBodyCtx.Err() != nil {
-				t.Fatal("body cancellation polluted the cache or failed to start the live waiter's retry")
-			}
-			releaseAll()
-			if got := receiveCodexVersionTest(t, result); got.err != nil || got.version != "0.162.0" {
-				t.Fatalf("waiter could not finish reading the retried body: %+v", got)
-			}
-			if got, err := manager.resolveCodexClientVersion(context.Background(), config.AutoCodexClientVersion, ""); err != nil || got != "0.162.0" || calls.Load() != 2 {
-				t.Fatalf("retried body result not cached: %q %v calls=%d", got, err, calls.Load())
-			}
-			if !manager.codexVersions.nextCheck.Equal(clock.now().Add(time.Hour)) {
-				t.Fatal("successful body retry did not establish the normal cache TTL")
-			}
-		})
+		t.Run("previous_"+cached, func(t *testing.T) { testResolveCodexClientVersionBodyCancellationAllowsWaiterRetryPhase1(t, &cached) })
 	}
 }
 
 func TestFetchLatestCodexClientVersionSelectedProxyAndCredentialBoundary(t *testing.T) {
 	var targetCalls, proxyCalls, directCalls atomic.Int64
 	assertPublicHeaders := func(headers http.Header) {
-		t.Helper()
-		for _, key := range []string{"Authorization", "Cookie", "ChatGPT-Account-Id", "OpenAI-Organization", "OpenAI-Project", "X-Api-Key", "OpenAI-Beta", "Version", "Originator"} {
-			if headers.Get(key) != "" {
-				t.Errorf("public release request included user credential/header %s", key)
-			}
-		}
-		if headers.Get("Accept") != "application/vnd.github+json" || headers.Get("User-Agent") != "pi-gateway-codex-version" {
-			t.Errorf("incorrect release metadata headers: %v", headers)
-		}
+		testFetchLatestCodexClientVersionSelectedProxyAndCredentialBoundaryPhase1(headers, &t)
 	}
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		targetCalls.Add(1)
 		assertPublicHeaders(r.Header)
-		if r.Method != http.MethodGet || r.URL.Path != "/repos/openai/codex/releases/latest" || r.URL.RawQuery != "" || r.Header.Get("Proxy-Authorization") != "" {
+		reportTestFailure(t, r.Method != http.MethodGet || r.URL.Path != "/repos/openai/codex/releases/latest" || r.URL.RawQuery != "" || r.Header.Get("Proxy-Authorization") != "", func() {
 			t.Errorf("incorrect public release request: %s %s", r.Method, r.URL)
-		}
+		})
 		_, _ = io.WriteString(w, `{"tag_name":"rust-v0.161.0"}`)
 	}))
 	defer target.Close()
 	targetURL, err := url.Parse(target.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, err)
 	forwardTransport := &http.Transport{Proxy: nil, DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 		if addr != targetURL.Host {
 			return nil, errors.New("proxy test refuses non-local target")
@@ -803,34 +624,11 @@ func TestFetchLatestCodexClientVersionSelectedProxyAndCredentialBoundary(t *test
 	}}
 	defer forwardTransport.CloseIdleConnections()
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		proxyCalls.Add(1)
-		assertPublicHeaders(r.Header)
-		if r.Header.Get("Proxy-Authorization") == "" {
-			t.Error("selected proxy credentials were not used")
-		}
-		if r.URL.Host != targetURL.Host || r.URL.Scheme != targetURL.Scheme {
-			t.Error("proxy received an unexpected destination")
-			w.WriteHeader(http.StatusBadGateway)
-			return
-		}
-		forward := r.Clone(r.Context())
-		forward.RequestURI = ""
-		forward.Header.Del("Proxy-Authorization")
-		resp, err := forwardTransport.RoundTrip(forward)
-		if err != nil {
-			t.Errorf("local proxy forwarding: %v", err)
-			w.WriteHeader(http.StatusBadGateway)
-			return
-		}
-		defer resp.Body.Close()
-		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body)
+		testFetchLatestCodexClientVersionSelectedProxyAndCredentialBoundaryPhase2(w, r, &t, &proxyCalls, &assertPublicHeaders, &targetURL, &forwardTransport)
 	}))
 	defer proxy.Close()
 	proxyURL, err := url.Parse(proxy.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, err)
 	proxyURL.User = url.UserPassword("proxy-user", "proxy-password")
 	factory := egress.NewFactory(egress.Options{})
 	factory.BaseDialer = func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -840,107 +638,320 @@ func TestFetchLatestCodexClientVersionSelectedProxyAndCredentialBoundary(t *test
 		return (&net.Dialer{}).DialContext(ctx, network, addr)
 	}
 	direct, err := factory.HTTPClient("")
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, err)
 	direct.Transport = catalogRoundTrip(func(*http.Request) (*http.Response, error) {
 		directCalls.Add(1)
 		return nil, errors.New("direct release requests are forbidden")
 	})
 	client, err := factory.HTTPClient(proxyURL.String())
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, err)
 	transport := client.Transport.(*http.Transport)
 	defer transport.CloseIdleConnections()
 	jar, err := cookiejar.New(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, err)
 	publicURL, err := url.Parse(codexLatestReleaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	requireDataNoError(t, err)
 	jar.SetCookies(publicURL, []*http.Cookie{{Name: "session", Value: "cookie-secret"}})
 	client.Jar = jar
 	client.Transport = catalogRoundTrip(func(r *http.Request) (*http.Response, error) {
-		assertPublicHeaders(r.Header)
-		if r.URL.String() != "https://api.github.com/repos/openai/codex/releases/latest" || r.Header.Get("Proxy-Authorization") != "" {
-			return nil, errors.New("unexpected public release destination or proxy credential leakage")
-		}
-		clone := r.Clone(r.Context())
-		endpoint := *r.URL
-		endpoint.Scheme, endpoint.Host = targetURL.Scheme, targetURL.Host
-		clone.URL, clone.Host = &endpoint, targetURL.Host
-		return transport.RoundTrip(clone)
+		return testFetchLatestCodexClientVersionSelectedProxyAndCredentialBoundaryPhase3(r, &assertPublicHeaders, &targetURL, &transport)
 	})
 	manager := &Manager{factory: factory}
 	got, err := manager.fetchLatestCodexClientVersion(context.Background(), proxyURL.String())
-	if err != nil || got != "0.161.0" || targetCalls.Load() != 1 || proxyCalls.Load() != 1 || directCalls.Load() != 0 {
+	reportTestFailure(t, err != nil || got != "0.161.0" || targetCalls.Load() != 1 || proxyCalls.Load() != 1 || directCalls.Load() != 0, func() {
 		t.Fatalf("version=%q err=%v target=%d proxy=%d direct=%d", got, err, targetCalls.Load(), proxyCalls.Load(), directCalls.Load())
-	}
-	if client.Jar != jar || len(client.Jar.Cookies(publicURL)) != 1 {
-		t.Fatal("release lookup mutated the shared client's cookie jar")
-	}
+	})
+	requireDataCondition(t, !(client.Jar != jar || len(client.Jar.Cookies(publicURL)) != 1), "release lookup mutated the shared client's cookie jar")
 }
 
 func TestResolveCodexClientVersionFailureLogsAreSanitized(t *testing.T) {
 	const proxy = "http://proxy-user:proxy-password@proxy.invalid:8080"
 	for _, failure := range []string{"transport", "http", "json", "version", "gzip", "read", "invalid_proxy", "missing_factory"} {
-		t.Run(failure, func(t *testing.T) {
-			var logs bytes.Buffer
-			var calls atomic.Int64
-			manager, _ := newCodexVersionTestManager(t, proxy, func(*http.Request) (*http.Response, error) {
-				calls.Add(1)
-				switch failure {
-				case "transport":
-					return nil, errors.New("raw-transport-error " + proxy + " Authorization=account-secret")
-				case "http":
-					return codexVersionTestResponse(http.StatusServiceUnavailable, "response-body-secret account-secret"), nil
-				case "json":
-					return codexVersionTestResponse(http.StatusOK, "response-body-secret"), nil
-				case "version":
-					return codexVersionTestResponse(http.StatusOK, `{"tag_name":"response-body-secret"}`), nil
-				case "gzip":
-					resp := codexVersionTestResponse(http.StatusOK, "response-body-secret")
-					resp.Header.Set("Content-Encoding", "gzip")
-					return resp, nil
-				case "read":
-					resp := codexVersionTestResponse(http.StatusOK, "")
-					resp.Body = io.NopCloser(codexVersionTestReadError{})
-					return resp, nil
-				default:
-					t.Error("invalid proxy or absent factory unexpectedly reached transport")
-					return nil, errors.New("unexpected transport call")
-				}
-			})
-			manager.logger = slog.New(slog.NewTextHandler(&logs, nil))
-			selectedProxy := proxy
-			if failure == "invalid_proxy" {
-				selectedProxy = "invalid://proxy-user:proxy-password@proxy.invalid:8080"
-			}
-			if failure == "missing_factory" {
-				manager.factory = nil
-			}
-			got, err := manager.resolveCodexClientVersion(context.Background(), config.AutoCodexClientVersion, selectedProxy)
-			if err != nil || got != config.DefaultCodexClientVersion {
-				t.Fatalf("fallback=%q err=%v", got, err)
-			}
-			if !strings.Contains(logs.String(), "Codex client version lookup failed") || !strings.Contains(logs.String(), "reason=") {
-				t.Fatalf("missing classified failure log: %s", logs.String())
-			}
-			for _, secret := range []string{"proxy-password", "proxy-user", "proxy.invalid", "response-body-secret", "account-secret", "raw-transport-error", "raw-read-error"} {
-				if strings.Contains(logs.String(), secret) {
-					t.Fatalf("failure log leaked %q: %s", secret, logs.String())
-				}
-			}
-			wantCalls := int64(1)
-			if failure == "invalid_proxy" || failure == "missing_factory" {
-				wantCalls = 0
-			}
-			if calls.Load() != wantCalls {
-				t.Fatalf("calls=%d, want %d", calls.Load(), wantCalls)
-			}
+		t.Run(failure, func(t *testing.T) { testResolveCodexClientVersionFailureLogsAreSanitizedPhase1(t, proxy, &failure) })
+	}
+}
+
+// testFetchLatestCodexClientVersionResponsesPhase1 exercises one isolated test phase with the original shared state.
+func testFetchLatestCodexClientVersionResponsesPhase1(t *testing.T, capturedLimit int, capturedTc *struct {
+	name      string
+	body      string
+	encoding  string
+	wantError string
+	status    int
+	corrupt   bool
+	readError bool
+}) {
+	wire := []byte((*capturedTc).body)
+	if (*capturedTc).encoding != "" && !(*capturedTc).corrupt {
+		var compressed bytes.Buffer
+		var writer io.WriteCloser = gzip.NewWriter(&compressed)
+		if (*capturedTc).encoding == "deflate" {
+			writer = zlib.NewWriter(&compressed)
+		}
+		{
+			_, err := io.WriteString(writer, (*capturedTc).body)
+			requireDataTrue(t, !(err != nil), err)
+		}
+		requireDataNoError(t, writer.Close())
+		wire = compressed.Bytes()
+		requireDataCondition(t, !(strings.Contains((*capturedTc).name, "expansion_limit") && len(wire) >= capturedLimit), "test payload must exceed the limit only after decompression")
+	}
+	body := &codexVersionTestBody{Reader: bytes.NewReader(wire)}
+	if (*capturedTc).readError {
+		body.Reader = codexVersionTestReadError{}
+	}
+	var calls atomic.Int64
+	manager, _ := newCodexVersionTestManager(t, "", func(r *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		status := (*capturedTc).status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		resp := codexVersionTestResponse(status, "")
+		resp.Header.Set("Content-Encoding", (*capturedTc).encoding)
+		resp.Body = body
+		return resp, nil
+	})
+	got, err := manager.fetchLatestCodexClientVersion(context.Background(), "")
+	if (*capturedTc).wantError == "" {
+		requireDataTruef(t, !(err != nil || got != "0.161.0"), "version=%q err=%v", got, err)
+	} else {
+		reportTestFailure(t, err == nil || got != "" || !strings.Contains(err.Error(), (*capturedTc).wantError), func() {
+			t.Fatalf("version=%q err=%v, want error containing %q", got, err, (*capturedTc).wantError)
 		})
 	}
+	requireDataCondition(t, !(err != nil && strings.Contains(err.Error(), "response-body-secret")), "response body leaked through the public error")
+	reportTestFailure(t, calls.Load() != 1 || !body.closed, func() {
+		t.Fatalf("calls=%d body.closed=%v", calls.Load(), body.closed)
+	})
+	reportTestFailure(t, (*capturedTc).encoding == "" && body.read > capturedLimit+1, func() {
+		t.Fatalf("read %d bytes beyond the bounded response reader", body.read)
+	})
+}
+
+// testResolveCodexClientVersionCanceledLeaderAllowsWaiterRetryPhase1 exercises one isolated test phase with the original shared state.
+func testResolveCodexClientVersionCanceledLeaderAllowsWaiterRetryPhase1(t *testing.T, capturedCached *string) {
+	started, retryStarted, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	releaseAll := sync.OnceFunc(func() { close(release) })
+	defer releaseAll()
+	var calls atomic.Int64
+	manager, clock := newCodexVersionTestManager(t, "", func(r *http.Request) (*http.Response, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+			<-r.Context().Done()
+			return nil, r.Context().Err()
+		}
+		close(retryStarted)
+		select {
+		case <-release:
+			return codexVersionTestRelease("0.162.0"), nil
+		case <-r.Context().Done():
+			return nil, r.Context().Err()
+		}
+	})
+	manager.codexVersions.version = (*capturedCached)
+	if (*capturedCached) != "" {
+		manager.codexVersions.nextCheck = clock.now()
+	}
+	previousDeadline := manager.codexVersions.nextCheck
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	defer cancelLeader()
+	leader := startCodexVersionTestResolve(manager, leaderCtx)
+	receiveCodexVersionTest(t, started)
+	waiterCtx, cancelWaiter := context.WithCancel(context.Background())
+	defer cancelWaiter()
+	waiter := &codexVersionTestWaitContext{Context: waiterCtx, waiting: make(chan struct{})}
+	result := startCodexVersionTestResolve(manager, waiter)
+	receiveCodexVersionTest(t, waiter.waiting)
+	cancelLeader()
+	{
+		got := receiveCodexVersionTest(t, leader)
+		requireDataTruef(t, !(!errors.Is(got.err, context.Canceled) || got.version != ""), "canceled leader=%+v", got)
+	}
+	receiveCodexVersionTest(t, retryStarted)
+	manager.codexVersions.mu.Lock()
+	untouched := manager.codexVersions.version == (*capturedCached) && manager.codexVersions.nextCheck.Equal(previousDeadline) && manager.codexVersions.inflight != nil
+	manager.codexVersions.mu.Unlock()
+	requireDataCondition(t, !(!untouched || calls.Load() != 2), "leader cancellation installed fallback/backoff or prevented immediate waiter retry")
+	releaseAll()
+	{
+		got := receiveCodexVersionTest(t, result)
+		requireDataTruef(t, !(got.err != nil || got.version != "0.162.0"), "retrying waiter=%+v", got)
+	}
+	{
+		got, err := manager.resolveCodexClientVersion(context.Background(), config.AutoCodexClientVersion, "")
+		reportTestFailure(t, err != nil || got != "0.162.0" || calls.Load() != 2, func() {
+			t.Fatalf("retry result not cached: %q %v calls=%d", got, err, calls.Load())
+		})
+	}
+}
+
+// testResolveCodexClientVersionBodyCancellationAllowsWaiterRetryPhase1 exercises one isolated test phase with the original shared state.
+func testResolveCodexClientVersionBodyCancellationAllowsWaiterRetryPhase1(t *testing.T, capturedCached *string) {
+	var calls atomic.Int64
+	serverStopped, releaseRetry := make(chan struct{}), make(chan struct{})
+	releaseAll := sync.OnceFunc(func() { close(releaseRetry) })
+	t.Cleanup(releaseAll)
+	manager, clock, bodyStarted := newCodexVersionBodyTestManager(t, func(w http.ResponseWriter, r *http.Request) {
+		call := calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		if call == 1 {
+			<-r.Context().Done()
+			close(serverStopped)
+			return
+		}
+		select {
+		case <-releaseRetry:
+			_, _ = io.WriteString(w, `{"tag_name":"rust-v0.162.0"}`)
+		case <-r.Context().Done():
+		}
+	})
+	manager.codexVersions.version = (*capturedCached)
+	if (*capturedCached) != "" {
+		manager.codexVersions.nextCheck = clock.now()
+	}
+	previousDeadline := manager.codexVersions.nextCheck
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	t.Cleanup(cancelLeader)
+	leader := startCodexVersionTestResolve(manager, leaderCtx)
+	firstBodyCtx := receiveCodexVersionTest(t, bodyStarted)
+	waiterCtx, cancelWaiter := context.WithCancel(context.Background())
+	t.Cleanup(cancelWaiter)
+	waiter := &codexVersionTestWaitContext{Context: waiterCtx, waiting: make(chan struct{})}
+	result := startCodexVersionTestResolve(manager, waiter)
+	receiveCodexVersionTest(t, waiter.waiting)
+	cancelLeader()
+	{
+		got := receiveCodexVersionTest(t, leader)
+		requireDataTruef(t, !(!errors.Is(got.err, context.Canceled) || got.version != ""), "leader did not immediately cancel its real body read: %+v", got)
+	}
+	reportTestFailure(t, !errors.Is(firstBodyCtx.Err(), context.Canceled), func() {
+		t.Fatalf("first body context=%v, want parent cancellation", firstBodyCtx.Err())
+	})
+	receiveCodexVersionTest(t, serverStopped)
+	retryBodyCtx := receiveCodexVersionTest(t, bodyStarted)
+	manager.codexVersions.mu.Lock()
+	untouched := manager.codexVersions.version == (*capturedCached) && manager.codexVersions.nextCheck.Equal(previousDeadline) && manager.codexVersions.inflight != nil
+	manager.codexVersions.mu.Unlock()
+	requireDataCondition(t, !(!untouched || calls.Load() != 2 || retryBodyCtx.Err() != nil), "body cancellation polluted the cache or failed to start the live waiter's retry")
+	releaseAll()
+	{
+		got := receiveCodexVersionTest(t, result)
+		requireDataTruef(t, !(got.err != nil || got.version != "0.162.0"), "waiter could not finish reading the retried body: %+v", got)
+	}
+	{
+		got, err := manager.resolveCodexClientVersion(context.Background(), config.AutoCodexClientVersion, "")
+		reportTestFailure(t, err != nil || got != "0.162.0" || calls.Load() != 2, func() {
+			t.Fatalf("retried body result not cached: %q %v calls=%d", got, err, calls.Load())
+		})
+	}
+	requireDataCondition(t, !(!manager.codexVersions.nextCheck.Equal(clock.now().Add(time.Hour))), "successful body retry did not establish the normal cache TTL")
+}
+
+// testFetchLatestCodexClientVersionSelectedProxyAndCredentialBoundaryPhase1 exercises one isolated test phase with the original shared state.
+func testFetchLatestCodexClientVersionSelectedProxyAndCredentialBoundaryPhase1(headers http.Header, capturedT **testing.T) {
+	(*capturedT).Helper()
+	for _, key := range []string{"Authorization", "Cookie", "ChatGPT-Account-Id", "OpenAI-Organization", "OpenAI-Project", "X-Api-Key", "OpenAI-Beta", "Version", "Originator"} {
+		reportTestFailure((*capturedT), headers.Get(key) != "", func() {
+			(*capturedT).Errorf("public release request included user credential/header %s", key)
+		})
+	}
+	reportTestFailure((*capturedT), headers.Get("Accept") != "application/vnd.github+json" || headers.Get("User-Agent") != "pi-gateway-codex-version", func() {
+		(*capturedT).Errorf("incorrect release metadata headers: %v", headers)
+	})
+}
+
+// testFetchLatestCodexClientVersionSelectedProxyAndCredentialBoundaryPhase2 exercises one isolated test phase with the original shared state.
+func testFetchLatestCodexClientVersionSelectedProxyAndCredentialBoundaryPhase2(w http.ResponseWriter, r *http.Request, capturedT **testing.T, capturedProxyCalls *atomic.Int64, capturedAssertPublicHeaders *func(headers http.Header), capturedTargetURL **url.URL, capturedForwardTransport **http.Transport) {
+	(*capturedProxyCalls).Add(1)
+	(*capturedAssertPublicHeaders)(r.Header)
+	reportTestFailure((*capturedT), r.Header.Get("Proxy-Authorization") == "", func() {
+		(*capturedT).Error("selected proxy credentials were not used")
+	})
+	if r.URL.Host != (*capturedTargetURL).Host || r.URL.Scheme != (*capturedTargetURL).Scheme {
+		(*capturedT).Error("proxy received an unexpected destination")
+		w.WriteHeader(http.StatusBadGateway)
+		return
+	}
+	forward := r.Clone(r.Context())
+	forward.RequestURI = ""
+	forward.Header.Del("Proxy-Authorization")
+	resp, err := (*capturedForwardTransport).RoundTrip(forward)
+	if err != nil {
+		(*capturedT).Errorf("local proxy forwarding: %v", err)
+		w.WriteHeader(http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
+}
+
+// testFetchLatestCodexClientVersionSelectedProxyAndCredentialBoundaryPhase3 exercises one isolated test phase with the original shared state.
+func testFetchLatestCodexClientVersionSelectedProxyAndCredentialBoundaryPhase3(r *http.Request, capturedAssertPublicHeaders *func(headers http.Header), capturedTargetURL **url.URL, capturedTransport **http.Transport) (*http.Response, error) {
+	(*capturedAssertPublicHeaders)(r.Header)
+	if r.URL.String() != "https://api.github.com/repos/openai/codex/releases/latest" || r.Header.Get("Proxy-Authorization") != "" {
+		return nil, errors.New("unexpected public release destination or proxy credential leakage")
+	}
+	clone := r.Clone(r.Context())
+	endpoint := *r.URL
+	endpoint.Scheme, endpoint.Host = (*capturedTargetURL).Scheme, (*capturedTargetURL).Host
+	clone.URL, clone.Host = &endpoint, (*capturedTargetURL).Host
+	return (*capturedTransport).RoundTrip(clone)
+}
+
+// testResolveCodexClientVersionFailureLogsAreSanitizedPhase1 exercises one isolated test phase with the original shared state.
+func testResolveCodexClientVersionFailureLogsAreSanitizedPhase1(t *testing.T, capturedProxy string, capturedFailure *string) {
+	var logs bytes.Buffer
+	var calls atomic.Int64
+	manager, _ := newCodexVersionTestManager(t, capturedProxy, func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		switch *capturedFailure {
+		case "transport":
+			return nil, errors.New("raw-transport-error " + capturedProxy + " Authorization=account-secret")
+		case "http":
+			return codexVersionTestResponse(http.StatusServiceUnavailable, "response-body-secret account-secret"), nil
+		case "json":
+			return codexVersionTestResponse(http.StatusOK, "response-body-secret"), nil
+		case "version":
+			return codexVersionTestResponse(http.StatusOK, `{"tag_name":"response-body-secret"}`), nil
+		case "gzip":
+			resp := codexVersionTestResponse(http.StatusOK, "response-body-secret")
+			resp.Header.Set("Content-Encoding", "gzip")
+			return resp, nil
+		case "read":
+			resp := codexVersionTestResponse(http.StatusOK, "")
+			resp.Body = io.NopCloser(codexVersionTestReadError{})
+			return resp, nil
+		default:
+			t.Error("invalid proxy or absent factory unexpectedly reached transport")
+			return nil, errors.New("unexpected transport call")
+		}
+	})
+	manager.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	selectedProxy := capturedProxy
+	if (*capturedFailure) == "invalid_proxy" {
+		selectedProxy = "invalid://proxy-user:proxy-password@proxy.invalid:8080"
+	}
+	if (*capturedFailure) == "missing_factory" {
+		manager.factory = nil
+	}
+	got, err := manager.resolveCodexClientVersion(context.Background(), config.AutoCodexClientVersion, selectedProxy)
+	requireDataTruef(t, !(err != nil || got != config.DefaultCodexClientVersion), "fallback=%q err=%v", got, err)
+	reportTestFailure(t, !strings.Contains(logs.String(), "Codex client version lookup failed") || !strings.Contains(logs.String(), "reason="), func() {
+		t.Fatalf("missing classified failure log: %s", logs.String())
+	})
+	for _, secret := range []string{"proxy-password", "proxy-user", "proxy.invalid", "response-body-secret", "account-secret", "raw-transport-error", "raw-read-error"} {
+		reportTestFailure(t, strings.Contains(logs.String(), secret), func() {
+			t.Fatalf("failure log leaked %q: %s", secret, logs.String())
+		})
+	}
+	wantCalls := int64(1)
+	if (*capturedFailure) == "invalid_proxy" || (*capturedFailure) == "missing_factory" {
+		wantCalls = 0
+	}
+	reportTestFailure(t, calls.Load() != wantCalls, func() {
+		t.Fatalf("calls=%d, want %d", calls.Load(), wantCalls)
+	})
 }

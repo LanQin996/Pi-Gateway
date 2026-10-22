@@ -1,4 +1,4 @@
-import type {JsonValue, Rule, RuleCondition, RuleField, RuleFieldError, ValueExpr} from '../api/rules'
+import type {JsonValue, Rule, RuleCondition, RuleField, RuleFieldError} from '../api/rules'
 import {defaultForField, ruleSchema} from './ruleSchema'
 import {graphSignature, restoreGraphLayout, type RuleGraph, ruleToGraph} from './ruleGraph'
 
@@ -81,37 +81,10 @@ export function safeParseJSON(text: string): JsonValue {
             return
         }
         if (c === '{' || c === '[') {
-            const object = c === '{', close = object ? '}' : ']'
-            const seen = new Set<string>()
-            offset++;
-            whitespace()
-            if (text[offset] === close) {
-                offset++;
-                return
-            }
-            let index = 0
-            for (; ;) {
-                whitespace()
-                let child = atPath(path, index++)
-                if (object) {
-                    if (text[offset] !== '"') fail('Expected object key', path)
-                    const key = string(path);
-                    child = atPath(path, key)
-                    if (seen.has(key)) fail('Duplicate object key', child)
-                    seen.add(key);
-                    whitespace()
-                    if (text[offset++] !== ':') fail('Expected colon', child)
-                }
-                value(child, depth + 1);
-                whitespace()
-                if (text[offset] === close) {
-                    offset++;
-                    return
-                }
-                if (text[offset++] !== ',') fail('Expected comma or closing delimiter', path)
-            }
+            container(path, depth, c)
+            return
         }
-        const number = text.slice(offset).match(/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/)
+        const number = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/.exec(text.slice(offset))
         if (number) {
             const parsed = Number(number[0])
             if (!Number.isFinite(parsed) || Number.isInteger(parsed) && !Number.isSafeInteger(parsed)) fail('Number must be finite; integers must be safe', path)
@@ -123,6 +96,41 @@ export function safeParseJSON(text: string): JsonValue {
             return
         }
         fail('Expected JSON value', path)
+    }
+
+    function container(path: string, depth: number, c: string): void {
+        const object = c === '{', close = object ? '}' : ']'
+        const seen = new Set<string>()
+        offset++;
+        whitespace()
+        if (text[offset] === close) {
+            offset++;
+            return
+        }
+        let index = 0
+        for (; ;) {
+            whitespace()
+            let child = atPath(path, index++)
+            if (object) child = objectKey(path, seen)
+            value(child, depth + 1);
+            whitespace()
+            if (text[offset] === close) {
+                offset++;
+                return
+            }
+            if (text[offset++] !== ',') fail('Expected comma or closing delimiter', path)
+        }
+    }
+
+    function objectKey(path: string, seen: Set<string>): string {
+        if (text[offset] !== '"') fail('Expected object key', path)
+        const key = string(path);
+        const child = atPath(path, key)
+        if (seen.has(key)) fail('Duplicate object key', child)
+        seen.add(key);
+        whitespace()
+        if (text[offset++] !== ':') fail('Expected colon', child)
+        return child
     }
 
     value('', 0);
@@ -173,23 +181,27 @@ export function validateRule(value: unknown, schema = ruleSchema): RuleFieldErro
         json(v, path)
         if (!object(v)) return
         if (Object.hasOwn(v, '$expr')) {
-            if(Object.keys(v).length!==1 || !object(v.$expr)){error(path,'$expr must be the only key and contain an object');return}
-            keys(v.$expr,['op','args'],`${path}/$expr`)
-            if(typeof v.$expr.op!=='string' || !Array.isArray(v.$expr.args)){error(path,'Expression requires op and args');return}
-            v.$expr.args.forEach((arg,i)=>expression(arg,`${path}/$expr/args/${i}`))
+            if (Object.keys(v).length !== 1 || !object(v.$expr)) {error(path, '$expr must be the only key and contain an object'); return }
+            keys(v.$expr, ['op', 'args'], `${path}/$expr`)
+            if (typeof v.$expr.op !== 'string' || !Array.isArray(v.$expr.args)) {error(path, 'Expression requires op and args'); return }
+            v.$expr.args.forEach((arg, i) => expression(arg, `${path}/$expr/args/${i}`))
         } else if (Object.hasOwn(v, '$ref')) {
             if (Object.keys(v).length !== 1 || !object(v.$ref)) {
                 error(path, '$ref must be the only key and contain an object');
                 return
             }
-            keys(v.$ref, ['source', 'path', 'encoding'], `${path}/$ref`)
-            if (v.$ref.source !== undefined && !schema.sources.includes(v.$ref.source as never)) error(`${path}/$ref/source`, 'Unknown source')
-            if (v.$ref.path !== undefined) pointer(v.$ref.path, `${path}/$ref/path`)
-            if (v.$ref.encoding !== undefined && !schema.encodings.includes(v.$ref.encoding as never)) error(`${path}/$ref/encoding`, 'Unknown encoding')
+            referenceExpression(v.$ref, path)
         } else if (Object.hasOwn(v, '$literal')) {
             if (Object.keys(v).length !== 1) error(path, '$literal must be the only key')
             else json(v.$literal, `${path}/$literal`)
         }
+    }
+
+    function referenceExpression(reference: Record<string, unknown>, path: string) {
+        keys(reference, ['source', 'path', 'encoding'], `${path}/$ref`)
+        if (reference.source !== undefined && !schema.sources.includes(reference.source as never)) error(`${path}/$ref/source`, 'Unknown source')
+        if (reference.path !== undefined) pointer(reference.path, `${path}/$ref/path`)
+        if (reference.encoding !== undefined && !schema.encodings.includes(reference.encoding as never)) error(`${path}/$ref/encoding`, 'Unknown encoding')
     }
 
     function field(v: unknown, f: RuleField, path: string) {
@@ -197,20 +209,39 @@ export function validateRule(value: unknown, schema = ruleSchema): RuleFieldErro
             if (f.required) error(path, 'Required field');
             return
         }
-        if (f.enum && !f.enum.includes(String(v))) error(path, 'Unknown option')
+        if (f.enum && (typeof v !== 'string' || !f.enum.includes(v))) error(path, 'Unknown option')
         if (f.non_empty && (typeof v !== 'string' || !v.trim())) error(path, 'Must not be empty')
-        if (f.type === 'value') expression(v, path)
-        else if (f.type === 'values') {
-            if (!Array.isArray(v)) error(path, 'Expected array'); else v.forEach((x, i) => expression(x, atPath(path, i)))
-        } else if (f.type === 'condition') condition(v, path)
-        else if (f.type === 'action_array') { actions(v,path) }
-        else if (f.type === 'strings') {
-            if (!Array.isArray(v) || v.some(x => typeof x !== 'string')) error(path, 'Expected string array');
-            if (f.name === 'paths' && Array.isArray(v)) v.forEach((x, i) => pointer(x, atPath(path, i)))
-        } else if (f.type === 'number') {
-            if (typeof v !== 'number' || !Number.isSafeInteger(v) || f.min !== undefined && v < f.min || f.max !== undefined && v > f.max) error(path, `Expected safe integer${f.min === undefined ? '' : ` ≥ ${f.min}`}${f.max === undefined ? '' : ` ≤ ${f.max}`}`)
-        } else if (f.type === 'boolean' ? typeof v !== 'boolean' : typeof v !== 'string') error(path, `Expected ${f.type}`)
+        fieldType(v, f, path)
         if (['path', 'source_path', 'target_path'].includes(f.name)) pointer(v, path)
+    }
+
+    function numberField(v: unknown, f: RuleField, path: string) {
+        const bounds = [f.min === undefined ? '' : ' ≥ ' + f.min, f.max === undefined ? '' : ' ≤ ' + f.max].join('')
+        if (typeof v !== 'number' || !Number.isSafeInteger(v) || f.min !== undefined && v < f.min || f.max !== undefined && v > f.max) error(path, 'Expected safe integer' + bounds)
+    }
+
+    function stringsField(v: unknown, f: RuleField, path: string) {
+        if (!Array.isArray(v) || v.some(x => typeof x !== 'string')) error(path, 'Expected string array')
+        if (f.name === 'paths' && Array.isArray(v)) v.forEach((x, i) => pointer(x, atPath(path, i)))
+    }
+
+    function fieldType(v: unknown, f: RuleField, path: string) {
+        switch (f.type) {
+            case 'value': expression(v, path); break
+            case 'values':
+                if (!Array.isArray(v)) error(path, 'Expected array')
+                else v.forEach((x, i) => expression(x, atPath(path, i)))
+                break
+            case 'condition': condition(v, path); break
+            case 'action_array': actions(v, path); break
+            case 'strings': stringsField(v, f, path); break
+            case 'number': numberField(v, f, path); break
+            case 'boolean':
+                if (typeof v !== 'boolean') error(path, 'Expected boolean')
+                break
+            default:
+                if (typeof v !== 'string') error(path, `Expected ${f.type}`)
+        }
     }
 
     function condition(v: unknown, path: string) {
@@ -237,41 +268,43 @@ export function validateRule(value: unknown, schema = ruleSchema): RuleFieldErro
     keys(value, [...schema.rule_fields.map(f => f.name), 'id', 'revision', 'order_index', 'created_at', 'updated_at', 'legacy_name', 'source'], '')
     if (![1, schema.schema_version].includes(Number(value.schema_version))) error('/schema_version', 'Unsupported schema version')
     for (const f of schema.rule_fields) if (f.name !== 'actions') field(value[f.name], f, atPath('', f.name))
-    const phase=value.phase
-    function actions(list: unknown,base: string) {
-    if (!Array.isArray(list)) error(base, 'Expected ordered action array')
-    else {
-        const ids = new Set<string>()
-        list.forEach((a, i) => {
-            const path = `${base}/${i}`
-            if (!object(a)) {
-                error(path, 'Expected action');
-                return
-            }
-            keys(a, ['id', 'type', 'params'], path)
-            if (typeof a.id !== 'string' || !a.id || ids.has(a.id)) error(`${path}/id`, 'Action ID must be non-empty and unique')
-            else ids.add(a.id)
-            const cap = schema.actions.find(c => c.id === a.type)
-            if (!cap) {
-                error(`${path}/type`, 'Unknown action type');
-                return
-            }
-            if (!cap.phases?.includes(phase as never)) error(`${path}/type`, 'Action not supported in this phase')
-            if (!object(a.params)) {
-                error(`${path}/params`, 'Expected parameter object');
-                return
-            }
-            keys(a.params, cap.fields.map(f => f.name), `${path}/params`)
-            cap.fields.forEach(f => field((a.params as Record<string, unknown>)[f.name], f, `${path}/params/${f.name}`))
-        })
+    const phase = value.phase
+    function actions(list: unknown, base: string) {
+        if (!Array.isArray(list)) error(base, 'Expected ordered action array')
+        else {
+            const ids = new Set<string>()
+            list.forEach((a, i) => {
+                const path = `${base}/${i}`
+                if (!object(a)) {
+                    error(path, 'Expected action');
+                    return
+                }
+                keys(a, ['id', 'type', 'params'], path)
+                if (typeof a.id !== 'string' || !a.id || ids.has(a.id)) error(`${path}/id`, 'Action ID must be non-empty and unique')
+                else ids.add(a.id)
+                const cap = schema.actions.find(c => c.id === a.type)
+                if (!cap) {
+                    error(`${path}/type`, 'Unknown action type');
+                    return
+                }
+                if (!cap.phases?.includes(phase as never)) error(`${path}/type`, 'Action not supported in this phase')
+                if (!object(a.params)) {
+                    error(`${path}/params`, 'Expected parameter object');
+                    return
+                }
+                keys(a.params, cap.fields.map(f => f.name), `${path}/params`)
+                cap.fields.forEach(f => field((a.params as Record<string, unknown>)[f.name], f, `${path}/params/${f.name}`))
+            })
+        }
     }
-    }
-    actions(value.actions,"/actions")
+    actions(value.actions, "/actions")
     return errors
 }
 
 export function conditionSummary(c: RuleCondition): string {
-    return ['all', 'any', 'not'].includes(c.op) ? `${c.op}(${c.conditions?.map(conditionSummary).join(', ') ?? ''})` : `${c.op}${c.source ? ` ${c.source}${c.path ?? ''}` : ''}`
+    if (['all', 'any', 'not'].includes(c.op)) return `${c.op}(${c.conditions?.map(conditionSummary).join(', ') ?? ''})`
+    const suffix = c.source ? ` ${c.source}${c.path ?? ''}` : ''
+    return c.op + suffix
 }
 
 export function defaultCondition(op: string, schema = ruleSchema): RuleCondition {
@@ -287,13 +320,13 @@ export function setObjectProperty(value: JsonValue, oldKey: string | null, newKe
 }
 
 export function moveItem<T>(items: T[], index: number, delta: number): T[] {
-    const next = [...items];
     const target = index + delta;
-    if (target < 0 || target >= next.length) return next;
+    if (target < 0 || target >= items.length) return [...items];
+    const next = [...items];
     [next[index], next[target]] = [next[target]!, next[index]!];
     return next
 }
 
-export function expressionLiteral(value: JsonValue): ValueExpr {
+export function expressionLiteral(value: JsonValue): JsonValue {
     return value && typeof value === 'object' && !Array.isArray(value) && ('$ref' in value || '$literal' in value || '$expr' in value) ? {$literal: value} : value
 }

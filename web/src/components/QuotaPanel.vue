@@ -49,14 +49,14 @@ function costFor(window: QuotaWindow) {
 }
 
 function barTone(window: QuotaWindow): string {
-	if (window.limit_reached || window.used_percent >= 100) return 'bg-cp-error'
-	if (window.used_percent >= 80) return 'bg-cp-warning'
-	return 'bg-cp-success'
+	if (window.limit_reached || window.used_percent >= 100) { return 'var(--color-danger)' }
+	if (window.used_percent >= 80) { return 'var(--color-warn)' }
+	return 'var(--color-success)'
 }
 
 function labelFor(window: QuotaWindow): string {
-	if (window.kind === '5h') return '5h'
-	if (window.kind === '7d') return '7d'
+	if (window.kind === '5h') { return '5h' }
+	if (window.kind === '7d') { return '7d' }
 	if (window.window_seconds > 0) {
 		const hours = window.window_seconds / 3600
 		return hours >= 48 ? `${Math.round(hours / 24)}d` : `${Math.round(hours)}h`
@@ -70,12 +70,12 @@ function usedLabel(window: QuotaWindow): string {
 }
 
 function resetLabel(window: QuotaWindow): string {
-	if (!window.reset_at) return ''
+	if (!window.reset_at) { return '' }
 	return t('quota.resetsIn', { when: formatUntil(window.reset_at - Date.now()) })
 }
 
 function confirmConsume() {
-	if (!confirm(t('quota.useResetConfirm', { name: props.accountName }))) return
+	if (!confirm(t('quota.useResetConfirm', { name: props.accountName }))) { return }
 	emit('consume', '')
 }
 </script>
@@ -146,9 +146,8 @@ function confirmConsume() {
 						</span>
 					</span>
 				</div>
-				<div class="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-cp-border-secondary" role="progressbar" :aria-label="labelFor(window)" :aria-valuenow="Math.min(100, Math.max(0, window.used_percent))" :aria-valuetext="usedLabel(window)" :aria-valuemin="0" :aria-valuemax="100">
-					<div class="h-full rounded-full transition-[width,background-color] duration-200 motion-reduce:transition-none" :class="barTone(window)" :style="{ width: `${Math.min(100, Math.max(0, window.used_percent))}%` }" />
-				</div>
+                <progress class="quota-progress mt-2 h-1.5 w-full" :value="Math.min(100, Math.max(0, window.used_percent))" :max="100" :aria-label="labelFor(window)" :aria-valuetext="usedLabel(window)" :style="{'--quota-progress-color': barTone(window)}" />
+
 				<div v-if="window.reset_at" class="mt-0.5 text-[10px] text-[color:var(--color-ink-faint)]">
 					{{ t('quota.resetsAt', { time: formatTime(window.reset_at) }) }}
 				</div>
@@ -224,3 +223,10 @@ function confirmConsume() {
 		</ul>
 	</div>
 </template>
+
+<style scoped>
+.quota-progress { display: block; appearance: none; border: 0; border-radius: 999px; overflow: hidden; background: var(--color-line); accent-color: var(--quota-progress-color); }
+.quota-progress::-webkit-progress-bar { background: var(--color-line); border-radius: inherit; }
+.quota-progress::-webkit-progress-value { background: var(--quota-progress-color); border-radius: inherit; }
+.quota-progress::-moz-progress-bar { background: var(--quota-progress-color); border-radius: inherit; }
+</style>

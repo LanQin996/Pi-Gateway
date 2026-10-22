@@ -37,12 +37,12 @@ async function load() {
     loading.value = true
     try {
         const result = await api.officialUsage(start.value, end.value, selected.value ? Number(selected.value) : undefined)
-        if (run === generation) data.value = result
-    } catch (err) { if (run === generation) error.value = err instanceof Error ? err.message : String(err) }
-    finally { if (run === generation) loading.value = false }
+        if (run === generation) { data.value = result }
+    } catch (err) { if (run === generation) { error.value = err instanceof Error ? err.message : String(err) } }
+    finally { if (run === generation) { loading.value = false } }
 }
 function changePreset() {
-    if (preset.value === 'custom') return
+    if (preset.value === 'custom') { return }
     const now = new Date()
     end.value = utcDate(now)
     start.value = utcDate(new Date(now.getTime() - (Number(preset.value) - 1) * 86400000))
@@ -51,14 +51,15 @@ function changePreset() {
 async function refresh() {
     syncing.value = true
     const failures: string[] = []
-    for (const a of targets.value) {
+    // Keep upstream refreshes sequential to avoid creating a burst of vendor requests.
+    await targets.value.reduce((previous, account) => previous.then(async () => {
         try {
-            const result = await api.refreshOfficialUsage(a.id)
-            if (result.error) failures.push(`${a.name}: ${result.error}`)
-        } catch (err) { failures.push(`${a.name}: ${err instanceof Error ? err.message : String(err)}`) }
-    }
+            const result = await api.refreshOfficialUsage(account.id)
+            if (result.error) { failures.push(`${account.name}: ${result.error}`) }
+        } catch (err) { failures.push(`${account.name}: ${err instanceof Error ? err.message : String(err)}`) }
+    }), Promise.resolve())
     await load()
-    if (failures.length) error.value = failures.join('; ')
+    if (failures.length) { error.value = failures.join('; ') }
     syncing.value = false
 }
 watch(() => props.accountId, id => { selected.value = id ? String(id) : ''; void load() })
@@ -74,12 +75,12 @@ onBeforeUnmount(() => { generation++ })
             <div class="official-controls">
                 <select v-if="!accountId" v-model="selected" class="input" :disabled="loading || syncing" :aria-label="zh ? '官方统计账号' : 'Official usage account'" @change="load"><option value="">{{ zh ? '全部已绑定账号' : 'All linked accounts' }}</option><option v-for="a in eligible" :key="a.id" :value="String(a.id)">{{ a.name }}</option></select>
                 <select v-model="preset" class="input" :disabled="loading || syncing" :aria-label="zh ? '官方统计期间' : 'Official usage period'" @change="changePreset"><option value="1">{{ zh ? '今日' : 'Today' }}</option><option value="7">{{ zh ? '近 7 天' : 'Last 7 days' }}</option><option value="30">{{ zh ? '近 30 天' : 'Last 30 days' }}</option><option value="84">{{ zh ? '近 84 天' : 'Last 84 days' }}</option><option value="custom">{{ zh ? '自定义' : 'Custom' }}</option></select>
-                <button class="btn btn-ghost" :disabled="loading || syncing || !targets.length" @click="refresh"><RefreshCw :size="14" :class="syncing ? 'animate-spin' : ''" />{{ zh ? (syncing ? '同步中' : '同步官方数据') : (syncing ? 'Syncing' : 'Sync official data') }}</button>
+                <button type="button" class="btn btn-ghost" :disabled="loading || syncing || !targets.length" @click="refresh"><RefreshCw :size="14" :class="syncing ? 'animate-spin' : ''" />{{ (() => { if (zh) { if (syncing) { return '同步中'; } return '同步官方数据'; } if (syncing) { return 'Syncing'; } return 'Sync official data'; })() }}</button>
             </div>
         </header>
-        <form v-if="preset === 'custom'" class="official-controls custom-dates" @submit.prevent="load"><label>{{ zh ? '开始日期' : 'Start date' }}<input v-model="start" class="input" type="date" required :max="end" :disabled="loading || syncing" /></label><label>{{ zh ? '结束日期' : 'End date' }}<input v-model="end" class="input" type="date" required :min="start" :max="utcDate(new Date())" :disabled="loading || syncing" /></label><button class="btn" :disabled="loading || syncing">{{ zh ? '应用' : 'Apply' }}</button></form>
+        <form v-if="preset === 'custom'" class="official-controls custom-dates" @submit.prevent="load"><label>{{ zh ? '开始日期' : 'Start date' }}<input v-model="start" class="input" type="date" required :max="end" :disabled="loading || syncing" /></label><label>{{ zh ? '结束日期' : 'End date' }}<input v-model="end" class="input" type="date" required :min="start" :max="utcDate(new Date())" :disabled="loading || syncing" /></label><button type="submit" class="btn" :disabled="loading || syncing">{{ zh ? '应用' : 'Apply' }}</button></form>
         <p v-if="error" role="alert" class="notice notice-error">{{ error }}</p>
-        <p v-for="(message, index) in syncErrors" :key="index" role="status" class="official-warning">{{ message }}</p>
+        <output v-for="(message, index) in syncErrors" :key="index"  class="official-warning">{{ message }}</output>
         <div class="official-summary">
             <div><span>{{ zh ? '期间 Credits' : 'Period credits' }}</span><strong>{{ metric(data?.total_credits, 4) }}</strong></div>
             <div><span>{{ zh ? '等价美元' : 'Equivalent USD' }}</span><strong>{{ money(data?.equivalent_usd) }}</strong></div>
@@ -89,8 +90,8 @@ onBeforeUnmount(() => { generation++ })
         <p class="official-note">{{ start }} — {{ end }} · {{ zh ? 'UTC 日汇总；今日可能延迟。美元按 25 credits/$ 折算为等价金额，实际付款依套餐而定。首次回补近 84 天，此后每小时更新近 7 天，历史快照保留。' : 'UTC daily totals; today may lag. USD is a reference conversion at 25 credits/$; actual payment depends on your plan. Initially backfills 84 days, then updates the last 7 days hourly and retains history.' }}</p>
         <p v-if="data?.missing_credit_days" class="official-warning">{{ zh ? `${data.missing_credit_days} 条记录缺少 Credits，合计为已知部分。` : `${data.missing_credit_days} records lack credits; totals are partial.` }}</p>
         <p v-if="data?.sync.some(s => !s.synced_at)" class="official-warning">{{ zh ? '部分账号尚未成功同步，期间合计可能不完整。' : 'Some accounts have not synced successfully; period totals may be incomplete.' }}</p>
-        <div class="official-scroll"><table v-if="data?.items.length" class="official-table"><thead><tr><th>{{ zh ? '日期（UTC）' : 'Date (UTC)' }}</th><th>{{ zh ? '账号' : 'Account' }}</th><th>Credits</th><th>{{ zh ? '等价美元' : 'Equivalent USD' }}</th><th>{{ zh ? '输入' : 'Input' }}</th><th>{{ zh ? '缓存输入' : 'Cached input' }}</th><th>{{ zh ? '输出' : 'Output' }}</th><th>{{ zh ? '状态' : 'Status' }}</th></tr></thead><tbody><tr v-for="d in data.items" :key="`${d.account_id}:${d.day}`"><td>{{ d.day }}</td><td>{{ accountName(d.account_id) }}</td><td>{{ metric(d.credits, 4) }}</td><td>{{ money(d.credits == null ? null : d.credits / data.credits_per_usd) }}</td><td>{{ metric(d.uncached_input_tokens) }}</td><td>{{ metric(d.cached_input_tokens) }}</td><td>{{ metric(d.output_tokens) }}</td><td>{{ zh ? (d.settled ? '已结算' : '待结算') : (d.settled ? 'Settled' : 'Pending') }}</td></tr></tbody></table></div>
-        <p v-if="!data?.items.length" class="official-note">{{ loading ? (zh ? '正在读取…' : 'Loading…') : !eligible.length ? (zh ? '绑定 Codex 凭证后可同步官方消耗。' : 'Link a Codex credential to sync official usage.') : (zh ? '该期间暂无官方记录。官方未返回的数据不记为零消耗。' : 'No official records for this period. Unavailable data is not treated as zero usage.') }}</p>
+        <div class="official-scroll"><table v-if="data?.items.length" class="official-table"><thead><tr><th>{{ zh ? '日期（UTC）' : 'Date (UTC)' }}</th><th>{{ zh ? '账号' : 'Account' }}</th><th>Credits</th><th>{{ zh ? '等价美元' : 'Equivalent USD' }}</th><th>{{ zh ? '输入' : 'Input' }}</th><th>{{ zh ? '缓存输入' : 'Cached input' }}</th><th>{{ zh ? '输出' : 'Output' }}</th><th>{{ zh ? '状态' : 'Status' }}</th></tr></thead><tbody><tr v-for="d in data.items" :key="`${d.account_id}:${d.day}`"><td>{{ d.day }}</td><td>{{ accountName(d.account_id) }}</td><td>{{ metric(d.credits, 4) }}</td><td>{{ money(d.credits == null ? null : d.credits / data.credits_per_usd) }}</td><td>{{ metric(d.uncached_input_tokens) }}</td><td>{{ metric(d.cached_input_tokens) }}</td><td>{{ metric(d.output_tokens) }}</td><td>{{ (() => { if (zh) { if (d.settled) { return '已结算'; } return '待结算'; } if (d.settled) { return 'Settled'; } return 'Pending'; })() }}</td></tr></tbody></table></div>
+        <p v-if="!data?.items.length" class="official-note">{{ (() => { if (loading) { if (zh) { return '正在读取…'; } return 'Loading…'; } if (!eligible.length) { if (zh) { return '绑定 Codex 凭证后可同步官方消耗。'; } return 'Link a Codex credential to sync official usage.'; } if (zh) { return '该期间暂无官方记录。官方未返回的数据不记为零消耗。'; } return 'No official records for this period. Unavailable data is not treated as zero usage.'; })() }}</p>
         <p v-if="updated" class="official-note">{{ zh ? '最近完整同步' : 'Last complete sync' }} · {{ formatDateTime(updated) }}</p>
     </section>
 </template>

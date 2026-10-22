@@ -24,28 +24,7 @@ func Compile(definitions []Rule) (*Engine, error) {
 			return nil, invalid(path+"/id", "duplicate rule ID %q", r.ID)
 		}
 		ids[r.ID] = true
-		if r.OnError == "" {
-			r.OnError = OnErrorAbort
-		}
-		r.Actions = append([]Action{}, r.Actions...)
-		for j := range r.Actions {
-			if r.Actions[j].Params == nil {
-				r.Actions[j].Params = map[string]any{}
-			}
-		}
-		// A JSON round trip detaches recursively aliased slices/maps and retains explicit null.
-		raw, err := json.Marshal(r)
-		if err != nil {
-			return nil, invalid(path, "invalid JSON rule: %v", err)
-		}
-		if len(raw) > MaxRuleBytes {
-			return nil, invalid(path, "rule exceeds %d bytes", MaxRuleBytes)
-		}
-		copy, err := ParseRule(raw)
-		if err != nil {
-			return nil, prefixError(path, err)
-		}
-		cr, err := compileRule(copy, path)
+		cr, err := compileDetachedRule(r, path)
 		if err != nil {
 			return nil, err
 		}
@@ -64,6 +43,36 @@ func Compile(definitions []Rule) (*Engine, error) {
 		})
 	}
 	return e, nil
+}
+
+func compileDetachedRule(r Rule, path string) (compiledRule, error) {
+	if r.OnError == "" {
+		r.OnError = OnErrorAbort
+	}
+	r.Actions = append([]Action{}, r.Actions...)
+	for j := range r.Actions {
+		if r.Actions[j].Params == nil {
+			r.Actions[j].Params = map[string]any{}
+		}
+	}
+	// A JSON round trip detaches recursively aliased slices/maps and retains explicit null.
+	raw, err := json.Marshal(r)
+	if err != nil {
+		return compiledRule{}, invalid(path, "invalid JSON rule: %v", err)
+	}
+	if len(raw) > MaxRuleBytes {
+		return compiledRule{}, invalid(path, "rule exceeds %d bytes", MaxRuleBytes)
+	}
+	parsedRule, err := ParseRule(raw)
+	if err != nil {
+		return compiledRule{}, prefixError(path, err)
+	}
+	cr, err := compileRule(parsedRule, path)
+	if err != nil {
+		return compiledRule{}, err
+	}
+
+	return cr, nil
 }
 
 // HasPhase reports whether an enabled rule exists in this phase (including no-op rules).
@@ -97,243 +106,262 @@ func (e *Engine) Apply(ctx context.Context, phase string, in *Input) (Result, er
 	if !e.HasPhase(phase) {
 		return Result{Body: in.Body, Model: in.Model}, nil
 	}
+	s, err := newPhaseEvaluation(phase, in)
+	if err != nil {
+		return Result{}, err
+	}
+	run := phaseExecution{input: in, phase: phase, state: s, collector: newTraceCollector(in), baseline: protectedProjection(s.body, phase), result: Result{Body: s.body, Model: s.model}}
+	for _, rule := range e.phases[phase] {
+		if err := ctx.Err(); err != nil {
+			return run.finish(err)
+		}
+		if !rule.raw.Enabled {
+			continue
+		}
+		stop, err := run.applyRule(ctx, rule)
+		if err != nil || stop {
+			return run.finish(err)
+		}
+	}
+	return run.finish(nil)
+}
+
+type phaseExecution struct {
+	input     *Input
+	phase     string
+	state     *evaluation
+	collector *traceCollector
+	baseline  map[string]any
+	result    Result
+}
+
+func newPhaseEvaluation(phase string, in *Input) (*evaluation, error) {
 	body, err := cloneJSON(in.Body)
 	if err != nil {
-		return Result{}, invalid("/body", "%v", err)
+		return nil, invalid("/body", "%v", err)
 	}
 	if err = ensurePayload(body); err != nil {
-		return Result{}, invalid("/body", "%v", err)
+		return nil, invalid("/body", "%v", err)
 	}
 	client, err := cloneJSON(in.ClientBody)
 	if err != nil {
-		return Result{}, invalid("/client_body", "%v", err)
+		return nil, invalid("/client_body", "%v", err)
 	}
 	facts := map[string]any{}
 	if in.Context != nil {
 		c, err := cloneJSON(in.Context)
 		if err != nil {
-			return Result{}, invalid("/context", "%v", err)
+			return nil, invalid("/context", "%v", err)
 		}
 		facts = c.(map[string]any)
 	}
 	steps := 0
 	original, _ := cloneJSON(body)
-	s := evaluation{original: original, vars: map[string]any{}, steps: &steps, ctx: ctx, body: body, client: client, facts: facts, model: in.Model, originalModel: in.Model, eventType: in.EventType, phase: phase, conditions: newConditionCollector(in), unavailable: in.Unavailable}
+	s := &evaluation{original: original, vars: map[string]any{}, steps: &steps, body: body, client: client, facts: facts, model: in.Model, originalModel: in.Model, eventType: in.EventType, phase: phase, conditions: newConditionCollector(in), unavailable: in.Unavailable}
 	if phase == PhaseRequest {
-		if _, ok := object(body); !ok {
-			return Result{}, invalid("/body", "request body must be an object")
-		}
-		if m, ok := objGet(body, "model"); ok {
-			model, ok := m.(string)
-			if !ok || strings.TrimSpace(model) == "" {
-				return Result{}, invalid("/body/model", "model must be a nonempty string")
-			}
-			if in.Model != "" && in.Model != model {
-				return Result{}, invalid("/model", "does not match body model")
-			}
-			s.model = model
-			s.originalModel = model
+		if err := s.validateRequestModel(in.Model); err != nil {
+			return nil, err
 		}
 	}
 	if original, ok := facts["original_model"].(string); ok {
 		s.originalModel = original
 	}
 	if phase == PhaseResponseEvent {
-		if _, ok := object(body); !ok {
-			return Result{}, invalid("/body", "response event must be an object")
-		}
-		if t, ok := objGet(body, "type"); ok {
-			str, ok := t.(string)
-			if !ok {
-				return Result{}, invalid("/body/type", "event type must be a string")
-			}
-			if s.eventType == "" {
-				s.eventType = str
-			} else if s.eventType != str {
-				return Result{}, invalid("/event_type", "does not match body type")
-			}
+		if err := s.validateResponseEvent(); err != nil {
+			return nil, err
 		}
 	}
-	res := Result{Body: s.body, Model: s.model}
-	collector := newTraceCollector(in)
-	baseline := protectedProjection(body, phase)
-	finish := func(err error) (Result, error) {
-		res.Body = s.body
-		res.Model = s.model
-		res.Changed = !jsonEqual(in.Body, s.body) || in.Model != s.model
-		res.Traces = collector.traces
-		res.TraceOmitted = collector.omitted
-		if s.conditions != nil {
-			res.ConditionTraces = s.conditions.traces
-			res.ConditionTraceOmitted = s.conditions.omitted
-		}
-		return res, err
+
+	return s, nil
+}
+
+func (run *phaseExecution) finish(err error) (Result, error) {
+	s, res := run.state, &run.result
+	res.Body, res.Model = s.body, s.model
+	res.Changed = !jsonEqual(run.input.Body, s.body) || run.input.Model != s.model
+	res.Traces, res.TraceOmitted = run.collector.traces, run.collector.omitted
+	if s.conditions != nil {
+		res.ConditionTraces, res.ConditionTraceOmitted = s.conditions.traces, s.conditions.omitted
 	}
-	if e == nil {
-		return finish(nil)
+	return *res, err
+}
+
+func (run *phaseExecution) applyRule(ctx context.Context, r compiledRule) (bool, error) {
+	s := run.state
+	s.vars = map[string]any{}
+	s.ruleID, s.rulePath = r.raw.ID, r.path
+	start := time.Now()
+	matched, matchErr := r.when.matches(ctx, s)
+	if matchErr != nil {
+		return false, run.matchFailure(ctx, r, start, matchErr)
 	}
-	for _, r := range e.phases[phase] {
-		if err := ctx.Err(); err != nil {
-			return finish(err)
+	if !matched {
+		run.recordRuleTrace(r, start, false, "not_matched")
+		return false, nil
+	}
+	if len(r.actions) == 0 {
+		run.recordRuleTrace(r, start, true, "no_change")
+		return r.raw.StopAfterMatch, nil
+	}
+	candidate := *s
+	candidate.vars = map[string]any{}
+	var err error
+	candidate.body, err = cloneJSON(s.body)
+	if err != nil {
+		return false, err
+	}
+	pending := newTraceCollector(run.input)
+	pending.maxBytes, pending.maxTraces = run.collector.remainingBytes(), run.collector.remainingCount()
+	pending.enabled = run.collector.enabled
+	candidate.nestedTraces, candidate.traceRule = pending, &r
+	execution := ruleExecution{phase: run, rule: r, candidate: &candidate, pending: pending}
+	if err := execution.actions(ctx); err != nil {
+		return false, err
+	}
+	if execution.actionErr != nil {
+		return false, execution.rollback(ctx)
+	}
+	run.state = &candidate
+	run.collector.merge(pending)
+	if execution.outcome.blocked {
+		run.result.Blocked, run.result.Status, run.result.Reason = true, execution.outcome.status, execution.outcome.reason
+		return true, nil
+	}
+	if execution.outcome.dropped {
+		run.result.Dropped = true
+		return true, nil
+	}
+	return r.raw.StopAfterMatch, nil
+}
+
+func (run *phaseExecution) recordRuleTrace(rule compiledRule, start time.Time, matched bool, status string) {
+	trace := baseTrace(rule, run.state)
+	trace.Matched, trace.Status, trace.DurationNS = matched, status, time.Since(start).Nanoseconds()
+	run.collector.add(trace)
+}
+
+func (run *phaseExecution) matchFailure(ctx context.Context, rule compiledRule, start time.Time, err error) error {
+	trace := baseTrace(rule, run.state)
+	trace.Status, trace.Error, trace.DurationNS = "error", err.Error(), time.Since(start).Nanoseconds()
+	run.collector.add(trace)
+	var missing *MissingInputError
+	if errors.As(err, &missing) {
+		return err
+	}
+	if ctx.Err() != nil || rule.raw.OnError != OnErrorSkipRule {
+		return prefixError(rule.path+"/when", err)
+	}
+	return nil
+}
+
+type ruleExecution struct {
+	phase     *phaseExecution
+	rule      compiledRule
+	candidate *evaluation
+	pending   *traceCollector
+	actionErr error
+	errorPath string
+	outcome   terminal
+}
+
+func (run *ruleExecution) actions(ctx context.Context) error {
+	for index, action := range run.rule.actions {
+		if err := run.candidate.tick(ctx); err != nil {
+			return err
 		}
-		if !r.raw.Enabled {
-			continue
+		if err := run.action(ctx, index, action); err != nil {
+			return err
 		}
-		s.vars = map[string]any{}
-		s.ruleID, s.rulePath = r.raw.ID, r.path
-		start := time.Now()
-		matched, matchErr := r.when.matches(&s)
-		if matchErr != nil {
-			t := baseTrace(r, &s)
-			t.Status = "error"
-			t.Error = matchErr.Error()
-			t.DurationNS = time.Since(start).Nanoseconds()
-			collector.add(t)
-			var missing *MissingInputError
-			if errors.As(matchErr, &missing) {
-				return finish(matchErr)
-			}
-			if ctx.Err() != nil || r.raw.OnError != OnErrorSkipRule {
-				return finish(prefixError(r.path+"/when", matchErr))
-			}
-			continue
-		}
-		if !matched {
-			t := baseTrace(r, &s)
-			t.Status = "not_matched"
-			t.DurationNS = time.Since(start).Nanoseconds()
-			collector.add(t)
-			continue
-		}
-		if len(r.actions) == 0 {
-			t := baseTrace(r, &s)
-			t.Matched = true
-			t.Status = "no_change"
-			t.DurationNS = time.Since(start).Nanoseconds()
-			collector.add(t)
-			if r.raw.StopAfterMatch {
-				break
-			}
-			continue
-		}
-		candidate := s
-		candidate.vars = map[string]any{}
-		candidate.body, err = cloneJSON(s.body)
-		if err != nil {
-			return finish(err)
-		}
-		pending := newTraceCollector(in)
-		pending.maxBytes = collector.remainingBytes()
-		pending.maxTraces = collector.remainingCount()
-		pending.enabled = collector.enabled
-		candidate.nestedTraces = pending
-		candidate.traceRule = &r
-		var actionErr error
-		var outcome terminal
-		var errorPath string
-		for i, a := range r.actions {
-			if err := candidate.tick(); err != nil {
-				return finish(err)
-			}
-			actionStart := time.Now()
-			var before any
-			beforeModel := candidate.model
-			if pending.canCollect() {
-				before, err = cloneJSON(candidate.body)
-				if err != nil {
-					return finish(err)
-				}
-			}
-			outcome, actionErr = a.execute(&candidate)
-			if actionErr == nil {
-				actionErr = ensurePayload(candidate.body)
-			}
-			if actionErr == nil {
-				actionErr = compareProjection(baseline, protectedProjection(candidate.body, phase))
-			}
-			if actionErr == nil && phase == PhaseRequest {
-				actionErr = syncModel(&candidate, &s)
-			}
-			if actionErr == nil && phase == PhaseResponseEvent {
-				if _, ok := object(candidate.body); !ok {
-					actionErr = fmt.Errorf("response event must remain an object")
-				}
-			}
-			t := baseTrace(r, &candidate)
-			t.ActionPath = a.path
-			t.ActionID = a.raw.ID
-			t.ActionType = a.raw.Type
-			t.ActionIndex = i
-			t.Matched = true
-			t.DurationNS = time.Since(actionStart).Nanoseconds()
-			if actionErr != nil {
-				t.Status = "error"
-				t.Error = actionErr.Error()
-				t.RolledBack = true
-				pending.add(t)
-				errorPath = a.path
-				break
-			}
-			t.Status = "no_change"
-			if pending.canCollect() {
-				t.Changes, t.OmittedChanges = structuralDiff(before, candidate.body)
-				if len(t.Changes) > 0 || t.OmittedChanges > 0 || beforeModel != candidate.model {
-					t.Status = "changed"
-				}
-			}
-			if outcome.blocked {
-				t.Status = "blocked"
-			}
-			if outcome.dropped {
-				t.Status = "dropped"
-			}
-			pending.add(t)
-			if outcome.blocked || outcome.dropped {
-				break
-			}
-		}
-		if actionErr != nil {
-			for i := range pending.traces {
-				pending.traces[i].RolledBack = true
-				pending.traces[i].Changes = nil
-				pending.traces[i].OmittedChanges = 0
-				if pending.traces[i].Status != "error" {
-					pending.traces[i].Status = "rolled_back"
-				} else if r.raw.OnError == OnErrorSkipRule {
-					pending.traces[i].Status = "skipped"
-				}
-			}
-			collector.merge(pending)
-			if ctx.Err() != nil {
-				return finish(ctx.Err())
-			}
-			var missing *MissingInputError
-			if errors.As(actionErr, &missing) {
-				return finish(actionErr)
-			}
-			if r.raw.OnError == OnErrorSkipRule {
-				continue
-			}
-			return finish(prefixError(errorPath, actionErr))
-		}
-		s = candidate
-		collector.merge(pending)
-		if outcome.blocked {
-			res.Blocked = true
-			res.Status = outcome.status
-			res.Reason = outcome.reason
-			return finish(nil)
-		}
-		if outcome.dropped {
-			res.Dropped = true
-			return finish(nil)
-		}
-		if r.raw.StopAfterMatch {
+		if run.actionErr != nil || run.outcome.blocked || run.outcome.dropped {
 			break
 		}
 	}
-	return finish(nil)
+	return nil
 }
+
+func (run *ruleExecution) action(ctx context.Context, index int, action compiledAction) error {
+	start := time.Now()
+	var before any
+	beforeModel := run.candidate.model
+	if run.pending.canCollect() {
+		var err error
+		before, err = cloneJSON(run.candidate.body)
+		if err != nil {
+			return err
+		}
+	}
+	run.outcome, run.actionErr = action.execute(ctx, run.candidate)
+	if run.actionErr == nil {
+		run.actionErr = run.validateCandidate()
+	}
+	trace := baseTrace(run.rule, run.candidate)
+	trace.ActionPath, trace.ActionID, trace.ActionType = action.path, action.raw.ID, action.raw.Type
+	trace.ActionIndex, trace.Matched, trace.DurationNS = index, true, time.Since(start).Nanoseconds()
+	if run.actionErr != nil {
+		trace.Status, trace.Error, trace.RolledBack = "error", run.actionErr.Error(), true
+		run.pending.add(trace)
+		run.errorPath = action.path
+		return nil
+	}
+	trace.Status = "no_change"
+	if run.pending.canCollect() {
+		trace.Changes, trace.OmittedChanges = structuralDiff(before, run.candidate.body)
+		if len(trace.Changes) > 0 || trace.OmittedChanges > 0 || beforeModel != run.candidate.model {
+			trace.Status = "changed"
+		}
+	}
+	if run.outcome.blocked {
+		trace.Status = "blocked"
+	}
+	if run.outcome.dropped {
+		trace.Status = "dropped"
+	}
+	run.pending.add(trace)
+	return nil
+}
+
+func (run *ruleExecution) validateCandidate() error {
+	if err := ensurePayload(run.candidate.body); err != nil {
+		return err
+	}
+	if err := compareProjection(run.phase.baseline, protectedProjection(run.candidate.body, run.phase.phase)); err != nil {
+		return err
+	}
+	if run.phase.phase == PhaseRequest {
+		return syncModel(run.candidate, run.phase.state)
+	}
+	if run.phase.phase == PhaseResponseEvent {
+		if _, ok := object(run.candidate.body); !ok {
+			return fmt.Errorf("response event must remain an object")
+		}
+	}
+	return nil
+}
+
+func (run *ruleExecution) rollback(ctx context.Context) error {
+	for i := range run.pending.traces {
+		trace := &run.pending.traces[i]
+		trace.RolledBack, trace.Changes, trace.OmittedChanges = true, nil, 0
+		if trace.Status != "error" {
+			trace.Status = "rolled_back"
+		} else if run.rule.raw.OnError == OnErrorSkipRule {
+			trace.Status = "skipped"
+		}
+	}
+	run.phase.collector.merge(run.pending)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	var missing *MissingInputError
+	if errors.As(run.actionErr, &missing) {
+		return run.actionErr
+	}
+	if run.rule.raw.OnError == OnErrorSkipRule {
+		return nil
+	}
+	return prefixError(run.errorPath, run.actionErr)
+}
+
 func syncModel(s, previous *evaluation) error {
 	if _, ok := object(s.body); !ok {
 		return fmt.Errorf("request body must remain an object")
@@ -370,4 +398,43 @@ func compareProjection(a, b map[string]any) error {
 func baseTrace(r compiledRule, s *evaluation) Trace {
 	eventID, _ := s.facts["event_id"].(string)
 	return Trace{Source: "rule", RuleID: r.raw.ID, RuleName: r.raw.Name, Revision: r.raw.Revision, Priority: r.raw.Priority, Phase: r.raw.Phase, ActionIndex: -1, EventType: s.eventType, EventID: eventID, Sequence: s.facts["sequence"]}
+}
+
+func (s *evaluation) validateRequestModel(expectedModel string) error {
+
+	if _, ok := object(s.body); !ok {
+		return invalid("/body", "request body must be an object")
+	}
+	if m, ok := objGet(s.body, "model"); ok {
+		model, ok := m.(string)
+		if !ok || strings.TrimSpace(model) == "" {
+			return invalid("/body/model", "model must be a nonempty string")
+		}
+		if expectedModel != "" && expectedModel != model {
+			return invalid("/model", "does not match body model")
+		}
+		s.model = model
+		s.originalModel = model
+	}
+
+	return nil
+}
+func (s *evaluation) validateResponseEvent() error {
+
+	if _, ok := object(s.body); !ok {
+		return invalid("/body", "response event must be an object")
+	}
+	if t, ok := objGet(s.body, "type"); ok {
+		str, ok := t.(string)
+		if !ok {
+			return invalid("/body/type", "event type must be a string")
+		}
+		if s.eventType == "" {
+			s.eventType = str
+		} else if s.eventType != str {
+			return invalid("/event_type", "does not match body type")
+		}
+	}
+
+	return nil
 }

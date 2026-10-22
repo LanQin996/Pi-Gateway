@@ -111,44 +111,10 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !contains([]string{"auto", "on", "off"}, body.CompactionMode) {
-		writeErr(w, 400, "compaction_mode must be auto, on or off")
+	if !validateCompactionSettings(w, &body) {
 		return
 	}
-	body.CompactionModel = strings.TrimSpace(body.CompactionModel)
-	if body.CompactionModel == "" || len(body.CompactionModel) > 256 || strings.IndexFunc(body.CompactionModel, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
-		writeErr(w, 400, "compaction_model must be a nonempty model ID of at most 256 bytes without whitespace")
-		return
-	}
-	if len(body.CompactionPrompt) > compactprompt.MaxBytes {
-		writeErr(w, 400, "compaction_prompt must be at most 65536 bytes")
-		return
-	}
-	if strings.TrimSpace(body.CompactionPrompt) == "" {
-		body.CompactionPrompt = compactprompt.Default
-	}
-	if body.UpstreamTransport == "" || !contains(config.ValidTransports, body.UpstreamTransport) {
-		writeErr(w, http.StatusBadRequest, "upstream_transport must be one of: "+strings.Join(config.ValidTransports, ", "))
-		return
-	}
-	if body.DefaultStrategy == "" || !contains(config.ValidStrategies, body.DefaultStrategy) {
-		writeErr(w, http.StatusBadRequest, "default_strategy must be one of: "+strings.Join(config.ValidStrategies, ", "))
-		return
-	}
-	if body.CaptureLimit < 1 || body.CaptureLimit > 10000 {
-		writeErr(w, http.StatusBadRequest, "capture_limit must be between 1 and 10000")
-		return
-	}
-	if body.MaxPerAccount < 1 || body.MaxPerAccount > 1000 {
-		writeErr(w, http.StatusBadRequest, "max_concurrent_per_account must be between 1 and 1000")
-		return
-	}
-	if body.RefreshMarginSecs < 60 {
-		writeErr(w, http.StatusBadRequest, "refresh_margin_seconds must be at least 60")
-		return
-	}
-	if body.AccountCooldownSeconds < 0 || body.AccountCooldownSeconds > 604800 || body.MaxAttempts < 1 || body.MaxAttempts > 20 {
-		writeErr(w, 400, "account_cooldown_seconds must be 0..604800 and max_attempts must be 1..20")
+	if !validateSchedulingSettings(w, &body) {
 		return
 	}
 	if body.ModelMappings == nil {
@@ -320,4 +286,54 @@ func (s *Server) handleModelPresets(w http.ResponseWriter, r *http.Request) {
 		},
 		"current_default": s.settings.Get().DefaultModel,
 	})
+}
+
+func validateCompactionSettings(w http.ResponseWriter, body *store.Settings) bool {
+	if !contains([]string{"auto", "on", "off"}, body.CompactionMode) {
+		writeErr(w, 400, "compaction_mode must be auto, on or off")
+		return false
+	}
+	body.CompactionModel = strings.TrimSpace(body.CompactionModel)
+	if body.CompactionModel == "" || len(body.CompactionModel) > 256 || strings.IndexFunc(body.CompactionModel, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0 {
+		writeErr(w, 400, "compaction_model must be a nonempty model ID of at most 256 bytes without whitespace")
+		return false
+	}
+	if len(body.CompactionPrompt) > compactprompt.MaxBytes {
+		writeErr(w, 400, "compaction_prompt must be at most 65536 bytes")
+		return false
+	}
+	if strings.TrimSpace(body.CompactionPrompt) == "" {
+		body.CompactionPrompt = compactprompt.Default
+	}
+
+	return true
+}
+
+func validateSchedulingSettings(w http.ResponseWriter, body *store.Settings) bool {
+	if body.UpstreamTransport == "" || !contains(config.ValidTransports, body.UpstreamTransport) {
+		writeErr(w, http.StatusBadRequest, "upstream_transport must be one of: "+strings.Join(config.ValidTransports, ", "))
+		return false
+	}
+	if body.DefaultStrategy == "" || !contains(config.ValidStrategies, body.DefaultStrategy) {
+		writeErr(w, http.StatusBadRequest, "default_strategy must be one of: "+strings.Join(config.ValidStrategies, ", "))
+		return false
+	}
+	if body.CaptureLimit < 1 || body.CaptureLimit > 10000 {
+		writeErr(w, http.StatusBadRequest, "capture_limit must be between 1 and 10000")
+		return false
+	}
+	if body.MaxPerAccount < 1 || body.MaxPerAccount > 1000 {
+		writeErr(w, http.StatusBadRequest, "max_concurrent_per_account must be between 1 and 1000")
+		return false
+	}
+	if body.RefreshMarginSecs < 60 {
+		writeErr(w, http.StatusBadRequest, "refresh_margin_seconds must be at least 60")
+		return false
+	}
+	if body.AccountCooldownSeconds < 0 || body.AccountCooldownSeconds > 604800 || body.MaxAttempts < 1 || body.MaxAttempts > 20 {
+		writeErr(w, 400, "account_cooldown_seconds must be 0..604800 and max_attempts must be 1..20")
+		return false
+	}
+
+	return true
 }

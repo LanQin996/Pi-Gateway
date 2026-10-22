@@ -98,7 +98,7 @@ var pricingRules = map[string]modelPricing{
 	// 来源 :414-417。
 	"gpt-4o-mini": {standard: tokenRates{1_500, 6_000, 750}, fast: tokenRates{2_500, 10_000, 1_250}},
 	// 来源 :418-421。
-	"gpt-4o": {standard: tokenRates{25_000, 100_000, 12_500}, fast: tokenRates{42_500, 170_000, 21_250}},
+	gpt4oModel: {standard: tokenRates{25_000, 100_000, 12_500}, fast: tokenRates{42_500, 170_000, 21_250}},
 	// 来源 :422-425。
 	"o1-pro": {standard: tokenRates{1_500_000, 6_000_000, 0}},
 	// 来源 :426-429。
@@ -138,8 +138,8 @@ var modelAliases = map[string]string{
 	"gpt-4.1-2025-04-14":       "gpt-4.1",
 	"gpt-4.1-mini-2025-04-14":  "gpt-4.1-mini",
 	"gpt-4.1-nano-2025-04-14":  "gpt-4.1-nano",
-	"gpt-4o-2024-08-06":        "gpt-4o",
-	"gpt-4o-2024-11-20":        "gpt-4o",
+	"gpt-4o-2024-08-06":        gpt4oModel,
+	"gpt-4o-2024-11-20":        gpt4oModel,
 	"gpt-4o-mini-2024-07-18":   "gpt-4o-mini",
 	"gpt-5-2025-08-07":         "gpt-5",
 	"gpt-5-mini-2025-08-07":    "gpt-5-mini",
@@ -163,3 +163,5 @@ var modelAliases = map[string]string{
 	"o3-pro-2025-06-10":        "o3-pro",
 	"o4-mini-2025-04-16":       "o4-mini",
 }
+
+const gpt4oModel = "gpt-4o"

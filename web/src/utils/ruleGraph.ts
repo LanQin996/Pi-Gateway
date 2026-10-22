@@ -1,16 +1,16 @@
-import type {Rule, RuleAction, RuleCondition, RuleFieldError, RuleSchema, ValueExpr} from '../api/rules'
+import type {Rule, RuleAction, RuleCondition, RuleFieldError, RuleSchema, JsonValue} from '../api/rules'
 import {editorId} from './editorId'
 import {newAction, ruleSchema} from './ruleSchema'
 import {defaultCondition, RuleInputError, validateRule} from './ruleEditor'
 
 export type RuleGraphNode = {
     id: string; kind: 'rule' | 'condition' | 'action' | 'value'; path: string;
-    position: { x: number; y: number }; data: Rule | RuleCondition | RuleAction | RuleGraphValue;
+    position: {x: number; y: number}; data: Rule | RuleCondition | RuleAction | RuleGraphValue;
 }
 
 export interface RuleGraphValue {
     mode: 'computed' | 'reference' | 'literal' | 'values';
-    value: ValueExpr
+    value: JsonValue
 }
 
 export interface GraphValueInput {
@@ -20,8 +20,8 @@ export interface GraphValueInput {
     index?: number
 }
 
-const escapePart = (key: string) => key.replace(/~/g, '~0').replace(/\//g, '~1')
-const pointerParts = (path: string) => path.slice(1).split('/').map(key => key.replace(/~1/g, '/').replace(/~0/g, '~'))
+const escapePart = (key: string) => key.replaceAll('~', '~0').replaceAll('/', '~1')
+const pointerParts = (path: string) => path.slice(1).split('/').map(key => key.replaceAll('~1', '/').replaceAll('~0', '~'))
 
 export function readGraphInput(data: RuleGraphNode['data'], path: string): unknown {
     return pointerParts(path).reduce<unknown>((value, key) => value && typeof value === 'object' ? (value as Record<string, unknown>)[key] : undefined, data)
@@ -44,9 +44,9 @@ export function graphValueMode(value: unknown): RuleGraphValue['mode'] | undefin
 export function graphValueInputs(node: Pick<RuleGraphNode, 'kind' | 'data'>): GraphValueInput[] {
     if (node.kind === 'value') {
         const data = node.data as RuleGraphValue
-        const args = data.mode === 'computed' ? (data.value as {
-            $expr: { args: ValueExpr[] }
-        }).$expr.args : data.mode === 'values' ? data.value as ValueExpr[] : undefined
+        let args: unknown
+        if (data.mode === 'computed') args = (data.value as {$expr: {args: JsonValue[]}}).$expr.args
+        else if (data.mode === 'values') args = data.value
         return Array.isArray(args) ? args.map((value, index) => ({
             path: data.mode === 'computed' ? `/value/$expr/args/${index}` : `/value/${index}`,
             label: 'args',
@@ -74,7 +74,13 @@ export function graphValueInputs(node: Pick<RuleGraphNode, 'kind' | 'data'>): Gr
 export const complexGraphCondition = (value: unknown): boolean => !!value && typeof value === 'object' && (['all', 'any', 'not', 'test'].includes((value as RuleCondition).op) || !!graphValueMode((value as RuleCondition).value))
 
 export function graphConditionInputs(action: RuleAction): string[] {
-    return action.type === 'array_filter' || action.type === 'if' ? ['predicate'] : action.type === 'walk' ? ['predicate', 'keep'] : action.type === 'for_each' ? ['keep'] : []
+    switch (action.type) {
+        case 'array_filter':
+        case 'if': return ['predicate']
+        case 'walk': return ['predicate', 'keep']
+        case 'for_each': return ['keep']
+        default: return []
+    }
 }
 
 export interface RuleGraphEdge {
@@ -89,7 +95,7 @@ export interface RuleGraphEdge {
 export interface RuleGraph {
     nodes: RuleGraphNode[];
     edges: RuleGraphEdge[];
-    viewport: { x: number; y: number; zoom: number };
+    viewport: {x: number; y: number; zoom: number};
     selected: string[];
     layoutRestored?: boolean;
     groups?: RuleGraphGroup[];
@@ -99,13 +105,13 @@ export interface RuleGraphGroup {
     id: string;
     name: string;
     nodes: string[];
-    position: { x: number; y: number };
-    ports: { id: string; node: string; handle: string; direction: 'input' | 'output'; name: string }[];
+    position: {x: number; y: number};
+    ports: {id: string; node: string; handle: string; direction: 'input' | 'output'; name: string}[];
 }
 
 export function groupGraphNodes(graph: RuleGraph, ids: string[], name: string): RuleGraph {
     const next = copy(graph), members = graphNodeClosure(next, ids)
-    for (const id of [...members]) if (next.groups?.some(group => group.nodes.includes(id))) members.delete(id)
+    for (const id of members) if (next.groups?.some(group => group.nodes.includes(id))) members.delete(id)
     if (!members.size) throw new RuleInputError([{path: '', code: 'graph.target', message: 'target'}])
     const nodes = next.nodes.filter(node => members.has(node.id))
     const group: RuleGraphGroup = {
@@ -180,7 +186,7 @@ export function groupedWorkflow(graph: RuleGraph, active?: string) {
         nodes: workflow.nodes.filter(node => !owners.has(node.id)), groups,
         edges: workflow.edges.flatMap(edge => {
             const from = owners.get(edge.source), to = owners.get(edge.target)
-            if (from && to && from.id === to.id) return []
+            if (from && from.id === to?.id) return []
             const sourcePort = from ? graphGroupPorts(graph, from).find(port => port.node === edge.source && port.handle === edge.sourceHandle && port.direction === 'output') : undefined
             const targetPort = to ? graphGroupPorts(graph, to).find(port => port.node === edge.target && port.handle === edge.targetHandle && port.direction === 'input') : undefined
             return [{
@@ -198,7 +204,7 @@ export interface RuleGraphAddOptions {
     kind: 'condition' | 'action' | 'value'
     type: string
     targetId?: string
-    position?: { x: number; y: number }
+    position?: {x: number; y: number}
     mode?: 'auto' | 'detached' | 'wrap'
     sourceHandle?: RuleGraphEdge['sourceHandle']
     inputPath?: string
@@ -206,13 +212,13 @@ export interface RuleGraphAddOptions {
 
 export interface RuleGraphLayout {
     signature: string
-    nodes: Record<string, { x: number; y: number }>
-    viewport: { x: number; y: number; zoom: number }
+    nodes: Record<string, {x: number; y: number}>
+    viewport: {x: number; y: number; zoom: number}
     groups?: {
         id: string;
         name: string;
         nodes: string[];
-        position: { x: number; y: number };
+        position: {x: number; y: number};
         ports: RuleGraphGroup['ports']
     }[]
 }
@@ -241,13 +247,23 @@ export function graphLayoutNodeKey(node: RuleGraphNode, graph: RuleGraph, paths 
             incoming = graph.edges.find(edge => edge.target === previous.id && edge.targetHandle === 'action-in')
         }
         const scope = incoming?.sourceHandle.startsWith('flow:') ? graph.nodes.find(node => node.id === incoming!.source) : undefined
-        return `${scope ? `${actionKey(scope, seen)}/${incoming!.sourceHandle}/` : 'action:'}${(action.data as RuleAction).id}`
+        const prefix = scope ? `${actionKey(scope, seen)}/${incoming!.sourceHandle}/` : 'action:'
+        return prefix + (action.data as RuleAction).id
     }
     if (node.kind === 'action') return actionKey(node)
     const path = paths[node.id]
     if (path === undefined) throw new Error('Only connected nodes have stable layout identities')
     const action = graph.nodes.filter(n => n.kind === 'action' && path.startsWith(`${paths[n.id]}/params/`)).sort((a, b) => (paths[b.id]?.length ?? 0) - (paths[a.id]?.length ?? 0))[0]
     return action ? `${actionKey(action)}${path.slice(paths[action.id]!.length)}` : `condition:${path}`
+}
+
+function graphNodeType(node: RuleGraphNode): string {
+    switch (node.kind) {
+        case 'condition': return (node.data as RuleCondition).op
+        case 'action': return (node.data as RuleAction).type
+        case 'value': return (node.data as RuleGraphValue).mode
+        default: return 'rule'
+    }
 }
 
 export function graphLayoutSignature(graph: RuleGraph): string {
@@ -257,7 +273,7 @@ export function graphLayoutSignature(graph: RuleGraph): string {
     const nodes = graph.nodes.map(node => ({
         key: keys.get(node.id)!,
         kind: node.kind,
-        type: node.kind === 'condition' ? (node.data as RuleCondition).op : node.kind === 'action' ? (node.data as RuleAction).type : node.kind === 'value' ? (node.data as RuleGraphValue).mode : 'rule'
+        type: graphNodeType(node)
     })).sort((a, b) => a.key.localeCompare(b.key))
     const edges = graph.edges.map(edge => ({
         source: keys.get(edge.source),
@@ -268,7 +284,7 @@ export function graphLayoutSignature(graph: RuleGraph): string {
     })).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))
     // Hash topology only: no name, parameter value, payload field path or sample is stored.
     let hash = 2166136261
-    for (const char of JSON.stringify({nodes, edges})) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619)
+    for (const char of JSON.stringify({nodes, edges})) hash = Math.imul(hash ^ char.codePointAt(0)!, 16777619)
     return `v1-${(hash >>> 0).toString(16)}`
 }
 
@@ -298,7 +314,7 @@ export function graphLayoutSnapshot(graph: RuleGraph): RuleGraphLayout {
 }
 
 export function applyGraphLayout(graph: RuleGraph, layout: RuleGraphLayout | null | undefined): RuleGraph {
-    if (!layout || layout.signature !== graphLayoutSignature(graph) || !layout.nodes || !validViewport(layout.viewport) || Object.keys(layout.nodes).length !== graph.nodes.length) return graph
+    if (!layout?.nodes || layout.signature !== graphLayoutSignature(graph) || !validViewport(layout.viewport) || Object.keys(layout.nodes).length !== graph.nodes.length) return graph
     const paths = graphPathMap(graph)
     const nodes = graph.nodes.map(node => {
         const position = layout.nodes[graphLayoutNodeKey(node, graph, paths)]
@@ -307,7 +323,7 @@ export function applyGraphLayout(graph: RuleGraph, layout: RuleGraphLayout | nul
             position: {x: position.x, y: position.y}
         } : null
     })
-    if (nodes.some(node => node === null)) return graph
+    if (nodes.includes(null)) return graph
     const identities = new Map(graph.nodes.map(node => [graphLayoutNodeKey(node, graph, paths), node.id]))
     const groups = Array.isArray(layout.groups) ? layout.groups.slice(0, 100).filter(group => typeof group.name === 'string' && group.name.length <= 100 && validCoordinate(group.position?.x) && validCoordinate(group.position?.y) && Array.isArray(group.nodes) && group.nodes.every(key => identities.has(key)) && Array.isArray(group.ports)).map(group => ({
         ...group,
@@ -370,21 +386,21 @@ const group = (node: RuleGraphNode) => node.kind === 'condition' && ['all', 'any
 export function actionFlowPorts(action: RuleAction): string[] {
     if (action.type === 'if') return ['then', 'else']
     if (['sequence', 'for_each', 'walk'].includes(action.type)) return ['steps']
-    if (action.type === 'scope') return ['steps', ...Object.keys((action.params.functions ?? {}) as object).map(key => `functions/${key.replace(/~/g, '~0').replace(/\//g, '~1')}`)]
+    if (action.type === 'scope') return ['steps', ...Object.keys((action.params.functions ?? {}) as object).map(key => `functions/${key.replaceAll('~', '~0').replaceAll('/', '~1')}`)]
     return []
 }
 
 function flowList(action: RuleAction, port: string): RuleAction[] | undefined {
-    if (port.startsWith('functions/')) return (action.params.functions as Record<string, RuleAction[]> | undefined)?.[port.slice(10).replace(/~1/g, '/').replace(/~0/g, '~')]
+    if (port.startsWith('functions/')) return (action.params.functions as Record<string, RuleAction[]> | undefined)?.[port.slice(10).replaceAll('~1', '/').replaceAll('~0', '~')]
     return action.params[port] as RuleAction[] | undefined
 }
 
 function setFlowList(action: RuleAction, port: string, value: RuleAction[]) {
-    if (port.startsWith('functions/')) (action.params.functions as Record<string, RuleAction[]>)[port.slice(10).replace(/~1/g, '/').replace(/~0/g, '~')] = value
+    if (port.startsWith('functions/')) (action.params.functions as Record<string, RuleAction[]>)[port.slice(10).replaceAll('~1', '/').replaceAll('~0', '~')] = value
     else action.params[port] = value
 }
 
-export function visibleWorkflow(graph: RuleGraph): { nodes: RuleGraphNode[]; edges: RuleGraphEdge[] } {
+export function visibleWorkflow(graph: RuleGraph): {nodes: RuleGraphNode[]; edges: RuleGraphEdge[]} {
     const hidden = new Set(graph.nodes.filter(node => node.kind === 'action' && (node.data as RuleAction).type === 'sequence').map(node => node.id))
     const nodes = graph.nodes.filter(node => !hidden.has(node.id))
     const incoming = (id: string) => graph.edges.find(edge => edge.target === id && edge.targetHandle === 'action-in')
@@ -444,6 +460,7 @@ export function graphNodeClosure(graph: RuleGraph, ids: string[]): Set<string> {
             collect(child, childFlow)
         }
     }
+    // Snapshot initial roots: descendants collected in body mode must not be revisited as roots.
     for (const id of [...included]) collect(id)
     return included
 }
@@ -554,15 +571,15 @@ export function ruleToGraph(rule: Rule, previous?: RuleGraph): RuleGraph {
                 ...graphEdge(prior.id, current.id, 'action-in', index),
                 sourceHandle: index === 0 ? port : 'action-out'
             });
-        prior = current
-        for (const [key, value] of Object.entries(action.params)) {
-            if (value && typeof value === 'object' && typeof (value as RuleCondition).op === 'string' && graphConditionInputs(action).includes(key) && (action.type === 'array_filter' || complexGraphCondition(value))) {
-                const child = condition(value as RuleCondition, `${path}/params/${key}`, current.position.x - ruleNodeColumnGap, predicateRow)
-                graph.edges.push(graphEdge(child.node.id, current.id, `predicate:${key}`))
-                predicateRow = child.bottom
-                delete (current.data as RuleAction).params[key]
+            prior = current
+            for (const [key, value] of Object.entries(action.params)) {
+                if (value && typeof value === 'object' && typeof (value as RuleCondition).op === 'string' && graphConditionInputs(action).includes(key) && (action.type === 'array_filter' || complexGraphCondition(value))) {
+                    const child = condition(value as RuleCondition, `${path}/params/${key}`, current.position.x - ruleNodeColumnGap, predicateRow)
+                    graph.edges.push(graphEdge(child.node.id, current.id, `predicate:${key}`))
+                    predicateRow = child.bottom
+                    delete (current.data as RuleAction).params[key]
+                }
             }
-        }
             let row = bottom
             for (const field of actionFlowPorts(action)) {
                 const body = flowList(action, field)
@@ -603,7 +620,7 @@ export function ruleToGraph(rule: Rule, previous?: RuleGraph): RuleGraph {
     function valueNode(value: unknown, mode: RuleGraphValue['mode'], path: string, owner: RuleGraphNode, input: string, y: number): number {
         const current = node('value', {
             mode,
-            value: copy(value) as ValueExpr
+            value: copy(value) as JsonValue
         }, path, owner.position.x - ruleNodeColumnGap, y)
         graph.edges.push({
             id: editorId(),
@@ -618,11 +635,17 @@ export function ruleToGraph(rule: Rule, previous?: RuleGraph): RuleGraph {
         return Math.max(y + defaultRowSpacing, row)
     }
 
-    // Reserve separate rows for dependency trees, so fresh graphs never overlap.
-    let valueRow = Math.max(defaultRowSpacing, ...graph.nodes.map(node => node.position.y + defaultRowSpacing))
-    for (const owner of [...graph.nodes]) for (const input of graphValueInputs(owner)) {
-        const mode = graphValueMode(input.value) ?? (input.label === 'values' ? 'values' : owner.kind === 'action' ? 'literal' : undefined)
-        if (mode) valueRow = valueNode(input.value, mode, `${owner.path}${input.path}`, owner, input.path, valueRow)
+    addValueDependencies()
+    function addValueDependencies() {
+        // Reserve separate rows for dependency trees, so fresh graphs never overlap.
+        let valueRow = Math.max(defaultRowSpacing, ...graph.nodes.map(node => node.position.y + defaultRowSpacing))
+        // Value dependencies append nodes; traverse only the pre-existing owners.
+        for (const owner of [...graph.nodes]) for (const input of graphValueInputs(owner)) {
+            let mode = graphValueMode(input.value)
+            if (!mode && owner.kind === 'action') mode = 'literal'
+            if (!graphValueMode(input.value) && input.label === 'values') mode = 'values'
+            if (mode) valueRow = valueNode(input.value, mode, `${owner.path}${input.path}`, owner, input.path, valueRow)
+        }
     }
     const placed: RuleGraphNode[] = []
     for (const current of graph.nodes) {
@@ -651,11 +674,12 @@ export function graphStructureErrors(graph: RuleGraph, schema: RuleSchema = rule
     if (nodes.size !== graph.nodes.length) error('', 'duplicate')
     if (graph.nodes.filter(n => n.kind === 'rule').length !== 1) error('', 'root')
     const pairs = new Set<string>()
-    for (const edge of graph.edges) {
+    graph.edges.forEach(validateEdge)
+    function validateEdge(edge: RuleGraphEdge) {
         const from = nodes.get(edge.source), to = nodes.get(edge.target)
         if (!from || !to) {
             error(edge.target, 'endpoint');
-            continue
+            return
         }
         if (from.id === to.id) error(from.id, 'cycle')
         const booleanPort = edge.sourceHandle === 'boolean-out' && from.kind === 'condition' &&
@@ -667,7 +691,8 @@ export function graphStructureErrors(graph: RuleGraph, schema: RuleSchema = rule
         if (pairs.has(pair)) error(to.id, 'duplicate');
         pairs.add(pair)
     }
-    for (const node of graph.nodes) {
+    graph.nodes.forEach(validateNode)
+    function validateNode(node: RuleGraphNode) {
         const incoming = graph.edges.filter(e => e.target === node.id)
         const outgoing = graph.edges.filter(e => e.source === node.id)
         if (new Set(outgoing.filter(edge => edge.sourceHandle !== 'value-out').map(edge => edge.sourceHandle)).size !== outgoing.filter(edge => edge.sourceHandle !== 'value-out').length) error(node.id, 'successor')
@@ -740,11 +765,11 @@ export function graphToRule(graph: RuleGraph, schema: RuleSchema = ruleSchema, v
         let current = owner, port = handle
         for (; ;) {
             const edge = graph.edges.find(e => e.source === current.id && e.sourceHandle === port)
-        if (!edge) break
+            if (!edge) break
             current = nodes.get(edge.target)!;
             port = 'action-out'
             if (visited.has(current.id)) throw new RuleInputError([{path, code: 'graph.cycle', message: 'cycle'}])
-        visited.add(current.id)
+            visited.add(current.id)
             visitValues(current.id)
             const action = graphNodeValue(graph, current.id) as RuleAction
             for (const child of graph.edges.filter(e => e.target === current.id && e.targetHandle.startsWith('predicate:'))) action.params[child.targetHandle.slice(10)] = condition(nodes.get(child.source)!, `${path}/${list.length}/params/${child.targetHandle.slice(10)}`)
@@ -796,44 +821,25 @@ export function addGraphModule(graph: RuleGraph, options: RuleGraphAddOptions, s
     if (errors.length) throw new RuleInputError(errors)
     const next = copy(graph), root = next.nodes.find(node => node.kind === 'rule')!
     const rule = root.data as Rule, mode = options.mode ?? 'auto'
-    if (options.kind === 'value') {
-        const owner = next.nodes.find(node => node.id === options.targetId)
-        if (!owner || !options.inputPath) throw new RuleInputError([{
-            path: '',
-            code: 'graph.target',
-            message: 'target'
-        }])
-        const data = graphNodeValue(next, owner.id)
-        const value: ValueExpr = options.type === 'reference' ? {
-            $ref: {
-                source: 'current',
-                path: ''
-            }
-        } : options.type === 'literal' ? null : {$expr: {op: options.type, args: []}}
-        writeGraphInput(data, options.inputPath, value)
-        const result = replaceGraphNode(next, owner.id, data)
-        const edge = result.edges.find(edge => edge.target === owner.id && edge.targetHandle === `value:${options.inputPath}`)
-        if (edge) {
-            result.selected = [edge.source]
-            if (options.position) result.nodes.find(node => node.id === edge.source)!.position = {...options.position}
-        }
-        return result
-    }
+    if (options.kind === 'value') return addValueModule(next, options)
     const fail = (code: string, node = root): never => {
         throw new RuleInputError([{path: node.path, code: `graph.${code}`, message: code}])
     }
-    if (!['auto', 'detached', 'wrap'].includes(mode)) fail('mode')
-    if (!['condition', 'action'].includes(options.kind)) fail('capability')
-    const capability = (options.kind === 'action' ? schema.actions : schema.conditions).find(cap => cap.id === options.type)
-    if (!capability) fail('capability')
-    if (capability?.phases?.length && !capability.phases.includes(rule.phase)) fail('phase')
-    if (options.position && (!validCoordinate(options.position.x) || !validCoordinate(options.position.y))) fail('position')
-    if (mode === 'wrap' && (options.kind !== 'condition' || !['all', 'any', 'not'].includes(options.type))) fail('mode')
+    validateOptions()
     const paths = graphPathMap(next)
     const explicitTarget = options.targetId === undefined ? undefined : next.nodes.find(node => node.id === options.targetId)
     if (options.targetId !== undefined && !explicitTarget) fail('target')
     // Detached creation has no connection target; auto/wrap may never attach to an orphan.
     if (mode !== 'detached' && explicitTarget && paths[explicitTarget.id] === undefined) fail('orphan', explicitTarget)
+    function validateOptions() {
+        if (!['auto', 'detached', 'wrap'].includes(mode)) fail('mode')
+        if (!['condition', 'action'].includes(options.kind)) fail('capability')
+        const capability = (options.kind === 'action' ? schema.actions : schema.conditions).find(cap => cap.id === options.type)
+        if (!capability) fail('capability')
+        if (capability?.phases?.length && !capability.phases.includes(rule.phase)) fail('phase')
+        if (options.position && (!validCoordinate(options.position.x) || !validCoordinate(options.position.y))) fail('position')
+        if (mode === 'wrap' && (options.kind !== 'condition' || !['all', 'any', 'not'].includes(options.type))) fail('mode')
+    }
     const children = (node: RuleGraphNode, port = 'boolean-in') => next.edges.filter(edge => edge.target === node.id && edge.targetHandle === port).sort((a, b) => a.order - b.order)
     const parentEdge = (node: RuleGraphNode) => {
         const edges = next.edges.filter(edge => edge.source === node.id && edge.sourceHandle === 'boolean-out')
@@ -882,7 +888,10 @@ export function addGraphModule(graph: RuleGraph, options: RuleGraphAddOptions, s
         x: root.position.x + (options.kind === 'action' ? ruleNodeColumnGap : -ruleNodeColumnGap),
         y: root.position.y + defaultRowSpacing
     })))
-    if (options.kind === 'action') {
+    if (options.kind === 'action') return addActionModule()
+    return addConditionModule()
+
+    function addActionModule(): RuleGraph {
         let target = explicitTarget ?? root
         if (target.kind !== 'rule' && target.kind !== 'action') fail('target', target)
         if (!explicitTarget) {
@@ -908,8 +917,8 @@ export function addGraphModule(graph: RuleGraph, options: RuleGraphAddOptions, s
         next.edges.push({...graphEdge(target.id, node.id, 'action-in', order), sourceHandle})
         return finish(node)
     }
-    let target = explicitTarget ?? root
-    if (mode === 'wrap') {
+
+    function wrapCondition(target: RuleGraphNode): RuleGraph {
         if (target.kind === 'rule') {
             const edge = children(target)[0]
             if (!edge) fail('missingCondition', target)
@@ -926,17 +935,22 @@ export function addGraphModule(graph: RuleGraph, options: RuleGraphAddOptions, s
         next.edges.push(graphEdge(target.id, wrapper.id, 'boolean-in'))
         return finish(wrapper)
     }
-    if (target.kind === 'condition' && (['all', 'any'].includes((target.data as RuleCondition).op) || (target.data as RuleCondition).op === 'not' && !children(target).length)) {
-        const incoming = children(target)
-        const node = addCondition({
-            x: target.position.x - ruleNodeColumnGap,
-            y: target.position.y + incoming.length * defaultRowSpacing
-        })
-        next.edges.push(graphEdge(node.id, target.id, 'boolean-in', Math.max(-1, ...incoming.map(edge => edge.order)) + 1))
-        return finish(node)
+
+    function preserveNodeIdentity(node: RuleGraphNode, id: string) {
+        const generatedId = node.id
+        node.id = id
+        for (const edge of next.edges) {
+            if (edge.source === generatedId) edge.source = id
+            if (edge.target === generatedId) edge.target = id
+        }
     }
-    if (target.kind !== 'condition') {
-        const port = target.kind === 'rule' ? 'boolean-in' : (target.data as RuleAction).type === 'array_filter' ? 'predicate:predicate' : fail('target', target)
+
+    function resolveConditionTarget(target: RuleGraphNode): {target: RuleGraphNode; done?: RuleGraph} {
+        let port = 'boolean-in'
+        if (target.kind !== 'rule') {
+            if ((target.data as RuleAction).type !== 'array_filter') fail('target', target)
+            port = 'predicate:predicate'
+        }
         const existing = children(target, port)[0]
         if (!existing) {
             const node = addCondition({
@@ -944,32 +958,72 @@ export function addGraphModule(graph: RuleGraph, options: RuleGraphAddOptions, s
                 y: target.position.y + (target.kind === 'action' ? defaultRowSpacing : 0)
             })
             next.edges.push(graphEdge(node.id, target.id, port))
-            return finish(node)
+            return {target, done: finish(node)}
         }
         target = next.nodes.find(node => node.id === existing.source)!
         if ((target.data as RuleCondition).op === 'always') {
             const node = addFragment('condition', value, options.position ? {...options.position} : {...target.position})
-            const generatedId = node.id
-            node.id = target.id
-            for (const edge of next.edges) {
-                if (edge.source === generatedId) edge.source = node.id
-                if (edge.target === generatedId) edge.target = node.id
-            }
+            preserveNodeIdentity(node, target.id)
             next.nodes = next.nodes.filter(old => old !== target)
+            return {target, done: finish(node)}
+        }
+        return {target}
+    }
+
+    function addConditionModule(): RuleGraph {
+        let target = explicitTarget ?? root
+        if (mode === 'wrap') return wrapCondition(target)
+        if (target.kind === 'condition' && (['all', 'any'].includes((target.data as RuleCondition).op) || (target.data as RuleCondition).op === 'not' && !children(target).length)) {
+            const incoming = children(target)
+            const node = addCondition({
+                x: target.position.x - ruleNodeColumnGap,
+                y: target.position.y + incoming.length * defaultRowSpacing
+            })
+            next.edges.push(graphEdge(node.id, target.id, 'boolean-in', Math.max(-1, ...incoming.map(edge => edge.order)) + 1))
             return finish(node)
         }
+        if (target.kind !== 'condition') {
+            const resolved = resolveConditionTarget(target)
+            if (resolved.done) return resolved.done
+            target = resolved.target
+        }
+        // Adding beside a leaf/not must not change its subtree or turn NOT(A) into NOT(A AND B).
+        const parent = parentEdge(target)
+        if (!schema.conditions.some(cap => cap.id === 'all')) fail('capability')
+        const node = addCondition({x: target.position.x, y: target.position.y + defaultRowSpacing})
+        const wrapper = addFragment('condition', {
+            ...defaultCondition('all', schema),
+            conditions: []
+        }, freePosition({x: target.position.x + ruleNodeColumnGap, y: target.position.y}))
+        parent.source = wrapper.id
+        next.edges.push(graphEdge(target.id, wrapper.id, 'boolean-in', 0), graphEdge(node.id, wrapper.id, 'boolean-in', 1))
+        return finish(node)
     }
-    // Adding beside a leaf/not must not change its subtree or turn NOT(A) into NOT(A AND B).
-    const parent = parentEdge(target)
-    if (!schema.conditions.some(cap => cap.id === 'all')) fail('capability')
-    const node = addCondition({x: target.position.x, y: target.position.y + defaultRowSpacing})
-    const wrapper = addFragment('condition', {
-        ...defaultCondition('all', schema),
-        conditions: []
-    }, freePosition({x: target.position.x + ruleNodeColumnGap, y: target.position.y}))
-    parent.source = wrapper.id
-    next.edges.push(graphEdge(target.id, wrapper.id, 'boolean-in', 0), graphEdge(node.id, wrapper.id, 'boolean-in', 1))
-    return finish(node)
+}
+
+function initialGraphValue(type: string): JsonValue {
+    if (type === 'reference') return {$ref: {source: 'current', path: ''}}
+    if (type === 'literal') return null
+    return {$expr: {op: type, args: []}}
+}
+
+function addValueModule(next: RuleGraph, options: RuleGraphAddOptions): RuleGraph {
+    const owner = next.nodes.find(node => node.id === options.targetId)
+    if (!owner || !options.inputPath) throw new RuleInputError([{
+        path: '',
+        code: 'graph.target',
+        message: 'target'
+    }])
+    const data = graphNodeValue(next, owner.id)
+    const value = initialGraphValue(options.type)
+    writeGraphInput(data, options.inputPath, value)
+    const result = replaceGraphNode(next, owner.id, data)
+    const edge = result.edges.find(edge => edge.target === owner.id && edge.targetHandle === `value:${options.inputPath}`)
+    if (edge) {
+        result.selected = [edge.source]
+        if (options.position) result.nodes.find(node => node.id === edge.source)!.position = {...options.position}
+    }
+    return result
 }
 
 // Coordinates, viewport, editor IDs and selection never affect wire identity or dirty state.
@@ -1005,22 +1059,26 @@ export function graphNodeValue(graph: RuleGraph, id: string, seen = new Set<stri
     if (group(node)) (data as RuleCondition).conditions = graph.edges.filter(e => e.target === id && e.targetHandle === 'boolean-in').sort((a, b) => a.order - b.order).map(e => graphNodeValue(graph, e.source, new Set(seen)) as RuleCondition)
     if (node.kind === 'action') {
         for (const edge of graph.edges.filter(e => e.target === id && e.targetHandle.startsWith('predicate:'))) (data as RuleAction).params[edge.targetHandle.slice(10)] = graphNodeValue(graph, edge.source, new Set(seen))
-        for (const field of actionFlowPorts(data as RuleAction)) {
-            const list: RuleAction[] = []
-            let current = id, handle: RuleGraphEdge['sourceHandle'] = `flow:${field}`
-            const scopeSeen = new Set(seen)
-            for (; ;) {
-                const edge = graph.edges.find(e => e.source === current && e.sourceHandle === handle)
-                if (!edge || scopeSeen.has(edge.target)) break
-                list.push(graphNodeValue(graph, edge.target, scopeSeen) as RuleAction)
-                current = edge.target;
-                handle = 'action-out';
-                scopeSeen.add(current)
-            }
-            if (flowList(data as RuleAction, field) !== undefined || list.length) setFlowList(data as RuleAction, field, list)
-        }
+        restoreActionFlows(graph, id, data as RuleAction, seen)
     }
     return data
+}
+
+function restoreActionFlows(graph: RuleGraph, id: string, data: RuleAction, seen: Set<string>): void {
+    for (const field of actionFlowPorts(data as RuleAction)) {
+        const list: RuleAction[] = []
+        let current = id, handle: RuleGraphEdge['sourceHandle'] = `flow:${field}`
+        const scopeSeen = new Set(seen)
+        for (; ;) {
+            const edge = graph.edges.find(e => e.source === current && e.sourceHandle === handle)
+            if (!edge || scopeSeen.has(edge.target)) break
+            list.push(graphNodeValue(graph, edge.target, scopeSeen) as RuleAction)
+            current = edge.target;
+            handle = 'action-out';
+            scopeSeen.add(current)
+        }
+        if (flowList(data as RuleAction, field) !== undefined || list.length) setFlowList(data as RuleAction, field, list)
+    }
 }
 
 export function replaceGraphNode(graph: RuleGraph, id: string, data: RuleGraphNode['data']): RuleGraph {
@@ -1077,7 +1135,11 @@ export function replaceGraphNode(graph: RuleGraph, id: string, data: RuleGraphNo
     const source = fragment.nodes.find(n => node.kind === 'condition' ? n.path === '/when' : n.kind === 'action')!
     const included = fragment.nodes.filter(n => node.kind === 'condition' ? n.path.startsWith('/when') : n.path.startsWith('/actions/0'))
     const allowed = new Set(included.map(n => n.id))
-    const remap = new Map(included.map(n => [n.id, n.id === source.id ? id : next.nodes.some(old => old.id === n.id && !removed.has(old.id)) ? editorId() : n.id]))
+    const remap = new Map(included.map(n => {
+        if (n.id === source.id) return [n.id, id]
+        const conflict = next.nodes.some(old => old.id === n.id && !removed.has(old.id))
+        return [n.id, conflict ? editorId() : n.id]
+    }))
     const replacements = new Map(included.map(n => {
         const replacement = {...n, id: remap.get(n.id)!, position: n.id === source.id ? node.position : n.position}
         return [replacement.id, replacement]
@@ -1124,8 +1186,8 @@ export function graphPathMap(graph: RuleGraph): Record<string, string> {
             port = 'action-out';
             visited.add(id)
             const path = `${base}/${index++}`
-        result[id] = path
-        graph.edges.filter(e => e.target === id && e.targetHandle.startsWith('predicate:')).forEach(e => mapCondition(e.source, `${path}/params/${e.targetHandle.slice(10)}`))
+            result[id] = path
+            graph.edges.filter(e => e.target === id && e.targetHandle.startsWith('predicate:')).forEach(e => mapCondition(e.source, `${path}/params/${e.targetHandle.slice(10)}`))
             const node = graph.nodes.find(node => node.id === id)!
             for (const field of actionFlowPorts(node.data as RuleAction)) mapActions(id, `flow:${field}`, `${path}/params/${field}`)
         }

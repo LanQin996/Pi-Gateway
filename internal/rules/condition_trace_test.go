@@ -9,39 +9,7 @@ import (
 
 func TestConditionDiagnosticsShortCircuitAndEquivalence(t *testing.T) {
 	for _, op := range []string{"all", "any"} {
-		t.Run(op, func(t *testing.T) {
-			first := Condition{Op: "exists", Path: "/absent"}
-			if op == "any" {
-				first = Condition{Op: "always"}
-			}
-			r := rule("diagnostic", act("json_set", map[string]any{"path": "/changed", "value": true}))
-			r.When = Condition{Op: op, Conditions: []Condition{first, {Op: "eq", Source: "context", Path: "/request_path", Value: "/v1/responses"}}}
-			engine := compileTest(t, r)
-			input := &Input{Body: map[string]any{}, Unavailable: []string{"/context/request_path"}}
-			plain, err := engine.Apply(context.Background(), PhaseRequest, input)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(plain.ConditionTraces) != 0 {
-				t.Fatal("normal execution collected conditions")
-			}
-			input.ConditionTrace = true
-			traced, err := engine.Apply(context.Background(), PhaseRequest, input)
-			if err != nil {
-				t.Fatalf("short-circuited child was evaluated: %v", err)
-			}
-			assertJSON(t, plain.Body, traced.Body)
-			if plain.Changed != traced.Changed || plain.Blocked != traced.Blocked || plain.Model != traced.Model {
-				t.Fatal("diagnostics changed result")
-			}
-			if len(traced.ConditionTraces) != 3 {
-				t.Fatalf("traces=%+v", traced.ConditionTraces)
-			}
-			skip := traced.ConditionTraces[1]
-			if skip.Path != "/when/conditions/1" || skip.Status != "skipped" || skip.Matched != nil || skip.RuleID != r.ID {
-				t.Fatalf("skip=%+v", skip)
-			}
-		})
+		t.Run(op, func(t *testing.T) { testConditionDiagnosticsShortCircuitAndEquivalenceCase1(t, op) })
 	}
 }
 
@@ -122,4 +90,28 @@ func TestMissingHistoricalContextIsNotFalseOrSkippable(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancel=%v", err)
 	}
+}
+
+func testConditionDiagnosticsShortCircuitAndEquivalenceCase1(t *testing.T, op string) {
+	first := Condition{Op: "exists", Path: "/absent"}
+	if op == "any" {
+		first = Condition{Op: "always"}
+	}
+	r := rule("diagnostic", act("json_set", map[string]any{"path": "/changed", "value": true}))
+	r.When = Condition{Op: op, Conditions: []Condition{first, {Op: "eq", Source: "context", Path: "/request_path", Value: "/v1/responses"}}}
+	engine := compileTest(t, r)
+	input := &Input{Body: map[string]any{}, Unavailable: []string{"/context/request_path"}}
+	plain, err := engine.Apply(context.Background(), PhaseRequest, input)
+	requireNoError(t, err)
+	requireCondition(t, len(plain.ConditionTraces) == 0, "normal execution collected conditions")
+	input.ConditionTrace = true
+	traced, err := engine.Apply(context.Background(), PhaseRequest, input)
+	requireTruef(t, err == nil, "short-circuited child was evaluated: %v", err)
+	assertJSON(t, plain.Body, traced.Body)
+	requireCondition(t, !(plain.Changed != traced.Changed || plain.Blocked != traced.Blocked || plain.Model != traced.Model), "diagnostics changed result")
+	if len(traced.ConditionTraces) != 3 {
+		t.Fatalf("traces=%+v", traced.ConditionTraces)
+	}
+	skip := traced.ConditionTraces[1]
+	requireTruef(t, !(skip.Path != "/when/conditions/1" || skip.Status != "skipped" || skip.Matched != nil || skip.RuleID != r.ID), "skip=%+v", skip)
 }

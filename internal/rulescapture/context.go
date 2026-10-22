@@ -19,11 +19,7 @@ func markMissingContext(input *rules.Input, response bool) {
 		}
 	}
 	if response {
-		for _, path := range []string{"account_id", "upstream_protocol"} {
-			if !present(path) {
-				missing["/context/"+path] = true
-			}
-		}
+		markAbsentContext(input.Context, missing, []string{"account_id", "upstream_protocol"})
 	}
 	if input.Model == "" {
 		missing["/context/model"] = true
@@ -42,4 +38,12 @@ func markMissingContext(input *rules.Input, response bool) {
 		input.Unavailable = append(input.Unavailable, path)
 	}
 	sort.Strings(input.Unavailable)
+}
+
+func markAbsentContext(context map[string]any, missing map[string]bool, paths []string) {
+	for _, path := range paths {
+		if _, present := context[path]; !present {
+			missing["/context/"+path] = true
+		}
+	}
 }

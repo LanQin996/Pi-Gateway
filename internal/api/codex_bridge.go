@@ -38,20 +38,8 @@ func (s *Server) detectCodexBridge(p *prepared) *apiError {
 }
 
 func (s *Server) prepareCodexBridge(p *prepared) *apiError {
-	if p.Continuation != nil {
-		parent := p.Continuation.CodexBridge
-		if !parent.Valid() || (!s.cfg.Upstream.CodexMultiAgentCompat && parent.Enabled()) {
-			return continuationAPIError(session.ErrInvalid)
-		}
-		// The upstream chain cannot change its protocol domain halfway through.
-		if p.CodexBridge.Enabled() && !parent.Enabled() {
-			return continuationAPIError(session.ErrInvalid)
-		}
-		merged, err := codexbridge.Merge(parent, p.CodexBridge)
-		if err != nil || merged != parent {
-			return continuationAPIError(session.ErrInvalid)
-		}
-		p.CodexBridge = parent
+	if err := s.inheritCodexBridge(p); err != nil {
+		return err
 	}
 	// Finalize rules may have changed the visible tool table. Re-check it after
 	// profile inheritance, while retaining identities stripped by compact.
@@ -113,10 +101,10 @@ func (p *prepared) restoreCodexEvent(event *upstream.Event) (*upstream.Event, er
 	if err != nil {
 		return nil, codexBridgeAPIError(err, http.StatusBadGateway)
 	}
-	copy := *event
-	copy.Raw, copy.Data = raw, body
+	cloned := *event
+	cloned.Raw, cloned.Data = raw, body
 	p.recordCodexBridge("response", event.Type, rules.PhaseResponseEvent)
-	return &copy, nil
+	return &cloned, nil
 }
 
 func (p *prepared) restoreCodexBody(body map[string]any) (map[string]any, error) {
@@ -145,4 +133,23 @@ func (p *prepared) recordCodexBridge(direction, eventType, phase string) {
 		"event_type": eventType, "action_id": "codex_multi_agent_compat",
 		"action_type": "protocol_bridge", "action_index": 0,
 	})
+}
+
+func (s *Server) inheritCodexBridge(p *prepared) *apiError {
+	if p.Continuation != nil {
+		parent := p.Continuation.CodexBridge
+		if !parent.Valid() || (!s.cfg.Upstream.CodexMultiAgentCompat && parent.Enabled()) {
+			return continuationAPIError(session.ErrInvalid)
+		}
+		// The upstream chain cannot change its protocol domain halfway through.
+		if p.CodexBridge.Enabled() && !parent.Enabled() {
+			return continuationAPIError(session.ErrInvalid)
+		}
+		merged, err := codexbridge.Merge(parent, p.CodexBridge)
+		if err != nil || merged != parent {
+			return continuationAPIError(session.ErrInvalid)
+		}
+		p.CodexBridge = parent
+	}
+	return nil
 }

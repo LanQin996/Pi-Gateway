@@ -34,26 +34,10 @@ func (m *Manager) AcquireRetry(ctx context.Context, key *store.APIKey, accountID
 			return nil, nil, err
 		}
 		if m.tryReserveRetry(ctx, account, ticket) {
-			release := m.pinnedRelease(accountID)
-			fresh, err := m.retryAccount(ctx, key, accountID, model)
-			if err != nil {
-				release()
-				return nil, nil, err
+			fresh, release, err := m.finishRetryReservation(ctx, key, accountID, model)
+			if fresh != nil || err != nil {
+				return fresh, release, err
 			}
-			if err := ctx.Err(); err != nil {
-				release()
-				return nil, nil, err
-			}
-			if m.retryReady(fresh) {
-				if err := ctx.Err(); err != nil {
-					release()
-					return nil, nil, err
-				}
-				return fresh, release, nil
-			}
-			// A newly committed cooldown/interval is temporary. Keep the same
-			// FIFO position, but release capacity before waiting again.
-			release()
 		}
 		select {
 		case <-ctx.Done():
@@ -155,4 +139,28 @@ func (m *Manager) tryReserveRetry(ctx context.Context, a *store.Account, ticket 
 		return false
 	}
 	return m.reserveLocked(a)
+}
+
+func (m *Manager) finishRetryReservation(ctx context.Context, key *store.APIKey, accountID int64, model string) (*store.Account, func(), error) {
+	release := m.pinnedRelease(accountID)
+	fresh, err := m.retryAccount(ctx, key, accountID, model)
+	if err != nil {
+		release()
+		return nil, nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		release()
+		return nil, nil, err
+	}
+	if m.retryReady(fresh) {
+		if err := ctx.Err(); err != nil {
+			release()
+			return nil, nil, err
+		}
+		return fresh, release, nil
+	}
+	// A newly committed cooldown/interval is temporary. Keep the same
+	// FIFO position, but release capacity before waiting again.
+	release()
+	return nil, nil, nil
 }

@@ -74,7 +74,7 @@ watch(
 watch(
 	() => filters.value.search,
 	() => {
-		if (searchTimer) window.clearTimeout(searchTimer)
+		if (searchTimer) { window.clearTimeout(searchTimer) }
 		searchTimer = window.setTimeout(() => {
 			filters.value.offset = 0
 			void load()
@@ -96,10 +96,26 @@ function openCapture(capture: Capture) {
 }
 
 async function clearAll() {
-	const scope = unassigned.value ? t('captures.clearScopeUnassigned') : filters.value.account_id ? t('captures.clearScopeAccount') : t('captures.clearScopeAll')
-	if (!confirm(t('captures.clearConfirm', { scope }))) return
+	const scope = (() => {
+    if (unassigned.value) {
+        return t('captures.clearScopeUnassigned')
+    }
+    if (filters.value.account_id) {
+        return t('captures.clearScopeAccount')
+    }
+    return t('captures.clearScopeAll')
+})()
+	if (!confirm(t('captures.clearConfirm', { scope }))) { return }
 	try {
-		const result = await api.clearCaptures(unassigned.value ? undefined : filters.value.account_id ? Number(filters.value.account_id) : undefined, unassigned.value)
+		const result = await api.clearCaptures((() => {
+    if (unassigned.value) {
+        return undefined
+    }
+    if (filters.value.account_id) {
+        return Number(filters.value.account_id)
+    }
+    return undefined
+})(), unassigned.value)
 		toast.success(`${result.deleted}`)
 		filters.value.offset = 0
 		await load()
@@ -200,11 +216,11 @@ async function clearAll() {
 					</table>
 				</div>
 
-				<div v-else class="empty-state" role="status">
+				<output v-else class="empty-state" >
 					<Activity aria-hidden="true" />
-					<p>{{ loading ? t('stats.loading') : t('captures.empty') }}</p>
-					<p v-if="!loading">{{ t('captures.emptyHint') }}</p>
-				</div>
+					<span style="display: block">{{ loading ? t('stats.loading') : t('captures.empty') }}</span>
+					<span style="display: block" v-if="!loading">{{ t('captures.emptyHint') }}</span>
+				</output>
 			</div>
 
 			<div class="flex flex-wrap items-center justify-between gap-3 text-[12px] text-[color:var(--color-ink-faint)]">

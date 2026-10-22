@@ -55,7 +55,7 @@ function changeLocale(event: Event) {
 }
 
 async function submit() {
-	if (!canSubmit.value) return
+	if (!canSubmit.value) { return }
 	busy.value = true
 	error.value = ''
 	try {
@@ -106,8 +106,8 @@ async function submit() {
 								<span>ADMIN REALM</span>
 							</span>
 						</div>
-						<span class="login-realm" role="img" :aria-label="copy.admin" :title="copy.admin">
-							<ShieldCheck :size="18" aria-hidden="true" />
+						<span class="login-realm" :title="copy.admin">
+							<ShieldCheck :size="18" role="img" :aria-label="copy.admin" />
 						</span>
 					</header>
 

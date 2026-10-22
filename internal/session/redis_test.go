@@ -362,48 +362,48 @@ func requireRedisAccounting(t *testing.T, r *Redis, responseIDs ...string) {
 	defer cancel()
 	if len(responseIDs) == 0 {
 		n, err := r.client.Exists(ctx, r.indexKey(), r.sizeKey()).Result()
-		if err != nil || n != 0 {
+		reportTestFailure(t, err != nil || n != 0, func() {
 			t.Fatalf("empty namespace retained accounting: count=%d error=%v", n, err)
-		}
+		})
 		return
 	}
 	members, err := r.client.ZRange(ctx, r.indexKey(), 0, -1).Result()
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatal(err)
-	}
+	})
 	sizes, err := r.client.HGetAll(ctx, r.sizeKey()).Result()
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatal(err)
-	}
-	if len(members) != len(responseIDs) || len(members) > r.options.MaxEntries || len(sizes) != len(members)+1 {
+	})
+	reportTestFailure(t, len(members) != len(responseIDs) || len(members) > r.options.MaxEntries || len(sizes) != len(members)+1, func() {
 		t.Fatalf("index/size cardinality mismatch: index=%d sizes=%d want=%d", len(members), len(sizes), len(responseIDs))
-	}
+	})
 	wanted := make(map[string]bool, len(responseIDs))
 	for _, id := range responseIDs {
 		wanted[r.key(id)] = true
 	}
 	var total int64
 	for _, key := range members {
-		if !wanted[key] {
+		reportTestFailure(t, !wanted[key], func() {
 			t.Fatalf("unexpected expiry index member %q", key)
-		}
+		})
 		size, err := r.client.StrLen(ctx, key).Result()
-		if err != nil || size <= 0 {
+		reportTestFailure(t, err != nil || size <= 0, func() {
 			t.Fatalf("indexed record missing: size=%d error=%v", size, err)
-		}
-		if sizes[key] != strconv.FormatInt(size, 10) {
+		})
+		reportTestFailure(t, sizes[key] != strconv.FormatInt(size, 10), func() {
 			t.Fatalf("incorrect byte ledger for %q: got=%s want=%d", key, sizes[key], size)
-		}
+		})
 		total += size
 	}
-	if sizes["_total"] != strconv.FormatInt(total, 10) || total > r.options.MaxBytes {
+	reportTestFailure(t, sizes["_total"] != strconv.FormatInt(total, 10) || total > r.options.MaxBytes, func() {
 		t.Fatalf("incorrect/beyond-limit total: got=%s actual=%d limit=%d", sizes["_total"], total, r.options.MaxBytes)
-	}
+	})
 	for _, key := range []string{r.indexKey(), r.sizeKey()} {
 		ttl, err := r.client.PTTL(ctx, key).Result()
-		if err != nil || ttl <= 0 || ttl > r.options.TTL {
+		reportTestFailure(t, err != nil || ttl <= 0 || ttl > r.options.TTL, func() {
 			t.Fatalf("unbounded accounting TTL: ttl=%v error=%v", ttl, err)
-		}
+		})
 	}
 }
 
@@ -512,23 +512,7 @@ func (f fixture) requireCatalogAccounting(t *testing.T, name string, withLease b
 		}
 	}
 	if f.memory != nil {
-		m := f.memory
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		if len(m.entries) != len(keys) || len(m.entries) > m.options.MaxEntries {
-			t.Fatalf("memory entries=%d, expected %d", len(m.entries), len(keys))
-		}
-		var total int64
-		for _, key := range keys {
-			entry, ok := m.entries[key]
-			if !ok || !m.now().Before(entry.expires) {
-				t.Fatalf("missing/expired entry %q", key)
-			}
-			total += int64(len(entry.payload))
-		}
-		if m.bytes != total || total > m.options.MaxBytes {
-			t.Fatalf("memory bytes=%d actual=%d limit=%d", m.bytes, total, m.options.MaxBytes)
-		}
+		f.requireMemoryCatalogAccounting(t, keys)
 		return
 	}
 	r := f.redis
@@ -536,47 +520,50 @@ func (f fixture) requireCatalogAccounting(t *testing.T, name string, withLease b
 	defer cancel()
 	if len(keys) == 0 {
 		all, err := redisNamespaceKeys(ctx, r)
-		if err != nil || len(all) != 0 {
+		reportTestFailure(t, err != nil || len(all) != 0, func() {
 			t.Fatalf("empty catalog namespace retained keys: %v (%v)", all, err)
-		}
+		})
 		return
 	}
 	members, err := r.client.ZRange(ctx, r.indexKey(), 0, -1).Result()
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatal(err)
-	}
+	})
 	sizes, err := r.client.HGetAll(ctx, r.sizeKey()).Result()
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatal(err)
-	}
-	if len(members) != len(keys) || len(members) > r.options.MaxEntries || len(sizes) != len(keys)+1 {
+	})
+	reportTestFailure(t, len(members) != len(keys) || len(members) > r.options.MaxEntries || len(sizes) != len(keys)+1, func() {
 		t.Fatalf("catalog index sizes: entries=%d ledger=%d want=%d", len(members), len(sizes), len(keys))
-	}
+	})
 	var total int64
 	for _, key := range keys {
 		key = r.prefix + key
-		if _, err := r.client.ZScore(ctx, r.indexKey(), key).Result(); err != nil {
-			t.Fatalf("missing expiry entry: %v", err)
+		{
+			_, err := r.client.ZScore(ctx, r.indexKey(), key).Result()
+			reportTestFailure(t, err != nil, func() {
+				t.Fatalf("missing expiry entry: %v", err)
+			})
 		}
 		size, err := r.client.StrLen(ctx, key).Result()
-		if err != nil || sizes[key] != strconv.FormatInt(size, 10) {
+		reportTestFailure(t, err != nil || sizes[key] != strconv.FormatInt(size, 10), func() {
 			t.Fatalf("catalog ledger=%s actual=%d err=%v", sizes[key], size, err)
-		}
+		})
 		total += size
 	}
-	if sizes["_total"] != strconv.FormatInt(total, 10) || total > r.options.MaxBytes {
+	reportTestFailure(t, sizes["_total"] != strconv.FormatInt(total, 10) || total > r.options.MaxBytes, func() {
 		t.Fatalf("catalog total=%s actual=%d limit=%d", sizes["_total"], total, r.options.MaxBytes)
-	}
+	})
 	for _, key := range []string{r.indexKey(), r.sizeKey()} {
 		ttl, err := r.client.PTTL(ctx, key).Result()
-		if err != nil || ttl <= 0 || ttl > DefaultCatalogTTL {
+		reportTestFailure(t, err != nil || ttl <= 0 || ttl > DefaultCatalogTTL, func() {
 			t.Fatalf("catalog index has unbounded TTL: %v (%v)", ttl, err)
-		}
+		})
 	}
 	all, err := redisNamespaceKeys(ctx, r)
-	if err != nil || len(all) != len(keys)+2 {
+	reportTestFailure(t, err != nil || len(all) != len(keys)+2, func() {
 		t.Fatalf("catalog leaked auxiliary keys: keys=%v err=%v", all, err)
-	}
+	})
 }
 
 func runCatalogCorruptionContract(t *testing.T, makeFixture fixtureFactory) {
@@ -589,26 +576,7 @@ func runCatalogCorruptionContract(t *testing.T, makeFixture fixtureFactory) {
 		name    string
 		payload []byte
 	}{{"empty", nil}, {"bad_json", []byte(`{"unfinished":`)}, {"oversize", catalogPayload(MaxCatalogBytes + 1)}} {
-		t.Run(tc.name, func(t *testing.T) {
-			if f.memory != nil {
-				f.memory.mu.Lock()
-				f.memory.put(key, tc.payload, f.memory.now().Add(DefaultCatalogTTL))
-				f.memory.mu.Unlock()
-			} else if err := f.redis.client.Set(ctx, f.redis.prefix+key, tc.payload, DefaultCatalogTTL).Err(); err != nil {
-				t.Fatal(err)
-			}
-			got, err := cache.GetCatalog(ctx, name)
-			requireStatus(t, err, Invalid)
-			if got != nil {
-				t.Fatal("corrupt catalog exposed to caller")
-			}
-			if f.redis != nil && len(tc.payload) > MaxCatalogBytes {
-				result, err := catalogReadScript.Run(ctx, f.redis.client, []string{f.redis.prefix + key}, MaxCatalogBytes).Slice()
-				if err != nil || len(result) != 2 || result[0] != int64(3) || result[1] != "" {
-					t.Fatalf("oversize catalog returned bytes across Redis transport: %v", err)
-				}
-			}
-		})
+		t.Run(tc.name, func(t *testing.T) { checkCorruptCatalogPayload(t, f, cache, ctx, name, key, tc.payload) })
 	}
 	t.Run("malformed_lease", func(t *testing.T) {
 		g := makeFixture(t, Options{})
@@ -619,8 +587,11 @@ func runCatalogCorruptionContract(t *testing.T, makeFixture fixtureFactory) {
 			g.memory.mu.Lock()
 			g.memory.put(lease, []byte("broken"), g.memory.now().Add(5*time.Second))
 			g.memory.mu.Unlock()
-		} else if err := g.redis.client.Set(ctx, g.redis.prefix+lease, "broken", 5*time.Second).Err(); err != nil {
-			t.Fatal(err)
+		} else {
+			err := g.redis.client.Set(ctx, g.redis.prefix+lease, "broken", 5*time.Second).Err()
+			reportTestFailure(t, err != nil, func() {
+				t.Fatal(err)
+			})
 		}
 		requireStatus(t, other.CommitCatalog(ctx, name, token, []byte(`[]`), 0), Invalid)
 		_, err := other.GetCatalog(ctx, name)
@@ -631,16 +602,25 @@ func runCatalogCorruptionContract(t *testing.T, makeFixture fixtureFactory) {
 	}
 	t.Run("wrong_type_and_no_expiry", func(t *testing.T) {
 		rawKey := f.redis.prefix + key
-		if err := f.redis.client.Del(ctx, rawKey).Err(); err != nil {
-			t.Fatal(err)
+		{
+			err := f.redis.client.Del(ctx, rawKey).Err()
+			reportTestFailure(t, err != nil, func() {
+				t.Fatal(err)
+			})
 		}
-		if err := f.redis.client.LPush(ctx, rawKey, "not-a-catalog").Err(); err != nil {
-			t.Fatal(err)
+		{
+			err := f.redis.client.LPush(ctx, rawKey, "not-a-catalog").Err()
+			reportTestFailure(t, err != nil, func() {
+				t.Fatal(err)
+			})
 		}
 		_, err := cache.GetCatalog(ctx, name)
 		requireStatus(t, err, Invalid)
-		if err := f.redis.client.Set(ctx, rawKey, `[]`, 0).Err(); err != nil {
-			t.Fatal(err)
+		{
+			err := f.redis.client.Set(ctx, rawKey, `[]`, 0).Err()
+			reportTestFailure(t, err != nil, func() {
+				t.Fatal(err)
+			})
 		}
 		_, err = cache.GetCatalog(ctx, name)
 		requireStatus(t, err, Invalid)
@@ -658,50 +638,26 @@ func runCatalogCorruptionContract(t *testing.T, makeFixture fixtureFactory) {
 			if field == "catalog" {
 				field = g.redis.prefix + key
 			}
-			if err := g.redis.client.HSet(ctx, g.redis.sizeKey(), field, corruption.value).Err(); err != nil {
-				t.Fatal(err)
+			{
+				err := g.redis.client.HSet(ctx, g.redis.sizeKey(), field, corruption.value).Err()
+				reportTestFailure(t, err != nil, func() {
+					t.Fatal(err)
+				})
 			}
 			requireStatus(t, g.redis.CommitCatalog(ctx, name, token, []byte(`[]`), 0), Invalid)
 			got, err := g.redis.GetCatalog(ctx, name)
 			requireStatus(t, err, Hit)
-			if string(got) != `{"models":[]}` {
+			reportTestFailure(t, string(got) != `{"models":[]}`, func() {
 				t.Fatal("corrupt ledger allowed catalog overwrite")
-			}
+			})
 			lease, _ := leaseKey(name)
 			owner, err := g.redis.client.Get(ctx, g.redis.prefix+lease).Result()
-			if err != nil || owner != token {
+			reportTestFailure(t, err != nil || owner != token, func() {
 				t.Fatalf("invalid commit consumed lease: %v", err)
-			}
+			})
 		})
 	}
-	for _, target := range []string{"lease_type", "lease_no_expiry", "expiry_type", "sizes_type"} {
-		t.Run(target, func(t *testing.T) {
-			g := makeFixture(t, Options{})
-			token := acquireCatalogLease(t, g.redis, name)
-			lease, _ := leaseKey(name)
-			key := g.redis.prefix + lease
-			if target == "lease_no_expiry" {
-				if err := g.redis.client.Persist(ctx, key).Err(); err != nil {
-					t.Fatal(err)
-				}
-			} else {
-				if target == "expiry_type" {
-					key = g.redis.indexKey()
-				} else if target == "sizes_type" {
-					key = g.redis.sizeKey()
-				}
-				if err := g.redis.client.Del(ctx, key).Err(); err != nil {
-					t.Fatal(err)
-				}
-				if err := g.redis.client.LPush(ctx, key, "broken").Err(); err != nil {
-					t.Fatal(err)
-				}
-			}
-			requireStatus(t, g.redis.CommitCatalog(ctx, name, token, []byte(`[]`), 0), Invalid)
-			_, err := g.redis.GetCatalog(ctx, name)
-			requireStatus(t, err, Miss)
-		})
-	}
+	runCatalogMetadataCorruption(t, makeFixture, ctx, name)
 }
 
 func TestRedisCatalogUnavailable(t *testing.T) {
@@ -734,14 +690,14 @@ func runCatalogNamespaceContract(t *testing.T, makeFixture fixtureFactory) {
 	const name = "model-catalog-v1:private-revision-and-account-set"
 	catalog, _ := catalogKey(name)
 	lease, _ := leaseKey(name)
-	if catalog == lease || catalog == responseKey(name) || Fingerprint("catalog", name) == Fingerprint("lease", name) {
+	reportTestFailure(t, catalog == lease || catalog == responseKey(name) || Fingerprint("catalog", name) == Fingerprint("lease", name), func() {
 		t.Fatal("catalog, lease, and response key domains overlap")
-	}
+	})
 	token := acquireCatalogLease(t, cache, name)
 	secondToken := acquireCatalogLease(t, second, name)
-	if token == secondToken {
+	reportTestFailure(t, token == secondToken, func() {
 		t.Fatal("namespaces share lease tokens")
-	}
+	})
 	requireStatus(t, second.CommitCatalog(ctx, name, token, []byte(`[]`), 0), WrongOwner)
 	requireStatus(t, cache.ReleaseFillLease(ctx, name, secondToken), WrongOwner)
 	requireStatus(t, cache.CommitCatalog(ctx, name, token, []byte(`{"models":["first"]}`), 0), Hit)
@@ -753,9 +709,9 @@ func runCatalogNamespaceContract(t *testing.T, makeFixture fixtureFactory) {
 	}{{cache, `{"models":["first"]}`}, {second, `{"models":["second"]}`}} {
 		got, err := tc.cache.GetCatalog(ctx, name)
 		requireStatus(t, err, Hit)
-		if string(got) != tc.want {
+		reportTestFailure(t, string(got) != tc.want, func() {
 			t.Fatal("catalog escaped namespace or shared response storage")
-		}
+		})
 		for _, changed := range []string{name + ":new-revision", name + ":new-account-set"} {
 			_, err := tc.cache.GetCatalog(ctx, changed)
 			requireStatus(t, err, Miss)
@@ -765,16 +721,102 @@ func runCatalogNamespaceContract(t *testing.T, makeFixture fixtureFactory) {
 		return
 	}
 	keys, err := redisNamespaceKeys(ctx, f.redis)
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatal(err)
-	}
+	})
 	for _, key := range keys {
-		if strings.Contains(key, name) || !strings.HasPrefix(key, f.redis.prefix) {
+		reportTestFailure(t, strings.Contains(key, name) || !strings.HasPrefix(key, f.redis.prefix), func() {
 			t.Fatal("catalog key leaked raw identity or escaped namespace")
-		}
+		})
 	}
 	raw, err := f.redis.client.Get(ctx, f.redis.prefix+catalog).Result()
-	if err != nil || raw != `{"models":["first"]}` {
+	reportTestFailure(t, err != nil || raw != `{"models":["first"]}`, func() {
 		t.Fatalf("catalog stored data other than caller's JSON: err=%v", err)
+	})
+}
+
+func (f fixture) requireMemoryCatalogAccounting(t *testing.T, keys []string) {
+	t.Helper()
+	m := f.memory
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	reportTestFailure(t, len(m.entries) != len(keys) || len(m.entries) > m.options.MaxEntries, func() {
+		t.Fatalf("memory entries=%d, expected %d", len(m.entries), len(keys))
+	})
+	var total int64
+	for _, key := range keys {
+		entry, ok := m.entries[key]
+		reportTestFailure(t, !ok || !m.now().Before(entry.expires), func() {
+			t.Fatalf("missing/expired entry %q", key)
+		})
+		total += int64(len(entry.payload))
+	}
+	reportTestFailure(t, m.bytes != total || total > m.options.MaxBytes, func() {
+		t.Fatalf("memory bytes=%d actual=%d limit=%d", m.bytes, total, m.options.MaxBytes)
+	})
+	return
+}
+
+func checkCorruptCatalogPayload(t *testing.T, f fixture, cache CatalogCache, ctx context.Context, name, key string, payload []byte) {
+	if f.memory != nil {
+		f.memory.mu.Lock()
+		f.memory.put(key, payload, f.memory.now().Add(DefaultCatalogTTL))
+		f.memory.mu.Unlock()
+	} else {
+		err := f.redis.client.Set(ctx, f.redis.prefix+key, payload, DefaultCatalogTTL).Err()
+		reportTestFailure(t, err != nil, func() {
+			t.Fatal(err)
+		})
+	}
+	got, err := cache.GetCatalog(ctx, name)
+	requireStatus(t, err, Invalid)
+	reportTestFailure(t, got != nil, func() {
+		t.Fatal("corrupt catalog exposed to caller")
+	})
+	if f.redis != nil && len(payload) > MaxCatalogBytes {
+		result, err := catalogReadScript.Run(ctx, f.redis.client, []string{f.redis.prefix + key}, MaxCatalogBytes).Slice()
+		reportTestFailure(t, err != nil || len(result) != 2 || result[0] != int64(3) || result[1] != "", func() {
+			t.Fatalf("oversize catalog returned bytes across Redis transport: %v", err)
+		})
+	}
+}
+
+func runCatalogMetadataCorruption(t *testing.T, makeFixture fixtureFactory, ctx context.Context, name string) {
+	for _, target := range []string{"lease_type", "lease_no_expiry", "expiry_type", "sizes_type"} {
+		t.Run(target, func(t *testing.T) {
+			g := makeFixture(t, Options{})
+			token := acquireCatalogLease(t, g.redis, name)
+			lease, _ := leaseKey(name)
+			key := g.redis.prefix + lease
+			if target == "lease_no_expiry" {
+				{
+					err := g.redis.client.Persist(ctx, key).Err()
+					reportTestFailure(t, err != nil, func() {
+						t.Fatal(err)
+					})
+				}
+			} else {
+				if target == "expiry_type" {
+					key = g.redis.indexKey()
+				} else if target == "sizes_type" {
+					key = g.redis.sizeKey()
+				}
+				{
+					err := g.redis.client.Del(ctx, key).Err()
+					reportTestFailure(t, err != nil, func() {
+						t.Fatal(err)
+					})
+				}
+				{
+					err := g.redis.client.LPush(ctx, key, "broken").Err()
+					reportTestFailure(t, err != nil, func() {
+						t.Fatal(err)
+					})
+				}
+			}
+			requireStatus(t, g.redis.CommitCatalog(ctx, name, token, []byte(`[]`), 0), Invalid)
+			_, err := g.redis.GetCatalog(ctx, name)
+			requireStatus(t, err, Miss)
+		})
 	}
 }

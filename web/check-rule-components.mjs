@@ -106,7 +106,7 @@ export async function checkRuleComponents(schema) {
     const walk = n => [n, ...n.children.flatMap(walk)]
     const text = n => n.text + n.children.map(text).join('')
     const control = (root, predicate) => {
-        const found = walk(root).find(predicate);
+        const found = walk(root).find(node => predicate(node));
         assert.ok(found, 'Expected rendered control');
         return found
     }
@@ -210,25 +210,33 @@ export async function checkRuleComponents(schema) {
     }
 
     for (const field of schema.rule_fields) if (!['when', 'actions'].includes(field.name)) await editField(field)
-    for (const cap of schema.actions) {
-        const action = components.newAction(cap.id, schema)
-        const mounted = mount(components.ActionEditor, [action], {schema, phase: cap.phases[0]})
-        for (const button of walk(mounted.host).filter(n => n.type === 'button' && text(n).startsWith('Options ·'))) await fire(button, 'onClick')
-        for (const field of cap.fields) assert.ok(walk(mounted.host).some(n => n.props['data-rule-path'] === `/actions/0/params/${field.name}`), `${cap.id}.${field.name}: not rendered`)
-        mounted.unmount();
-        capabilitiesRendered++
-        for (const field of cap.fields) await editField(field)
-    }
-    for (const cap of schema.conditions) {
-        const condition = components.defaultCondition(cap.id, schema)
-        const mounted = mount(components.ConditionEditor, condition, {schema})
-        const options = walk(control(mounted.host, n => n.type === 'select')).filter(n => n.type === 'option').map(n => n.props.value)
-        assert.deepEqual(options, schema.conditions.map(c => c.id))
-        if (['all', 'any', 'not'].includes(cap.id)) assert.ok(walk(mounted.host).some(n => n.props['data-rule-path'] === '/when/conditions/0'))
-        else for (const field of cap.fields) assert.ok(walk(mounted.host).some(n => n.props['data-rule-path'] === `/when/${field.name}`))
-        mounted.unmount();
-        capabilitiesRendered++
-        for (const field of cap.fields) await editField(field)
+    await checkCapabilities()
+
+    async function checkCapabilities() {
+        for (const cap of schema.actions) {
+            const action = components.newAction(cap.id, schema)
+            const mounted = mount(components.ActionEditor, [action], {schema, phase: cap.phases[0]})
+            for (const button of walk(mounted.host).filter(n => n.type === 'button' && text(n).startsWith('Options ·'))) await fire(button, 'onClick')
+            for (const field of cap.fields) assert.ok(walk(mounted.host).some(n => n.props['data-rule-path'] === `/actions/0/params/${field.name}`), `${cap.id}.${field.name}: not rendered`)
+            mounted.unmount();
+            capabilitiesRendered++
+            for (const field of cap.fields) await editField(field)
+        }
+        await checkConditions()
+
+        async function checkConditions() {
+            for (const cap of schema.conditions) {
+                const condition = components.defaultCondition(cap.id, schema)
+                const mounted = mount(components.ConditionEditor, condition, {schema})
+                const options = walk(control(mounted.host, n => n.type === 'select')).filter(n => n.type === 'option').map(n => n.props.value)
+                assert.deepEqual(options, schema.conditions.map(c => c.id))
+                if (['all', 'any', 'not'].includes(cap.id)) assert.ok(walk(mounted.host).some(n => n.props['data-rule-path'] === '/when/conditions/0'))
+                else for (const field of cap.fields) assert.ok(walk(mounted.host).some(n => n.props['data-rule-path'] === `/when/${field.name}`))
+                mounted.unmount();
+                capabilitiesRendered++
+                for (const field of cap.fields) await editField(field)
+            }
+        }
     }
     // Create nested object/array/scalar values using only actual component controls.
     const json = mount(components.JsonValueEditor, null)
@@ -290,47 +298,51 @@ export async function checkRuleComponents(schema) {
     await fire(control(actions.host, n => n.type === 'button' && n.props.title === 'Move down'), 'onClick')
     assert.equal(actions.state.value[1].id, firstID);
     actions.unmount()
-    // Mount the complete editor and exercise its code/visual mode handlers, not just JSON.parse.
-    const fixtures = [...(schema.examples ?? [])]
-    for (const cap of schema.actions) {
-        const action = components.newAction(cap.id, schema)
-        if (cap.id === 'rewrite_model') action.params.model = 'test-model'
-        if (cap.id === 'text_replace') action.params.pattern = 'hello'
-        if (cap.id === 'json_merge') action.params.value = {a: [null, true, 'x']}
-        fixtures.push({...components.newRule(), name: cap.id, phase: cap.phases[0], actions: [action]})
-    }
-    for (const fixture of fixtures) {
-        const state = components.createDraft(fixture)
-        const editor = mount(components.RuleEditor, state, {schema})
-        await clickLabel(editor.host, 'JSON code')
-        assert.equal(editor.state.value.mode, 'code')
-        assert.deepEqual(components.safeParseJSON(editor.state.value.code), normalized(fixture))
-        await clickLabel(editor.host, 'Visual editor')
-        assert.equal(editor.state.value.mode, 'visual', JSON.stringify(editor.state.value.errors))
-        assert.deepEqual(normalized(editor.state.value.rule), normalized(fixture))
-        const changedDescription = `graph edit ${roundtrips}\nmultiline`
-        // Canvas fields are covered by real browser tests; this custom renderer stubs Vue Flow.
-        await clickLabel(editor.host, 'Steps')
-        if (fixture.description === undefined) {
-            const description = control(editor.host, n => n.props['data-rule-path'] === '/description')
-            await clickLabel(description, 'Set optional field')
+    await checkRoundtrips()
+
+    async function checkRoundtrips() {
+        // Mount the complete editor and exercise its code/visual mode handlers, not just JSON.parse.
+        const fixtures = [...(schema.examples ?? [])]
+        for (const cap of schema.actions) {
+            const action = components.newAction(cap.id, schema)
+            if (cap.id === 'rewrite_model') action.params.model = 'test-model'
+            if (cap.id === 'text_replace') action.params.pattern = 'hello'
+            if (cap.id === 'json_merge') action.params.value = {a: [null, true, 'x']}
+            fixtures.push({...components.newRule(), name: cap.id, phase: cap.phases[0], actions: [action]})
         }
-        await fire(control(editor.host, n => n.type === 'textarea' && n.props.id === 'rule-field-/description'), 'onInput', changedDescription)
-        await clickLabel(editor.host, 'JSON code')
-        assert.deepEqual(components.safeParseJSON(editor.state.value.code), normalized({
-            ...fixture,
-            description: changedDescription
-        }));
-        roundtrips++
-        if (roundtrips === 1) {
-            const before = normalized(editor.state.value.rule);
-            await fire(control(editor.host, n => n.type === 'textarea' && n.props['aria-label'] === 'JSON code'), 'onInput', '{broken');
-            await clickLabel(editor.host, 'Visual editor');
-            assert.equal(editor.state.value.mode, 'code');
-            assert.equal(editor.state.value.code, '{broken');
-            assert.deepEqual(normalized(editor.state.value.rule), before)
+        for (const fixture of fixtures) {
+            const state = components.createDraft(fixture)
+            const editor = mount(components.RuleEditor, state, {schema})
+            await clickLabel(editor.host, 'JSON code')
+            assert.equal(editor.state.value.mode, 'code')
+            assert.deepEqual(components.safeParseJSON(editor.state.value.code), normalized(fixture))
+            await clickLabel(editor.host, 'Visual editor')
+            assert.equal(editor.state.value.mode, 'visual', JSON.stringify(editor.state.value.errors))
+            assert.deepEqual(normalized(editor.state.value.rule), normalized(fixture))
+            const changedDescription = `graph edit ${roundtrips}\nmultiline`
+            // Canvas fields are covered by real browser tests; this custom renderer stubs Vue Flow.
+            await clickLabel(editor.host, 'Steps')
+            if (fixture.description === undefined) {
+                const description = control(editor.host, n => n.props['data-rule-path'] === '/description')
+                await clickLabel(description, 'Set optional field')
+            }
+            await fire(control(editor.host, n => n.type === 'textarea' && n.props.id === 'rule-field-/description'), 'onInput', changedDescription)
+            await clickLabel(editor.host, 'JSON code')
+            assert.deepEqual(components.safeParseJSON(editor.state.value.code), normalized({
+                ...fixture,
+                description: changedDescription
+            }));
+            roundtrips++
+            if (roundtrips === 1) {
+                const before = normalized(editor.state.value.rule);
+                await fire(control(editor.host, n => n.type === 'textarea' && n.props['aria-label'] === 'JSON code'), 'onInput', '{broken');
+                await clickLabel(editor.host, 'Visual editor');
+                assert.equal(editor.state.value.mode, 'code');
+                assert.equal(editor.state.value.code, '{broken');
+                assert.deepEqual(normalized(editor.state.value.rule), before)
+            }
+            editor.unmount()
         }
-        editor.unmount()
     }
     console.log(`PASS: real Vue controls: ${capabilitiesRendered} capabilities, ${fieldsEdited} field edits, ${enumsEdited} enum options, recursive JSON/reference creation, ${roundtrips} code→visual→code roundtrips and invalid-code retention`)
 }

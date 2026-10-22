@@ -240,9 +240,8 @@ export function ruleLabel(group: string, value: string, locale: string): string 
 }
 
 export function ruleFieldLabel(field: Pick<RuleField, 'name' | 'label'>, locale: string): string {
-    return ruleLabels.field?.[field.name]
-        ? ruleLabel('field', field.name, locale)
-        : field.label?.split(' / ')[locale === 'zh-CN' ? 0 : 1] ?? field.name
+    if (ruleLabels.field?.[field.name]) return ruleLabel('field', field.name, locale)
+    return field.label?.split(' / ')[locale === 'zh-CN' ? 0 : 1] ?? field.name
 }
 
 export function ruleOptionLabel(value: string, locale: string): string {
@@ -252,5 +251,6 @@ export function ruleOptionLabel(value: string, locale: string): string {
 
 export function localizedConditionSummary(condition: RuleCondition, locale: string): string {
     const label = ruleLabel('condition', condition.op, locale)
-    return condition.conditions ? `${label} (${condition.conditions.map(c => localizedConditionSummary(c, locale)).join(' · ')})` : `${label}${condition.path ? ` · ${condition.path}` : ''}`
+    if (condition.conditions) return `${label} (${condition.conditions.map(c => localizedConditionSummary(c, locale)).join(' · ')})`
+    return condition.path ? `${label} · ${condition.path}` : label
 }

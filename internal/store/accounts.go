@@ -236,7 +236,18 @@ func (s *Store) UpdateAccount(ctx context.Context, a *Account) error {
 // PATCH surface. It deliberately excludes all access/refresh/id tokens, expiry,
 // and oauth_client_id so a stale admin snapshot cannot overwrite a live rotation.
 // The admin package should call this method instead of UpdateAccount.
-func (s *Store) UpdateAccountManagementFields(ctx context.Context, id int64, name string, enabled bool, weight, concurrency int, proxyURL, upstreamProtocol string, proxyIDs ...*int64) error {
+type AccountManagementFields struct {
+	Name             string
+	Enabled          bool
+	Weight           int
+	Concurrency      int
+	ProxyURL         string
+	UpstreamProtocol string
+}
+
+func (s *Store) UpdateAccountManagementFields(ctx context.Context, id int64, fields AccountManagementFields, proxyIDs ...*int64) error {
+	name, enabled, weight, concurrency := fields.Name, fields.Enabled, fields.Weight, fields.Concurrency
+	proxyURL, upstreamProtocol := fields.ProxyURL, fields.UpstreamProtocol
 	now := NowMS()
 	query := `UPDATE accounts SET name=?, enabled=?, weight=?, concurrency=?, upstream_protocol=?, updated_at=?`
 	args := []any{name, boolToInt(enabled), weight, concurrency, upstreamProtocol, now}
@@ -300,66 +311,9 @@ func decodeSupplementalModels(raw string) ([]string, error) {
 }
 
 func (s *Store) PatchAccountManagementFields(ctx context.Context, id int64, patch AccountManagementPatch) error {
-	sets := []string{"updated_at=?"}
-	args := []any{NowMS()}
-	if patch.Name != nil {
-		name := strings.TrimSpace(*patch.Name)
-		if name == "" {
-			return fmt.Errorf("%w: account name cannot be empty", ErrInvalidPolicy)
-		}
-		sets = append(sets, "name=?")
-		args = append(args, name)
-	}
-	if patch.Enabled != nil {
-		sets = append(sets, "enabled=?")
-		args = append(args, boolToInt(*patch.Enabled))
-	}
-	if patch.Weight != nil {
-		if *patch.Weight < 1 {
-			return fmt.Errorf("%w: weight must be at least 1", ErrInvalidPolicy)
-		}
-		sets = append(sets, "weight=?")
-		args = append(args, *patch.Weight)
-	}
-	if patch.Cooldown429Seconds != nil {
-		if *patch.Cooldown429Seconds < -1 || *patch.Cooldown429Seconds > 604800 {
-			return fmt.Errorf("%w: cooldown_429_seconds must be between -1 and 604800", ErrInvalidPolicy)
-		}
-		sets = append(sets, "cooldown_429_seconds=?")
-		args = append(args, *patch.Cooldown429Seconds)
-	}
-	if patch.Concurrency != nil {
-		if *patch.Concurrency < 1 {
-			return fmt.Errorf("%w: concurrency must be at least 1", ErrInvalidPolicy)
-		}
-		sets = append(sets, "concurrency=?")
-		args = append(args, *patch.Concurrency)
-	}
-	if patch.UpstreamProtocol != nil {
-		sets = append(sets, "upstream_protocol=?")
-		args = append(args, *patch.UpstreamProtocol)
-	}
-	if patch.Proxy != nil {
-		sets = append(sets, "proxy_url=?", "proxy_id=?")
-		args = append(args, patch.Proxy.URL, patch.Proxy.ID)
-	}
-	if patch.DisabledModels != nil {
-		models, err := NormalizeDisabledModels(patch.DisabledModels)
-		if err != nil {
-			return err
-		}
-		raw, _ := json.Marshal(models)
-		sets = append(sets, "disabled_models=?")
-		args = append(args, string(raw))
-	}
-	if patch.SupplementalModels != nil {
-		models, err := normalizeSupplementalModels(patch.SupplementalModels)
-		if err != nil {
-			return err
-		}
-		raw, _ := json.Marshal(models)
-		sets = append(sets, "supplemental_models=?")
-		args = append(args, string(raw))
+	sets, args, err := accountManagementUpdate(patch)
+	if err != nil {
+		return err
 	}
 	tx, err := s.BeginTx(ctx, nil)
 	if err != nil {
@@ -404,7 +358,19 @@ func (s *Store) UpdateAccountCredentials(ctx context.Context, id int64, access, 
 
 // AttachChatGPTCredential preserves management policy, Codex linkage and usage.
 // An explicitly authorized attachment activates a credential-only placeholder.
-func (s *Store) AttachChatGPTCredential(ctx context.Context, id int64, email, plan, access, refresh, idToken, clientID string, expiresAt int64) error {
+type ChatGPTCredential struct {
+	Email     string
+	Plan      string
+	Access    string
+	Refresh   string
+	IDToken   string
+	ClientID  string
+	ExpiresAt int64
+}
+
+func (s *Store) AttachChatGPTCredential(ctx context.Context, id int64, credential ChatGPTCredential) error {
+	email, plan, access, refresh := credential.Email, credential.Plan, credential.Access, credential.Refresh
+	idToken, clientID, expiresAt := credential.IDToken, credential.ClientID, credential.ExpiresAt
 	result, err := s.ExecContext(ctx, `UPDATE accounts SET
 	 enabled=CASE WHEN access_token='' THEN 1 ELSE enabled END,
 	 email=?,plan_type=?,access_token=?,refresh_token=?,id_token=?,oauth_client_id=?,
@@ -713,4 +679,78 @@ func (s *Store) DeleteAccount(ctx context.Context, id int64) error {
 		}
 	}
 	return tx.Commit()
+}
+
+func accountManagementUpdate(patch AccountManagementPatch) ([]string, []any, error) {
+	sets := []string{"updated_at=?"}
+	args := []any{NowMS()}
+	if patch.Name != nil {
+		name := strings.TrimSpace(*patch.Name)
+		if name == "" {
+			return nil, nil, fmt.Errorf("%w: account name cannot be empty", ErrInvalidPolicy)
+		}
+		sets = append(sets, "name=?")
+		args = append(args, name)
+	}
+	if patch.Enabled != nil {
+		sets = append(sets, "enabled=?")
+		args = append(args, boolToInt(*patch.Enabled))
+	}
+	var err error
+	sets, args, err = appendAccountCapacityUpdate(sets, args, patch)
+	if err != nil {
+		return nil, nil, err
+	}
+	if patch.UpstreamProtocol != nil {
+		sets = append(sets, "upstream_protocol=?")
+		args = append(args, *patch.UpstreamProtocol)
+	}
+	if patch.Proxy != nil {
+		sets = append(sets, "proxy_url=?", "proxy_id=?")
+		args = append(args, patch.Proxy.URL, patch.Proxy.ID)
+	}
+	if patch.DisabledModels != nil {
+		models, err := NormalizeDisabledModels(patch.DisabledModels)
+		if err != nil {
+			return nil, nil, err
+		}
+		raw, _ := json.Marshal(models)
+		sets = append(sets, "disabled_models=?")
+		args = append(args, string(raw))
+	}
+	if patch.SupplementalModels != nil {
+		models, err := normalizeSupplementalModels(patch.SupplementalModels)
+		if err != nil {
+			return nil, nil, err
+		}
+		raw, _ := json.Marshal(models)
+		sets = append(sets, "supplemental_models=?")
+		args = append(args, string(raw))
+	}
+	return sets, args, nil
+}
+
+func appendAccountCapacityUpdate(sets []string, args []any, patch AccountManagementPatch) ([]string, []any, error) {
+	if patch.Weight != nil {
+		if *patch.Weight < 1 {
+			return nil, nil, fmt.Errorf("%w: weight must be at least 1", ErrInvalidPolicy)
+		}
+		sets = append(sets, "weight=?")
+		args = append(args, *patch.Weight)
+	}
+	if patch.Cooldown429Seconds != nil {
+		if *patch.Cooldown429Seconds < -1 || *patch.Cooldown429Seconds > 604800 {
+			return nil, nil, fmt.Errorf("%w: cooldown_429_seconds must be between -1 and 604800", ErrInvalidPolicy)
+		}
+		sets = append(sets, "cooldown_429_seconds=?")
+		args = append(args, *patch.Cooldown429Seconds)
+	}
+	if patch.Concurrency != nil {
+		if *patch.Concurrency < 1 {
+			return nil, nil, fmt.Errorf("%w: concurrency must be at least 1", ErrInvalidPolicy)
+		}
+		sets = append(sets, "concurrency=?")
+		args = append(args, *patch.Concurrency)
+	}
+	return sets, args, nil
 }

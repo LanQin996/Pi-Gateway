@@ -8,7 +8,6 @@ import (
 )
 
 type evaluation struct {
-	ctx           context.Context
 	body          any
 	client        any
 	facts         map[string]any
@@ -43,30 +42,7 @@ func (s *evaluation) source(source string) any {
 	case "vars":
 		return s.vars
 	case "context":
-		facts := make(map[string]any, len(s.facts)+5)
-		for k, v := range s.facts {
-			facts[k] = v
-		}
-		facts["model"] = s.model
-		if !s.hasItem && (s.phase == PhaseRequest || s.phase == PhaseRequestFinalize) {
-			if model, ok := objGet(s.body, "model"); ok {
-				facts["model"] = model
-			}
-		}
-		facts["original_model"] = s.originalModel
-		if s.phase == PhaseResponseEvent || s.phase == PhaseResponseBody {
-			facts["event_type"] = s.eventType
-		} else if s.phase != PhaseUpstreamHeaders {
-			delete(facts, "account_id")
-			delete(facts, "upstream_protocol")
-			delete(facts, "event_type")
-		}
-		if s.hasItem {
-			facts["item_index"] = s.index
-		} else {
-			delete(facts, "item_index")
-		}
-		return facts
+		return s.contextFacts()
 	case "item":
 		if s.hasItem {
 			return s.item
@@ -104,7 +80,7 @@ func (s *evaluation) selectValue(source, path, encoding string) (any, bool, erro
 	}
 	return v, true, nil
 }
-func (s *evaluation) expression(v any) (any, bool, error) {
+func (s *evaluation) expression(ctx context.Context, v any) (any, bool, error) {
 	if m, ok := v.(map[string]any); ok {
 		if x, exists := m["$literal"]; exists {
 			return x, true, nil
@@ -114,13 +90,13 @@ func (s *evaluation) expression(v any) (any, bool, error) {
 			return s.selectValue(stringParam(r, "source"), stringParam(r, "path"), stringParam(r, "encoding"))
 		}
 		if x, exists := m["$expr"]; exists {
-			return s.compute(x.(map[string]any))
+			return s.compute(ctx, x.(map[string]any))
 		}
 	}
 	return v, true, nil
 }
-func (s *evaluation) requiredExpression(v any) (any, error) {
-	x, ok, e := s.expression(v)
+func (s *evaluation) requiredExpression(ctx context.Context, v any) (any, error) {
+	x, ok, e := s.expression(ctx, v)
 	if e != nil {
 		return nil, e
 	}
@@ -129,11 +105,11 @@ func (s *evaluation) requiredExpression(v any) (any, error) {
 	}
 	return cloneJSON(x)
 }
-func (c *compiledCondition) matches(s *evaluation) (matched bool, err error) {
+func (c *compiledCondition) matches(ctx context.Context, s *evaluation) (matched bool, err error) {
 	if s.conditions != nil {
 		defer func() { s.conditions.record(c, s, matched, err, false) }()
 	}
-	return c.evaluate(s)
+	return c.evaluate(ctx, s)
 }
 
 func (c *compiledCondition) skip(s *evaluation) {
@@ -146,47 +122,21 @@ func (c *compiledCondition) skip(s *evaluation) {
 	}
 }
 
-func (c *compiledCondition) evaluate(s *evaluation) (bool, error) {
-	if e := s.ctx.Err(); e != nil {
+func (c *compiledCondition) evaluate(ctx context.Context, s *evaluation) (bool, error) {
+	if e := ctx.Err(); e != nil {
 		return false, e
 	}
 	switch c.raw.Op {
 	case "test":
-		v, exists, err := s.expression(c.raw.Value)
-		if err != nil || !exists {
-			return false, err
-		}
-		b, ok := v.(bool)
-		if !ok {
-			return false, fmt.Errorf("test expression must produce boolean")
-		}
-		return b, nil
+		return c.evaluateTest(ctx, s)
 	case "always":
 		return true, nil
 	case "all":
-		for i, x := range c.children {
-			ok, e := x.matches(s)
-			if e != nil || !ok {
-				for _, skipped := range c.children[i+1:] {
-					skipped.skip(s)
-				}
-				return ok, e
-			}
-		}
-		return true, nil
+		return c.evaluateAll(ctx, s)
 	case "any":
-		for i, x := range c.children {
-			ok, e := x.matches(s)
-			if e != nil || ok {
-				for _, skipped := range c.children[i+1:] {
-					skipped.skip(s)
-				}
-				return ok, e
-			}
-		}
-		return false, nil
+		return c.evaluateAny(ctx, s)
 	case "not":
-		ok, e := c.children[0].matches(s)
+		ok, e := c.children[0].matches(ctx, s)
 		return !ok, e
 	}
 	left, exists, e := s.selectValue(c.raw.Source, c.raw.Path, c.raw.Encoding)
@@ -202,7 +152,7 @@ func (c *compiledCondition) evaluate(s *evaluation) (bool, error) {
 	if !exists {
 		return false, nil
 	}
-	right, exists, e := s.expression(c.raw.Value)
+	right, exists, e := s.expression(ctx, c.raw.Value)
 	if e != nil || !exists {
 		return false, e
 	}
@@ -214,66 +164,15 @@ func (c *compiledCondition) evaluate(s *evaluation) (bool, error) {
 	case "type":
 		return jsonType(left) == right, nil
 	case "regex", "not_regex":
-		str, ok := left.(string)
-		if !ok {
-			return false, nil
-		}
-		match := c.re.MatchString(str)
-		if c.raw.Op == "not_regex" {
-			match = !match
-		}
-		return match, nil
+		return c.compareRegex(left, right)
 	case "gt", "gte", "lt", "lte":
-		a, aok := number(left)
-		b, bok := number(right)
-		if !aok || !bok {
-			return false, nil
-		}
-		switch c.raw.Op {
-		case "gt":
-			return a > b, nil
-		case "gte":
-			return a >= b, nil
-		case "lt":
-			return a < b, nil
-		default:
-			return a <= b, nil
-		}
+		return c.compareGt(left, right)
 	case "starts_with", "ends_with":
-		a, aok := left.(string)
-		b, bok := right.(string)
-		if !aok || !bok {
-			return false, nil
-		}
-		if c.raw.Op == "starts_with" {
-			return strings.HasPrefix(a, b), nil
-		}
-		return strings.HasSuffix(a, b), nil
+		return c.compareStartsWith(left, right)
 	case "contains", "not_contains":
-		match, valid := containsValue(left, right)
-		if !valid {
-			return false, nil
-		}
-		if c.raw.Op == "not_contains" {
-			match = !match
-		}
-		return match, nil
+		return c.compareContains(left, right)
 	case "in", "not_in":
-		a, ok := right.([]any)
-		if !ok {
-			return false, nil
-		}
-		match := false
-		for _, x := range a {
-			if jsonEqual(left, x) {
-				match = true
-				break
-			}
-		}
-		if c.raw.Op == "not_in" {
-			match = !match
-		}
-		return match, nil
+		return c.compareIn(left, right)
 	}
 	return false, fmt.Errorf("unsupported condition")
 }
@@ -302,4 +201,147 @@ func containsValue(container, value any) (bool, bool) {
 		return exists, true
 	}
 	return false, false
+}
+
+func (s *evaluation) contextFacts() map[string]any {
+	facts := make(map[string]any, len(s.facts)+5)
+	for k, v := range s.facts {
+		facts[k] = v
+	}
+	facts["model"] = s.model
+	if !s.hasItem && (s.phase == PhaseRequest || s.phase == PhaseRequestFinalize) {
+		if model, ok := objGet(s.body, "model"); ok {
+			facts["model"] = model
+		}
+	}
+	facts["original_model"] = s.originalModel
+	if s.phase == PhaseResponseEvent || s.phase == PhaseResponseBody {
+		facts["event_type"] = s.eventType
+	} else if s.phase != PhaseUpstreamHeaders {
+		delete(facts, "account_id")
+		delete(facts, "upstream_protocol")
+		delete(facts, "event_type")
+	}
+	if s.hasItem {
+		facts["item_index"] = s.index
+	} else {
+		delete(facts, "item_index")
+	}
+	return facts
+}
+
+func (c *compiledCondition) evaluateTest(ctx context.Context, s *evaluation) (bool, error) {
+	v, exists, err := s.expression(ctx, c.raw.Value)
+	if err != nil || !exists {
+		return false, err
+	}
+	b, ok := v.(bool)
+	if !ok {
+		return false, fmt.Errorf("test expression must produce boolean")
+	}
+	return b, nil
+
+}
+
+func (c *compiledCondition) evaluateAll(ctx context.Context, s *evaluation) (bool, error) {
+	for i, x := range c.children {
+		ok, e := x.matches(ctx, s)
+		if e != nil || !ok {
+			for _, skipped := range c.children[i+1:] {
+				skipped.skip(s)
+			}
+			return ok, e
+		}
+	}
+	return true, nil
+
+}
+
+func (c *compiledCondition) evaluateAny(ctx context.Context, s *evaluation) (bool, error) {
+	for i, x := range c.children {
+		ok, e := x.matches(ctx, s)
+		if e != nil || ok {
+			for _, skipped := range c.children[i+1:] {
+				skipped.skip(s)
+			}
+			return ok, e
+		}
+	}
+	return false, nil
+
+}
+
+func (c *compiledCondition) compareRegex(left, right any) (bool, error) {
+	str, ok := left.(string)
+	if !ok {
+		return false, nil
+	}
+	match := c.re.MatchString(str)
+	if c.raw.Op == "not_regex" {
+		match = !match
+	}
+	return match, nil
+
+}
+
+func (c *compiledCondition) compareGt(left, right any) (bool, error) {
+	a, aok := number(left)
+	b, bok := number(right)
+	if !aok || !bok {
+		return false, nil
+	}
+	switch c.raw.Op {
+	case "gt":
+		return a > b, nil
+	case "gte":
+		return a >= b, nil
+	case "lt":
+		return a < b, nil
+	default:
+		return a <= b, nil
+	}
+
+}
+
+func (c *compiledCondition) compareStartsWith(left, right any) (bool, error) {
+	a, aok := left.(string)
+	b, bok := right.(string)
+	if !aok || !bok {
+		return false, nil
+	}
+	if c.raw.Op == "starts_with" {
+		return strings.HasPrefix(a, b), nil
+	}
+	return strings.HasSuffix(a, b), nil
+
+}
+
+func (c *compiledCondition) compareContains(left, right any) (bool, error) {
+	match, valid := containsValue(left, right)
+	if !valid {
+		return false, nil
+	}
+	if c.raw.Op == "not_contains" {
+		match = !match
+	}
+	return match, nil
+
+}
+
+func (c *compiledCondition) compareIn(left, right any) (bool, error) {
+	a, ok := right.([]any)
+	if !ok {
+		return false, nil
+	}
+	match := false
+	for _, x := range a {
+		if jsonEqual(left, x) {
+			match = true
+			break
+		}
+	}
+	if c.raw.Op == "not_in" {
+		match = !match
+	}
+	return match, nil
 }

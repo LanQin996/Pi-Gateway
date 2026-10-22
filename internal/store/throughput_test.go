@@ -25,42 +25,44 @@ func TestOutputTPSCodex2APIBoundaries(t *testing.T) {
 		{"missing output", 200, 1000, "succeeded", 200, nil, nil},
 		{"no duration", 0, 0, "succeeded", 200, usageInt(400), nil},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			s := openTestStore(t)
-			r := UsageRecord{Outcome: tc.outcome, StatusCode: tc.status, OutputTokens: tc.output, FirstTokenMS: tc.first, LatencyMS: tc.latency, StartedAt: 1000}
-			got := r.OutputTPS()
-			if tc.want == nil {
-				if got != nil {
-					t.Fatalf("TPS=%v", *got)
-				}
-			} else {
-				if got == nil {
-					t.Fatal("missing TPS")
-				}
-				checkFloat(t, "record", *got, *tc.want)
-			}
-			finishTestUsage(t, s, r)
-			sum, err := s.UsageSummaryFor(t.Context(), UsageFilter{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			want := 0.0
-			if tc.want != nil {
-				want = *tc.want
-			}
-			checkFloat(t, "summary", sum.OutputTPS.P50, want)
-			trend, err := s.UsageTrend(t.Context(), UsageFilter{}, "day")
-			if err != nil {
-				t.Fatal(err)
-			}
-			checkFloat(t, "trend", trend[0].OutputTPS, want)
-			models, err := s.UsageByModel(t.Context(), UsageFilter{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			checkFloat(t, "dimension", models[0].OutputTPS, want)
-		})
+		t.Run(tc.name, func(t *testing.T) { testOutputTPSCodex2APIBoundariesCase1(t, tc) })
 	}
 }
 
 func floatPtr(n float64) *float64 { return &n }
+
+func testOutputTPSCodex2APIBoundariesCase1(t *testing.T, tc struct {
+	name    string
+	first   int64
+	latency int64
+	outcome string
+	status  int
+	output  *int64
+	want    *float64
+}) {
+	s := openTestStore(t)
+	r := UsageRecord{Outcome: tc.outcome, StatusCode: tc.status, OutputTokens: tc.output, FirstTokenMS: tc.first, LatencyMS: tc.latency, StartedAt: 1000}
+	got := r.OutputTPS()
+	if tc.want == nil {
+		reportStoreTestFailure(t, got != nil, func() {
+			t.Fatalf("TPS=%v", *got)
+		})
+	} else {
+		requireDataCondition(t, !(got == nil), "missing TPS")
+		checkFloat(t, "record", *got, *tc.want)
+	}
+	finishTestUsage(t, s, r)
+	sum, err := s.UsageSummaryFor(t.Context(), UsageFilter{})
+	requireDataNoError(t, err)
+	want := 0.0
+	if tc.want != nil {
+		want = *tc.want
+	}
+	checkFloat(t, "summary", sum.OutputTPS.P50, want)
+	trend, err := s.UsageTrend(t.Context(), UsageFilter{}, "day")
+	requireDataNoError(t, err)
+	checkFloat(t, "trend", trend[0].OutputTPS, want)
+	models, err := s.UsageByModel(t.Context(), UsageFilter{})
+	requireDataNoError(t, err)
+	checkFloat(t, "dimension", models[0].OutputTPS, want)
+}

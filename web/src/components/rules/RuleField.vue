@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import type { RuleCondition, RuleField, RuleFieldError, RuleSchema, ValueExpr } from '../../api/rules'
+import type { RuleCondition, RuleField, RuleFieldError, RuleSchema, JsonValue } from '../../api/rules'
 import { useI18n } from '../../i18n'
 import { defaultForField, localHelp } from '../../utils/ruleSchema'
 import { moveItem } from '../../utils/ruleEditor'
@@ -16,8 +16,9 @@ const emit = defineEmits<{ 'update:modelValue': [value: unknown] }>()
 const { t, locale } = useI18n()
 const set = (value: unknown) => emit('update:modelValue', value)
 const fieldErrors = computed(() => (props.errors ?? []).filter(e => e.path === props.path || e.path.startsWith(`${props.path}/`) && !['condition', 'condition_array', 'action_array'].includes(props.field.type)))
-const controlId = computed(() => `rule-field-${props.idPrefix ? `${props.idPrefix}-` : ''}${props.path}`)
-const samplePathId = computed(() => `sample-path-${props.idPrefix ? `${props.idPrefix}-` : ''}${props.path}`)
+const controlPrefix = computed(() => props.idPrefix ? props.idPrefix + '-' : '')
+const controlId = computed(() => `rule-field-${controlPrefix.value}${props.path}`)
+const samplePathId = computed(() => `sample-path-${controlPrefix.value}${props.path}`)
 const hoverHelp = computed(() => `${localHelp(props.field.description, locale.value)}\n${(props.field.examples ?? []).map(v => JSON.stringify(v)).join('\n')}`)
 const fieldLabel = computed(() => ruleFieldLabel(props.field, locale.value))
 const selectedHelp = computed(() => props.field.enum_help?.[String(fieldValue.value)])
@@ -26,16 +27,16 @@ const fieldValue = computed(() => props.compact && props.modelValue === undefine
 const foldOverride = ref<boolean | null>(null)
 const initialLong = ref(isLong(props.modelValue))
 function isLong(value: unknown) {
-  if (typeof value === 'string') return value.length > 180 || value.split('\n').length > 3
-  if (Array.isArray(value) && value.length > 3) return true
-  if (value && typeof value === 'object') return JSON.stringify(value).length > 180
+  if (typeof value === 'string') { return value.length > 180 || value.split('\n').length > 3 }
+  if (Array.isArray(value) && value.length > 3) { return true }
+  if (value && typeof value === 'object') { return JSON.stringify(value).length > 180 }
   return false
 }
 const foldable = computed(() => props.compact && !props.field.enum?.length && !['number', 'boolean'].includes(props.field.type))
 const folded = computed(() => foldable.value && (foldOverride.value ?? initialLong.value) && !fieldErrors.value.length)
 const preview = computed(() => {
   const value = props.modelValue
-  if (value === undefined) return t('rules.default')
+  if (value === undefined) { return t('rules.default') }
   const text = typeof value === 'string' ? value : JSON.stringify(value)
   return (text ?? '').replace(/\s+/g, ' ').slice(0, 96)
 })
@@ -44,30 +45,30 @@ const visibleItems = items
 const samplePaths = computed(() => props.sample !== undefined && props.field.type === 'string' && ['path','source_path','target_path'].includes(props.field.name) ? samplePathOptions(props.sample) : [])
 function selectSamplePath(event: Event) {
   const select = event.target as HTMLSelectElement
-  if (samplePaths.value.some(option=>option.path===select.value)) set(select.value)
+  if (samplePaths.value.some(option=>option.path===select.value)) { set(select.value) }
   select.value = '__sample_path_placeholder__'
 }
 function updateItem(index: number, value: unknown) { set(items.value.map((x, i) => i === index ? value : x)) }
 function textInput(event: Event, index?: number) {
-  if (props.compact && (event as InputEvent).isComposing) return
+  if (props.compact && (event as InputEvent).isComposing) { return }
   const value = (event.target as HTMLInputElement | HTMLTextAreaElement).value
-  if (index === undefined) set(value)
-  else updateItem(index, value)
+  if (index === undefined) { set(value) }
+  else { updateItem(index, value) }
 }
 function numberInput(event: Event) {
   const input = event.target as HTMLInputElement
   const number = Number(input.value)
   const valid = input.value.trim() !== '' && Number.isSafeInteger(number)
   input.setCustomValidity(valid ? '' : t('rules.numberError'))
-  if (valid) set(number)
+  if (valid) { set(number) }
 }
 </script>
 <template>
-  <div class="space-y-1.5" :class="{'rule-field-compact': compact, 'rule-field-wide': ['value','values','strings','condition','condition_array','action_array'].includes(field.type), 'is-folded': folded}" :data-rule-path="path" :data-renderer="field.type">
+  <div class="rule-field space-y-1.5" :class="{'rule-field-compact': compact, 'rule-field-wide': ['value','values','strings','condition','condition_array','action_array'].includes(field.type), 'is-folded': folded}" :data-rule-path="path" :data-renderer="field.type">
     <div class="rule-field-heading flex flex-wrap items-center gap-2">
       <label :id="`${controlId}-label`" :for="controlId" class="text-[12px] font-medium" :title="`${localHelp(field.description, locale)}\n${(field.examples ?? []).map(v=>JSON.stringify(v)).join('\n')}`">{{ fieldLabel }}</label><ParameterHelp :field="field" />
       <span v-if="!compact" class="text-[10px] text-[color:var(--color-ink-faint)]">{{ field.required ? t('rules.required') : t('rules.optional') }} · {{ ruleOptionLabel(field.type, locale) }}</span>
-      <button v-if="!field.required && !field.readonly" class="rule-field-presence btn btn-ghost !px-1.5 !py-0.5 text-[10px]" type="button" @click="set(modelValue === undefined ? defaultForField(field) : undefined)">{{ compact ? modelValue === undefined ? t('rules.default') : t('rules.unsetShort') : modelValue === undefined ? t('rules.include') : t('rules.unset') }}</button>
+      <button v-if="!field.required && !field.readonly" class="rule-field-presence btn btn-ghost text-[10px]" type="button" @click="set(modelValue === undefined ? defaultForField(field) : undefined)">{{ (() => { if (compact) { if (modelValue === undefined) { return t('rules.default'); } return t('rules.unsetShort'); } if (modelValue === undefined) { return t('rules.include'); } return t('rules.unset'); })() }}</button>
       <button v-if="foldable" type="button" class="rule-field-fold" :aria-expanded="!folded" :aria-label="t(folded ? 'rules.canvas.expandField' : 'rules.canvas.collapseField', {name: fieldLabel})" @click="foldOverride = !folded">{{ folded ? '▸' : '▾' }}</button>
       <details v-if="!compact" class="text-[11px] text-[color:var(--color-ink-muted)]">
         <summary class="cursor-pointer">{{ t('rules.fieldHelp') }}</summary>
@@ -97,18 +98,18 @@ function numberInput(event: Event) {
       <textarea v-else-if="field.type === 'string'" :id="controlId" :title="hoverHelp" class="input" :rows="compact ? 1 : 2" :readonly="field.readonly" :value="String(fieldValue ?? '')" :required="field.non_empty && (!compact || modelValue !== undefined || field.required)" :aria-invalid="!!fieldErrors.length" @input="textInput" @compositionend="compact && textInput($event)" />
       <input v-else-if="field.type === 'number'" :id="controlId" :title="hoverHelp" class="input" type="number" step="1" :required="!compact || modelValue !== undefined || field.required" :readonly="field.readonly" :min="field.min" :max="field.max" :value="fieldValue ?? 0" :aria-invalid="!!fieldErrors.length" @input="numberInput" />
       <input v-else-if="field.type === 'boolean'" :id="controlId" :title="hoverHelp" type="checkbox" :disabled="field.readonly" :checked="!!fieldValue" @change="set(($event.target as HTMLInputElement).checked)" />
-      <ValueEditor v-else-if="field.type === 'value'" :model-value="(fieldValue ?? null) as ValueExpr" :schema="schema" :compact="compact" :id-prefix="controlId" @update:model-value="set" />
+      <ValueEditor v-else-if="field.type === 'value'" :model-value="(fieldValue ?? null) as JsonValue" :schema="schema" :compact="compact" :id-prefix="controlId" @update:model-value="set" />
       <ConditionEditor v-else-if="field.type === 'condition'" :model-value="(fieldValue ?? {op:'always'}) as RuleCondition" :schema="schema" :path="path" :errors="errors" :sample="sample" :compact="compact" :id-prefix="idPrefix" :item-context="itemContext" @update:model-value="set" />
-      <div v-else-if="field.type === 'strings' || field.type === 'values'" :id="controlId" class="space-y-2" role="group" :aria-labelledby="`${controlId}-label`">
+      <fieldset v-else-if="field.type === 'strings' || field.type === 'values'" :id="controlId" class="space-y-2"  :aria-labelledby="`${controlId}-label`">
         <div v-for="(item, index) in visibleItems" :key="index" class="rule-list-row">
           <input v-if="field.type === 'strings'" :id="idPrefix ? `${controlId}-${index}` : undefined" class="input min-w-0 flex-1" :value="item" :aria-label="`${ruleLabel('field', field.name, locale)} ${index + 1}`" @input="textInput($event, index)" @compositionend="compact && textInput($event, index)" />
-          <ValueEditor v-else class="min-w-0 flex-1" :model-value="item as ValueExpr" :schema="schema" :compact="compact" :id-prefix="`${controlId}-${index}`" @update:model-value="updateItem(index, $event)" />
-          <div class="rule-list-buttons"><button type="button" class="btn btn-ghost !px-2" :disabled="index === 0" :title="t('rules.up')" @click="set(moveItem(items, index, -1))">↑</button>
-          <button type="button" class="btn btn-ghost !px-2" :disabled="index === items.length - 1" :title="t('rules.down')" @click="set(moveItem(items, index, 1))">↓</button>
-          <button type="button" class="btn btn-ghost !px-2" :title="t('rules.remove')" @click="set(items.filter((_, i) => i !== index))">×</button></div>
+          <ValueEditor v-else class="min-w-0 flex-1" :model-value="item as JsonValue" :schema="schema" :compact="compact" :id-prefix="`${controlId}-${index}`" @update:model-value="updateItem(index, $event)" />
+          <div class="rule-list-buttons"><button type="button" class="btn btn-ghost" :disabled="index === 0" :title="t('rules.up')" @click="set(moveItem(items, index, -1))">↑</button>
+          <button type="button" class="btn btn-ghost" :disabled="index === items.length - 1" :title="t('rules.down')" @click="set(moveItem(items, index, 1))">↓</button>
+          <button type="button" class="btn btn-ghost" :title="t('rules.remove')" @click="set(items.filter((_, i) => i !== index))">×</button></div>
         </div>
         <button type="button" class="btn btn-ghost" @click="set([...items, field.type === 'strings' ? '' : null])">{{ t('rules.addItem') }}</button>
-      </div>
+      </fieldset>
     </template>
     <p v-if="selectedHelp && !compact" class="text-[11px] text-[color:var(--color-ink-muted)]" data-testid="selected-option-help">{{ localHelp(selectedHelp, locale) }}</p>
     <div v-if="field.type === 'condition_array'" class="space-y-2">
@@ -130,20 +131,21 @@ function numberInput(event: Event) {
 <style scoped>
 .rule-field-compact { display: grid; grid-template-columns: 118px minmax(0, 1fr); align-items: center; column-gap: 10px; row-gap: 4px; min-width: 0; padding: 5px 0; border-bottom: 1px solid var(--color-line); writing-mode: horizontal-tb; }
 .rule-field-compact:last-child { border-bottom: 0; }
-.rule-field-compact > * { min-width: 0; margin-top: 0 !important; }
+.rule-field-compact.rule-field > * { min-width: 0; margin-top: 0; }
+.rule-field-presence { padding: 2px 6px; }
 .rule-field-heading { gap: 4px; align-items: center; }
 .rule-field-compact .rule-field-heading { flex-wrap: nowrap; }
 .rule-field-compact .rule-field-heading > label { flex: 1; min-width: 0; font-size: 11px; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .rule-field-compact .rule-field-heading :deep(.parameter-help) { flex-shrink: 0; }
-.rule-field-compact .rule-field-presence { flex-shrink: 0; padding: 1px 4px !important; font-size: 9px; min-height: 18px; color: var(--color-ink-faint); white-space: nowrap; }
-.rule-field-compact .rule-field-presence { display: none; }
+.rule-field-compact .rule-field-presence { flex-shrink: 0; padding: 1px 4px; font-size: 9px; min-height: 18px; color: var(--color-ink-faint); white-space: nowrap; display: none; }
+
 .rule-field-compact .rule-field-heading:hover .rule-field-presence, .rule-field-compact .rule-field-heading:focus-within .rule-field-presence { display: inline-flex; }
 .rule-field-compact.rule-field-wide { grid-template-columns: minmax(0, 1fr); }
 .rule-field-compact.rule-field-wide .rule-field-heading > label { flex: 0 1 auto; }
 .rule-field-control { min-width: 0; container-type: inline-size; }
 .rule-list-row {display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;gap:6px}
 .rule-list-buttons {display:flex;gap:2px;padding-top:2px}
-.rule-list-buttons .btn {width:26px;height:26px;min-width:26px!important;padding:0!important;display:flex;align-items:center;justify-content:center}
+.rule-field-control .rule-list-buttons .btn {width:26px;height:26px;min-width:26px;padding:0;display:flex;align-items:center;justify-content:center}
 .rule-field-fold { flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 22px; border: 0; border-radius: 4px; color: var(--color-ink-muted); background: var(--color-surface-2); cursor: pointer; }
 .rule-field-preview { display: block; width: 100%; min-height: 28px; text-align: left; padding: 4px 8px; border: 1px solid var(--color-line); border-radius: 5px; background: var(--color-surface-2); color: var(--color-ink-muted); font-family: var(--font-mono); font-size: 11px; line-height: 18px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
 .rule-field-compact :deep(.input) { width: 100%; min-width: 0; min-height: 30px; padding: 5px 8px; font-size: 11px; line-height: 18px; border: 1px solid var(--color-line); border-radius: 6px; background: var(--color-surface-2); box-shadow: none; }

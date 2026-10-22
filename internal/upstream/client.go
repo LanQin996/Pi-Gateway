@@ -84,12 +84,24 @@ type Sink interface {
 // NopSink is a Sink that records nothing.
 type NopSink struct{}
 
-func (NopSink) OnRequestHeaders(string, http.Header)                   {}
-func (NopSink) OnRequestBody([]byte, bool)                             {}
-func (NopSink) OnResponseHeaders(int, http.Header)                     {}
-func (NopSink) OnFrame(string, string, string, []byte, map[string]any) {}
-func (NopSink) OnUsage(Usage)                                          {}
-func (NopSink) OnResponseID(string)                                    {}
+func (NopSink) OnRequestHeaders(string, http.Header) {
+	// Intentionally discard this notification: NopSink records nothing.
+}
+func (NopSink) OnRequestBody([]byte, bool) {
+	// Intentionally discard this notification: NopSink records nothing.
+}
+func (NopSink) OnResponseHeaders(int, http.Header) {
+	// Intentionally discard this notification: NopSink records nothing.
+}
+func (NopSink) OnFrame(string, string, string, []byte, map[string]any) {
+	// Intentionally discard this notification: NopSink records nothing.
+}
+func (NopSink) OnUsage(Usage) {
+	// Intentionally discard this notification: NopSink records nothing.
+}
+func (NopSink) OnResponseID(string) {
+	// Intentionally discard this notification: NopSink records nothing.
+}
 
 // Client performs upstream requests.
 type Client struct {
@@ -357,22 +369,7 @@ func (c *Client) streamSSE(ctx context.Context, req *Request, onEvent func(*Even
 		return nil, err
 	}
 
-	headers := req.SSEHeaders.Clone()
-	body := req.Body
-	compressed := false
-
-	if c.cfg.Zstd && len(body) > 0 {
-		if enc, err := compressZstd(body); err == nil {
-			body = enc
-			compressed = true
-			headers.Set("content-encoding", "zstd")
-		} else {
-			c.cfg.Logger.Debug("zstd compression unavailable; sending plain JSON", "error", err)
-			headers.Del("content-encoding")
-		}
-	} else {
-		headers.Del("content-encoding")
-	}
+	headers, body, compressed := c.sseRequestPayload(req)
 
 	if sink := req.Sink; sink != nil {
 		sink.OnRequestHeaders(c.cfg.SSEURL, headers)
@@ -396,21 +393,7 @@ func (c *Client) streamSSE(ctx context.Context, req *Request, onEvent func(*Even
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		bodyBytes, truncated := readErrorBody(resp)
-		observeErrorBody(req.Sink, bodyBytes, truncated)
-		var data map[string]any
-		_ = jsonUnmarshalBytes(bodyBytes, &data)
-		code, _ := extractErrorFields(data)
-		if code == "" {
-			code = fmt.Sprintf("http_%d", resp.StatusCode)
-		}
-		return &StreamResult{Transport: "sse", Status: resp.StatusCode}, &FailureError{
-			Code:      code,
-			Status:    resp.StatusCode,
-			RequestID: resp.Header.Get("x-request-id"),
-			Message:   formatUpstreamError(resp.StatusCode, bodyBytes),
-			Payload:   bodyBytes,
-		}
+		return &StreamResult{Transport: "sse", Status: resp.StatusCode}, httpResponseFailure(resp, req.Sink)
 	}
 
 	reader, err := egress.DecodeBody(resp)
@@ -419,62 +402,7 @@ func (c *Client) streamSSE(ctx context.Context, req *Request, onEvent func(*Even
 	}
 	defer reader.Close()
 
-	sse := ParseSSE(reader)
-	result := &StreamResult{Transport: "sse", Status: resp.StatusCode}
-	emitted := false
-
-	for {
-		if err := ctx.Err(); err != nil {
-			return result, err
-		}
-		event, err := nextSSEWithTimeout(requestCtx, sse, c.cfg.IdleTimeout, cancelRequest)
-		if err != nil {
-			if errors.Is(err, context.Canceled) && ctx.Err() != nil {
-				return result, ctx.Err()
-			}
-			if err == io.EOF {
-				return result, &transportError{
-					err:           fmt.Errorf("upstream: sse stream truncated before a terminal event"),
-					eventsEmitted: emitted,
-					transport:     "sse",
-				}
-			}
-			return result, &transportError{
-				err:           fmt.Errorf("upstream: sse read: %w", err),
-				eventsEmitted: emitted,
-				transport:     "sse",
-			}
-		}
-		if event.Type == "[DONE]" {
-			return result, &transportError{err: fmt.Errorf("upstream: sse stream truncated before a response terminal event"), eventsEmitted: emitted, transport: "sse"}
-		}
-
-		emitted = true
-		if sink := req.Sink; sink != nil {
-			sink.OnFrame("in", "sse_event", event.Type, event.Raw, event.Data)
-			if id := ExtractResponseID(event.Data); id != "" {
-				sink.OnResponseID(id)
-			}
-			if IsTerminal(event.Type) {
-				sink.OnUsage(ExtractUsage(event.Data))
-			}
-		}
-
-		failure := FailureFromEvent(event)
-		var details *FailureError
-		if errors.As(failure, &details) && details.RequestID == "" {
-			details.RequestID = resp.Header.Get("x-request-id")
-		}
-		if err := onEvent(failureEventForDelivery(event, failure)); err != nil {
-			return result, &transportError{err: err, eventsEmitted: emitted, transport: "sse"}
-		}
-		if failure != nil {
-			return result, &transportError{err: failure, eventsEmitted: emitted, transport: "sse"}
-		}
-		if IsTerminal(event.Type) {
-			return result, nil
-		}
-	}
+	return readSSEEvents(ctx, requestCtx, cancelRequest, req, resp, onEvent, sseReadOptions{reader: reader, idle: c.cfg.IdleTimeout})
 }
 
 // KindHTTPError names a captured upstream error body frame.
@@ -552,18 +480,7 @@ func formatUpstreamError(status int, body []byte) string {
 			code = parsed.Error.Type
 		}
 		if isUsageLimitCode(code) || status == 429 {
-			plan := ""
-			if parsed.Error.PlanType != "" {
-				plan = " (" + strings.ToLower(parsed.Error.PlanType) + " plan)"
-			}
-			friendly = "You have hit your ChatGPT usage limit" + plan + "."
-			if parsed.Error.ResetsAt != nil {
-				mins := (*parsed.Error.ResetsAt*1000 - time.Now().UnixMilli()) / 60000
-				if mins < 0 {
-					mins = 0
-				}
-				friendly += fmt.Sprintf(" Try again in ~%d min.", mins)
-			}
+			friendly = usageLimitMessage(parsed.Error.PlanType, parsed.Error.ResetsAt)
 		}
 	}
 	if friendly != "" {
@@ -584,4 +501,135 @@ func isUsageLimitCode(code string) bool {
 		return true
 	}
 	return false
+}
+
+func usageLimitMessage(planType string, resetsAt *int64) string {
+	plan := ""
+	if planType != "" {
+		plan = " (" + strings.ToLower(planType) + " plan)"
+	}
+	friendly := "You have hit your ChatGPT usage limit" + plan + "."
+	if resetsAt != nil {
+		mins := (*resetsAt*1000 - time.Now().UnixMilli()) / 60000
+		if mins < 0 {
+			mins = 0
+		}
+		friendly += fmt.Sprintf(" Try again in ~%d min.", mins)
+	}
+	return friendly
+}
+
+func (c *Client) sseRequestPayload(req *Request) (http.Header, []byte, bool) {
+	headers := req.SSEHeaders.Clone()
+	body := req.Body
+	compressed := false
+
+	if c.cfg.Zstd && len(body) > 0 {
+		if enc, err := compressZstd(body); err == nil {
+			body = enc
+			compressed = true
+			headers.Set(contentEncodingHeader, "zstd")
+		} else {
+			c.cfg.Logger.Debug("zstd compression unavailable; sending plain JSON", "error", err)
+			headers.Del(contentEncodingHeader)
+		}
+	} else {
+		headers.Del(contentEncodingHeader)
+	}
+
+	return headers, body, compressed
+}
+
+func httpResponseFailure(resp *http.Response, sink Sink) *FailureError {
+	bodyBytes, truncated := readErrorBody(resp)
+	observeErrorBody(sink, bodyBytes, truncated)
+	var data map[string]any
+	_ = jsonUnmarshalBytes(bodyBytes, &data)
+	code, _ := extractErrorFields(data)
+	if code == "" {
+		code = fmt.Sprintf("http_%d", resp.StatusCode)
+	}
+	return &FailureError{
+		Code:      code,
+		Status:    resp.StatusCode,
+		RequestID: resp.Header.Get("x-request-id"),
+		Message:   formatUpstreamError(resp.StatusCode, bodyBytes),
+		Payload:   bodyBytes,
+	}
+}
+
+type sseReadOptions struct {
+	reader io.Reader
+	idle   time.Duration
+}
+
+func readSSEEvents(ctx, requestCtx context.Context, cancelRequest context.CancelFunc, req *Request, resp *http.Response, onEvent func(*Event) error, options sseReadOptions) (*StreamResult, error) {
+	sse := ParseSSE(options.reader)
+	result := &StreamResult{Transport: "sse", Status: resp.StatusCode}
+	emitted := false
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		event, err := nextSSEWithTimeout(requestCtx, sse, options.idle, cancelRequest)
+		if err != nil {
+			return result, sseReadError(ctx, err, emitted)
+		}
+		if event.Type == "[DONE]" {
+			return result, &transportError{err: fmt.Errorf("upstream: sse stream truncated before a response terminal event"), eventsEmitted: emitted, transport: "sse"}
+		}
+
+		emitted = true
+		observeSSEEvent(req.Sink, event)
+
+		failure := FailureFromEvent(event)
+		fillFailureRequestID(failure, resp.Header.Get("x-request-id"))
+		if err := onEvent(failureEventForDelivery(event, failure)); err != nil {
+			return result, &transportError{err: err, eventsEmitted: emitted, transport: "sse"}
+		}
+		if failure != nil {
+			return result, &transportError{err: failure, eventsEmitted: emitted, transport: "sse"}
+		}
+		if IsTerminal(event.Type) {
+			return result, nil
+		}
+	}
+}
+
+func observeSSEEvent(sink Sink, event *Event) {
+	if sink != nil {
+		sink.OnFrame("in", "sse_event", event.Type, event.Raw, event.Data)
+		if id := ExtractResponseID(event.Data); id != "" {
+			sink.OnResponseID(id)
+		}
+		if IsTerminal(event.Type) {
+			sink.OnUsage(ExtractUsage(event.Data))
+		}
+	}
+}
+
+func sseReadError(ctx context.Context, err error, emitted bool) error {
+	if errors.Is(err, context.Canceled) && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err == io.EOF {
+		return &transportError{
+			err:           fmt.Errorf("upstream: sse stream truncated before a terminal event"),
+			eventsEmitted: emitted,
+			transport:     "sse",
+		}
+	}
+	return &transportError{
+		err:           fmt.Errorf("upstream: sse read: %w", err),
+		eventsEmitted: emitted,
+		transport:     "sse",
+	}
+}
+
+func fillFailureRequestID(failure error, requestID string) {
+	var details *FailureError
+	if errors.As(failure, &details) && details.RequestID == "" {
+		details.RequestID = requestID
+	}
 }

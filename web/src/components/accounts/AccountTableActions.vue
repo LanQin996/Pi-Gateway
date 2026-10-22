@@ -29,22 +29,22 @@ function close(restoreFocus = false) {
 	document.removeEventListener('pointerdown', outside)
 	window.removeEventListener('resize', dismiss)
 	window.removeEventListener('scroll', scroll, true)
-	if (restoreFocus) trigger.value?.focus()
+	if (restoreFocus) { trigger.value?.focus() }
 }
 function dismiss() { close() }
-function scroll(event: Event) { if (!(event.target instanceof Node) || !panel.value?.contains(event.target)) close() }
+function scroll(event: Event) { if (!(event.target instanceof Node) || !panel.value?.contains(event.target)) { close() } }
 function outside(event: PointerEvent) {
-	if (event.target instanceof Node && !panel.value?.contains(event.target) && !trigger.value?.contains(event.target)) close()
+	if (event.target instanceof Node && !panel.value?.contains(event.target) && !trigger.value?.contains(event.target)) { close() }
 }
 async function toggle() {
-	if (open.value) return close(true)
+	if (open.value) { return close(true) }
 	const rect = trigger.value?.getBoundingClientRect()
-	if (!rect) return
+	if (!rect) { return }
 	position.value = { left: `${Math.max(8, Math.min(rect.right - 208, window.innerWidth - 216))}px`, top: `${rect.bottom + 6}px` }
 	open.value = true
 	await nextTick()
 	const height = panel.value?.offsetHeight ?? 0
-	if (rect.bottom + height + 14 > window.innerHeight) position.value.top = `${Math.max(8, rect.top - height - 6)}px`
+	if (rect.bottom + height + 14 > window.innerHeight) { position.value.top = `${Math.max(8, rect.top - height - 6)}px` }
 	panel.value?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus()
 	document.addEventListener('pointerdown', outside)
 	window.addEventListener('resize', dismiss)
@@ -53,11 +53,19 @@ async function toggle() {
 function navigate(event: KeyboardEvent) {
 	if (event.key === 'Escape') { event.preventDefault(); close(true); return }
 	if (event.key === 'Tab') { close(); return }
-	if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+	if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) { return }
 	event.preventDefault()
 	const buttons = [...(panel.value?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])]
 	const current = buttons.indexOf(document.activeElement as HTMLButtonElement)
-	const index = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (current + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length
+	const index = (() => {
+    if (event.key === 'Home') {
+        return 0
+    }
+    if (event.key === 'End') {
+        return buttons.length - 1
+    }
+    return (current + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length
+})()
 	buttons[index]?.focus()
 }
 onBeforeUnmount(() => close())

@@ -41,10 +41,10 @@ async function load() {
 	try {
 		const id = Number(route.params.id)
 		const result = await api.getCapture(id)
-		if (current === version) capture.value = result.capture
+		if (current === version) { capture.value = result.capture }
 	} catch (err) {
-		if (current === version) toast.error(err instanceof Error ? err.message : t('capture.notFound'))
-	} finally { if (current === version) loading.value = false }
+		if (current === version) { toast.error(err instanceof Error ? err.message : t('capture.notFound')) }
+	} finally { if (current === version) { loading.value = false } }
 }
 watch(() => route.params.id, load, { immediate: true })
 onBeforeUnmount(() => { version++ })
@@ -58,29 +58,59 @@ const tabs = computed(() => [
 	{ key: 'response', label: c('headers') }, { key: 'raw', label: c('streams') },
 ])
 function direction(frame: CaptureFrame) {
-	if (frame.kind === 'note' || frame.dir === 'internal') return c('internal')
+	if (frame.kind === 'note' || frame.dir === 'internal') { return c('internal') }
 	const names: Record<string, CaptureTextKey> = { client_in: 'clientIn', out: 'upstreamOut', in: 'upstreamIn', client_out: 'clientOut' }
-	return c(Object.prototype.hasOwnProperty.call(names, frame.dir) ? names[frame.dir]! : 'unknownDirection')
+	return c(Object.hasOwn(names, frame.dir) ? names[frame.dir]! : 'unknownDirection')
 }
 function frameLabel(frame: CaptureFrame) {
-	if (frame.kind === 'rule_input') return d('internalInput')
-	if (frame.kind === 'rule_context') return ruleLabel('source', 'context', locale.value)
+	if (frame.kind === 'rule_input') { return d('internalInput') }
+	if (frame.kind === 'rule_context') { return ruleLabel('source', 'context', locale.value) }
 	const names: Record<string, CaptureTextKey> = { note: 'note', sse_event: 'sseEvent', ws_frame: 'wsFrame', ws_binary: 'wsFrame', ws_close: 'wsClose', ws_error: 'wsError', http_error_body: 'httpError', http_response: 'httpResponse', request_body: 'requestBody', handshake_request: 'requestHead', handshake_response: 'responseHead' }
-	return Object.prototype.hasOwnProperty.call(names, frame.kind) ? c(names[frame.kind]!) : frame.kind || c('frame')
+	return Object.hasOwn(names, frame.kind) ? c(names[frame.kind]!) : frame.kind || c('frame')
 }
 function frameProtocol(frame: CaptureFrame) {
-	return c(frame.kind.startsWith('ws_') ? 'ws' : frame.kind === 'sse_event' ? 'sse' : 'http')
+	return c((() => {
+    if (frame.kind.startsWith('ws_')) {
+        return 'ws'
+    }
+    if (frame.kind === 'sse_event') {
+        return 'sse'
+    }
+    return 'http'
+})())
 }
 function outcomeTone(outcome: string) {
-	return outcome === 'ok' ? 'success' : outcome === 'error' ? 'danger' : outcome === 'aborted' ? 'warn' : 'neutral'
+	return (() => {
+    if (outcome === 'ok') {
+        return 'success'
+    }
+    if (outcome === 'error') {
+        return 'danger'
+    }
+    if (outcome === 'aborted') {
+        return 'warn'
+    }
+    return 'neutral'
+})()
 }
 function outcomeLabel(outcome: string) {
-	return outcome === 'ok' ? t('usage.outcome.succeeded') : outcome === 'error' ? t('usage.outcome.failed') : outcome === 'aborted' ? t('usage.outcome.cancelled') : t('usage.outcome.running')
+	return (() => {
+    if (outcome === 'ok') {
+        return t('usage.outcome.succeeded')
+    }
+    if (outcome === 'error') {
+        return t('usage.outcome.failed')
+    }
+    if (outcome === 'aborted') {
+        return t('usage.outcome.cancelled')
+    }
+    return t('usage.outcome.running')
+})()
 }
 function frameTone(frame: CaptureFrame) {
-	if (frame.kind === 'note') return 'warn'
-	if (frame.type === 'response.completed') return 'success'
-	if (['error', 'response.failed'].includes(frame.type ?? '') || frame.kind === 'http_error_body') return 'danger'
+	if (frame.kind === 'note') { return 'warn' }
+	if (frame.type === 'response.completed') { return 'success' }
+	if (['error', 'response.failed'].includes(frame.type ?? '') || frame.kind === 'http_error_body') { return 'danger' }
 	return frame.dir === 'out' || frame.dir === 'client_out' ? 'info' : 'neutral'
 }
 function preview(frame: CaptureFrame) {
@@ -92,12 +122,12 @@ function sourceLabel(trace: CaptureRuleTrace) {
 	return `${traceRuleName(trace, locale.value)}${action}${priority} · ${t('capture.rules.version', { version: trace.rules_version ?? capture.value?.rules_version ?? 0 })}`
 }
 function sourceLabels(phase?: string, eventID?: string) {
-	if (!capture.value) return []
+	if (!capture.value) { return [] }
     return [...new Set(ruleSources(capture.value, phase, eventID).map(sourceLabel))]
 }
 function sourceNote() {
-	if (capture.value?.rules_trace_truncated || capture.value?.rules_trace_omitted) return t('capture.rules.truncated', { count: capture.value.rules_trace_omitted ?? 0 })
-	if (!capture.value?.rule_traces?.length) return t(capture.value?.rules_version ? 'capture.rules.noChanges' : 'capture.rules.legacy')
+	if (capture.value?.rules_trace_truncated || capture.value?.rules_trace_omitted) { return t('capture.rules.truncated', { count: capture.value.rules_trace_omitted ?? 0 }) }
+	if (!capture.value?.rule_traces?.length) { return t(capture.value?.rules_version ? 'capture.rules.noChanges' : 'capture.rules.legacy') }
 	return t('capture.rules.imprecise')
 }
 function rowSources(before?: CaptureFrame, after?: CaptureFrame) {
@@ -105,7 +135,7 @@ function rowSources(before?: CaptureFrame, after?: CaptureFrame) {
 	return eventID ? sourceLabels(undefined, eventID) : []
 }
 function downloadJson() {
-	if (!capture.value) return
+	if (!capture.value) { return }
 	const blob = new Blob([JSON.stringify(capture.value, null, 2)], { type: 'application/json' })
 	const url = URL.createObjectURL(blob)
 	const anchor = document.createElement('a')
@@ -136,7 +166,7 @@ function downloadJson() {
 				<div class="card summary-item"><span>{{ t('capture.requestSize') }}</span><strong>{{ formatBytes(Math.abs(capture.request_bytes)) }}</strong><small>{{ capture.response_id || '—' }}</small></div>
 			</div>
 			<div v-if="capture.error" class="notice notice-error capture-error" role="alert"><Info :size="16" /><p>{{ capture.error }}</p></div>
-			<p v-if="capture.truncated" class="notice notice-warning" role="status">{{ c('truncated') }}</p>
+			<output v-if="capture.truncated" class="notice notice-warning" >{{ c('truncated') }}</output>
 			<div class="flow-legend" aria-label="direction"><Badge tone="neutral">{{ c('clientIn') }}</Badge><Badge tone="info">{{ c('upstreamOut') }}</Badge><Badge tone="neutral">{{ c('upstreamIn') }}</Badge><Badge tone="info">{{ c('clientOut') }}</Badge></div>
 			<p class="capture-hint">{{ c('participantNote') }} {{ c('semanticNote') }} {{ c('headersNote') }}</p>
 			<RuleTracePanel v-if="capture" :capture="capture" />
@@ -161,7 +191,7 @@ function downloadJson() {
 						<CaptureDiff :title="row.before.type === row.after.type ? row.before.type || c('responsePayload') : `${row.before.type || frameLabel(row.before)} → ${row.after.type || frameLabel(row.after)}`" :before="frameSnapshot(row.before)" :after="frameSnapshot(row.after)" :before-label="c('upstreamIn')" :after-label="c('clientOut')" :partial="capture.truncated" :sources="rowSources(row.before, row.after)" :source-note="sourceNote()" :initial-open="group.rows.length === 1 && index < 2" />
 					</template>
 					<details v-else-if="row.frame" class="card individual-frame" :open="group.rows.length === 1 && index < 2" :data-direction="row.frame.dir" :data-kind="row.frame.kind">
-						<summary><component :is="row.frame.kind === 'note' ? Info : row.frame.dir === 'out' || row.frame.dir === 'client_out' ? ArrowUpRight : ArrowDownLeft" :size="15" /><strong class="frame-direction">{{ direction(row.frame) }}</strong><Badge :tone="frameTone(row.frame)">{{ frameLabel(row.frame) }}</Badge><code>{{ row.frame.type || '' }}</code><span class="frame-meta">+{{ row.frame.at_ms }} ms · {{ formatBytes(row.frame.bytes) }}</span></summary>
+						<summary><component :is="(() => { if (row.frame.kind === 'note') { return Info; } if (row.frame.dir === 'out' || row.frame.dir === 'client_out') { return ArrowUpRight; } return ArrowDownLeft; })()" :size="15" /><strong class="frame-direction">{{ direction(row.frame) }}</strong><Badge :tone="frameTone(row.frame)">{{ frameLabel(row.frame) }}</Badge><code>{{ row.frame.type || '' }}</code><span class="frame-meta">+{{ row.frame.at_ms }} ms · {{ formatBytes(row.frame.bytes) }}</span></summary>
 						<div class="frame-content"><button v-if="row.frame.dir === 'in' && ['sse_event', 'ws_frame'].includes(row.frame.kind)" type="button" class="btn" @click="router.push({name:'rules', query:{capture:capture.id, frame:row.frame.seq}})">{{ c('debugRules') }}</button><JsonViewer v-if="frameSnapshot(row.frame).available" :value="preview(row.frame).text" :label="direction(row.frame)" max-height="28rem" /><p v-else class="capture-hint">{{ c('noPayload') }}</p><p v-if="preview(row.frame).limited" class="capture-hint">{{ c('limited') }}</p></div>
 					</details>
 				</div>

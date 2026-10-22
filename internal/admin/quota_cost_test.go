@@ -13,19 +13,29 @@ import (
 	"pi-gateway/internal/store"
 )
 
-func seedAccountCost(t *testing.T, db *store.Store, accountID, start, completed int64, cost *int64, outcome, sent string) {
+type accountCostSeed struct {
+	accountID, start, completed int64
+	cost                        *int64
+	outcome, sent               string
+}
+
+func seedAccountCost(t *testing.T, db *store.Store, seed accountCostSeed) {
+	accountID, start, completed, cost, outcome, sent := seed.accountID, seed.start, seed.completed, seed.cost, seed.outcome, seed.sent
 	t.Helper()
 	record := &store.UsageRecord{AccountID: accountID, StartedAt: start, Model: "gpt-6-sol", RequestKind: "compaction"}
 	id, err := db.StartUsageRecord(context.Background(), record)
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatal(err)
-	}
+	})
 	if outcome == "running" {
 		return
 	}
 	record.Outcome, record.UpstreamSendState, record.CompletedAt, record.CostMicros = outcome, sent, completed, cost
-	if err := db.FinishUsageRecord(context.Background(), id, record); err != nil {
-		t.Fatal(err)
+	{
+		err := db.FinishUsageRecord(context.Background(), id, record)
+		reportTestFailure(t, err != nil, func() {
+			t.Fatal(err)
+		})
 	}
 }
 
@@ -37,27 +47,27 @@ func TestQuotaCostWindowBoundariesAndEstimate(t *testing.T) {
 	window := quota.Window{LimitID: "codex", Role: "primary", UsedPercent: 25, ResetAt: start + 18_000_000, WindowSeconds: 18000}
 	// Retained account total includes older and newer requests. The estimate only
 	// includes requests started in this cycle and settled by its quota snapshot.
-	seedAccountCost(t, db, 1, start-1, start, ptr(90_000_000), "succeeded", "sent")
-	seedAccountCost(t, db, 1, start, start+100, ptr(4_000_000), "succeeded", "sent")
-	seedAccountCost(t, db, 1, start+200, asOf, ptr(6_000_000), "cancelled", "sent")
-	seedAccountCost(t, db, 1, asOf, asOf+100, ptr(70_000_000), "succeeded", "sent")
-	seedAccountCost(t, db, 1, asOf-100, asOf+1, ptr(80_000_000), "succeeded", "sent")
-	seedAccountCost(t, db, 2, start, start+1, ptr(30_000_000), "succeeded", "sent")
-	seedAccountCost(t, db, 1, start+300, start+301, nil, "failed", "not_sent")
-	seedAccountCost(t, db, 1, start+400, 0, nil, "running", "sent")
+	seedAccountCost(t, db, accountCostSeed{accountID: 1, start: start - 1, completed: start, cost: ptr(90_000_000), outcome: "succeeded", sent: "sent"})
+	seedAccountCost(t, db, accountCostSeed{accountID: 1, start: start, completed: start + 100, cost: ptr(4_000_000), outcome: "succeeded", sent: "sent"})
+	seedAccountCost(t, db, accountCostSeed{accountID: 1, start: start + 200, completed: asOf, cost: ptr(6_000_000), outcome: "cancelled", sent: "sent"})
+	seedAccountCost(t, db, accountCostSeed{accountID: 1, start: asOf, completed: asOf + 100, cost: ptr(70_000_000), outcome: "succeeded", sent: "sent"})
+	seedAccountCost(t, db, accountCostSeed{accountID: 1, start: asOf - 100, completed: asOf + 1, cost: ptr(80_000_000), outcome: "succeeded", sent: "sent"})
+	seedAccountCost(t, db, accountCostSeed{accountID: 2, start: start, completed: start + 1, cost: ptr(30_000_000), outcome: "succeeded", sent: "sent"})
+	seedAccountCost(t, db, accountCostSeed{accountID: 1, start: start + 300, completed: start + 301, cost: nil, outcome: "failed", sent: "not_sent"})
+	seedAccountCost(t, db, accountCostSeed{accountID: 1, start: start + 400, completed: 0, cost: nil, outcome: "running", sent: "sent"})
 	for i := 0; i < 2; i++ {
 		got := s.buildQuotaWindowCost(context.Background(), 1, window, asOf, asOf+1000)
-		if got.Usage == nil || got.Usage.CostMicros != 10_000_000 || got.Usage.PricedRequests != 2 || got.Usage.UnpricedRequests != 0 || got.StartAt != start || got.AsOf != asOf || got.UnavailableReason != "" {
+		reportTestFailure(t, got.Usage == nil || got.Usage.CostMicros != 10_000_000 || got.Usage.PricedRequests != 2 || got.Usage.UnpricedRequests != 0 || got.StartAt != start || got.AsOf != asOf || got.UnavailableReason != "", func() {
 			t.Fatalf("window cost: %+v", got)
-		}
-		if got.EstimatedTotalUSD == nil || *got.EstimatedTotalUSD != 40 || got.EstimatedRemainingUSD == nil || *got.EstimatedRemainingUSD != 30 {
+		})
+		reportTestFailure(t, got.EstimatedTotalUSD == nil || *got.EstimatedTotalUSD != 40 || got.EstimatedRemainingUSD == nil || *got.EstimatedRemainingUSD != 30, func() {
 			t.Fatalf("estimate: %+v", got)
-		}
+		})
 	}
 	all, err := db.AccountUsageCost(context.Background(), 1, store.UsageRange{}, 0)
-	if err != nil || all.CostMicros != 250_000_000 || all.PricedRequests != 5 || all.UnpricedRequests != 0 {
+	reportTestFailure(t, err != nil || all.CostMicros != 250_000_000 || all.PricedRequests != 5 || all.UnpricedRequests != 0, func() {
 		t.Fatalf("total: %+v %v", all, err)
-	}
+	})
 }
 
 func TestQuotaCostUnavailableAndZero(t *testing.T) {
@@ -86,22 +96,22 @@ func TestQuotaCostUnavailableAndZero(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			db := newAdminTestStore(t)
 			if tc.seed {
-				seedAccountCost(t, db, 1, start, start+100, tc.cost, "succeeded", "sent")
+				seedAccountCost(t, db, accountCostSeed{accountID: 1, start: start, completed: start + 100, cost: tc.cost, outcome: "succeeded", sent: "sent"})
 			}
 			s := &Server{store: db}
 			got := s.buildQuotaWindowCost(context.Background(), 1, quota.Window{LimitID: "codex", Role: "primary", UsedPercent: tc.percent, ResetAt: tc.reset, WindowSeconds: tc.seconds}, tc.asOf, tc.now)
-			if got.UnavailableReason != tc.want {
+			reportTestFailure(t, got.UnavailableReason != tc.want, func() {
 				t.Fatalf("reason = %q, want %q", got.UnavailableReason, tc.want)
-			}
-			if tc.want != "" && (got.EstimatedTotalUSD != nil || got.EstimatedRemainingUSD != nil) {
+			})
+			reportTestFailure(t, tc.want != "" && (got.EstimatedTotalUSD != nil || got.EstimatedRemainingUSD != nil), func() {
 				t.Fatalf("unexpected estimate: %+v", got)
-			}
-			if (tc.name == "zero cost" || tc.name == "unknown price" || tc.name == "no history") && (got.EstimatedTotalUSD == nil || *got.EstimatedTotalUSD != 0) {
+			})
+			reportTestFailure(t, (tc.name == "zero cost" || tc.name == "unknown price" || tc.name == "no history") && (got.EstimatedTotalUSD == nil || *got.EstimatedTotalUSD != 0), func() {
 				t.Fatal("measured zero must remain zero")
-			}
-			if tc.name == "exhausted" && (got.EstimatedRemainingUSD == nil || *got.EstimatedRemainingUSD != 0) {
+			})
+			reportTestFailure(t, tc.name == "exhausted" && (got.EstimatedRemainingUSD == nil || *got.EstimatedRemainingUSD != 0), func() {
 				t.Fatal("exhausted quota must have zero remaining value")
-			}
+			})
 		})
 	}
 }
@@ -110,13 +120,13 @@ func TestQuotaCostProjectsPartialUsage(t *testing.T) {
 	db := newAdminTestStore(t)
 	const start int64 = 1_800_000_000_000
 	const asOf = start + 3_600_000
-	seedAccountCost(t, db, 1, start, start+100, ptr(10_000_000), "succeeded", "sent")
-	seedAccountCost(t, db, 1, start+200, start+300, nil, "succeeded", "sent")
+	seedAccountCost(t, db, accountCostSeed{accountID: 1, start: start, completed: start + 100, cost: ptr(10_000_000), outcome: "succeeded", sent: "sent"})
+	seedAccountCost(t, db, accountCostSeed{accountID: 1, start: start + 200, completed: start + 300, cost: nil, outcome: "succeeded", sent: "sent"})
 	s := &Server{store: db}
 	got := s.buildQuotaWindowCost(t.Context(), 1, quota.Window{LimitID: "codex", Role: "secondary", UsedPercent: 25, ResetAt: start + 604800000, WindowSeconds: 604800}, asOf, asOf+1000)
-	if got.UnavailableReason != "" || got.Usage.UnpricedRequests != 1 || got.EstimatedTotalUSD == nil || *got.EstimatedTotalUSD != 40 || got.EstimatedRemainingUSD == nil || *got.EstimatedRemainingUSD != 30 {
+	reportTestFailure(t, got.UnavailableReason != "" || got.Usage.UnpricedRequests != 1 || got.EstimatedTotalUSD == nil || *got.EstimatedTotalUSD != 40 || got.EstimatedRemainingUSD == nil || *got.EstimatedRemainingUSD != 30, func() {
 		t.Fatalf("partial usage must still project known cost: %+v", got)
-	}
+	})
 }
 
 func TestQuotaCostSnapshotTimestampAndModelLedger(t *testing.T) {
@@ -129,54 +139,54 @@ func TestQuotaCostSnapshotTimestampAndModelLedger(t *testing.T) {
 	var total int64
 	for _, model := range []string{"gpt-6-sol", "gpt-6-luna"} {
 		rule, _, ok := pricing.Lookup(model, "", nil)
-		if !ok {
+		reportTestFailure(t, !ok, func() {
 			t.Fatalf("missing fixture price for %s", model)
-		}
+		})
 		cost, ok := pricing.Cost(rule, 1000000, 500000, 0, 10000)
-		if !ok {
+		reportTestFailure(t, !ok, func() {
 			t.Fatal("cannot price fixture")
-		}
+		})
 		total += cost
-		seedAccountCost(t, db, a.ID, asOf-100, asOf-1, &cost, "succeeded", "sent")
+		seedAccountCost(t, db, accountCostSeed{accountID: a.ID, start: asOf - 100, completed: asOf - 1, cost: &cost, outcome: "succeeded", sent: "sent"})
 	}
-	seedAccountCost(t, db, a.ID, asOf+1, now-1, ptr(100000000), "succeeded", "sent")
+	seedAccountCost(t, db, accountCostSeed{accountID: a.ID, start: asOf + 1, completed: now - 1, cost: ptr(100000000), outcome: "succeeded", sent: "sent"})
 	report := &quota.Report{FetchedAt: asOf, Windows: []quota.Window{window, {LimitID: "code_review", Role: "primary", UsedPercent: 25, ResetAt: window.ResetAt, WindowSeconds: window.WindowSeconds}}}
 	setSnapshot := func() {
 		raw, err := json.Marshal(quota.Snapshot{Report: report})
-		if err != nil {
+		reportTestFailure(t, err != nil, func() {
 			t.Fatal(err)
-		}
+		})
 		a.QuotaJSON = string(raw)
 	}
 	setSnapshot()
 	got := s.buildQuotaView(context.Background(), a)
-	if len(got.WindowCosts) != 1 || got.WindowCosts[0].Usage.CostMicros != total || got.WindowCosts[0].AsOf != asOf {
+	reportTestFailure(t, len(got.WindowCosts) != 1 || got.WindowCosts[0].Usage.CostMicros != total || got.WindowCosts[0].AsOf != asOf, func() {
 		t.Fatalf("snapshot cost: %+v", got.WindowCosts)
-	}
-	if got.Cost == nil || got.Cost.CostMicros != total+100000000 {
+	})
+	reportTestFailure(t, got.Cost == nil || got.Cost.CostMicros != total+100000000, func() {
 		t.Fatalf("account cost: %+v", got.Cost)
-	}
+	})
 	report.FetchedAt = 0
 	setSnapshot()
 	got = s.buildQuotaView(context.Background(), a)
-	if got.WindowCosts[0].UnavailableReason != "missing_snapshot" {
+	reportTestFailure(t, got.WindowCosts[0].UnavailableReason != "missing_snapshot", func() {
 		t.Fatal("failed refresh time used as report timestamp")
-	}
+	})
 	a.QuotaError = ""
 	setSnapshot()
 	got = s.buildQuotaView(context.Background(), a)
-	if got.WindowCosts[0].AsOf != now || got.WindowCosts[0].Usage.CostMicros != total+100000000 {
+	reportTestFailure(t, got.WindowCosts[0].AsOf != now || got.WindowCosts[0].Usage.CostMicros != total+100000000, func() {
 		t.Fatal("legacy successful snapshot did not use account timestamp")
-	}
+	})
 	a.CodexRefreshToken = ""
 	got = s.buildQuotaView(context.Background(), a)
-	if got.Report != nil || len(got.WindowCosts) != 0 || got.Cost == nil || got.Cost.CostMicros != total+100000000 {
+	reportTestFailure(t, got.Report != nil || len(got.WindowCosts) != 0 || got.Cost == nil || got.Cost.CostMicros != total+100000000, func() {
 		t.Fatal("unlinked accounts must keep model cost without stale quota estimates")
-	}
+	})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	got = s.buildQuotaView(ctx, a)
-	if got.Cost != nil {
+	reportTestFailure(t, got.Cost != nil, func() {
 		t.Fatal("failed cost query shown as measured zero")
-	}
+	})
 }

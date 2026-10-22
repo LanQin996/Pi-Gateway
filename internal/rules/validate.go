@@ -105,42 +105,11 @@ func (c Condition) MarshalJSON() ([]byte, error) { return json.Marshal(condition
 // ValidateRule performs the same validation as Compile without publishing an engine.
 func ValidateRule(r Rule, path string) error { _, e := compileRule(r, path); return e }
 func compileRule(r Rule, path string) (compiledRule, error) {
-	bad := func(k, msg string) (compiledRule, error) {
-		return compiledRule{}, invalid(joinPointer(path, k), "%s", msg)
-	}
-	if r.SchemaVersion != 1 && r.SchemaVersion != SchemaVersion {
-		return bad("schema_version", "unsupported schema version")
-	}
-	if strings.TrimSpace(r.Name) == "" {
-		return bad("name", "must be a nonempty string")
-	}
-	if !contains(phases, r.Phase) {
-		return bad("phase", "unknown phase")
-	}
-	if int64(r.Priority) < -2147483648 || int64(r.Priority) > 2147483647 {
-		return bad("priority", "must be an integer in -2147483648..2147483647")
-	}
-	if r.OrderIndex < -MaxSafeInteger || r.OrderIndex > MaxSafeInteger {
-		return bad("order_index", "must be a safe integer")
-	}
-	if r.Revision < 0 || r.Revision > MaxSafeInteger {
-		return bad("revision", "must be a nonnegative safe integer")
-	}
-	for k, v := range map[string]string{"created_at": r.CreatedAt, "updated_at": r.UpdatedAt} {
-		if v != "" {
-			if _, e := time.Parse(time.RFC3339Nano, v); e != nil {
-				return bad(k, "must be an RFC3339 timestamp")
-			}
-		}
-	}
 	if r.OnError == "" {
 		r.OnError = OnErrorAbort
 	}
-	if r.OnError != OnErrorAbort && r.OnError != OnErrorSkipRule {
-		return bad("on_error", "must be abort or skip_rule")
-	}
-	if len(r.Actions) > MaxActionsPerRule {
-		return bad("actions", fmt.Sprintf("maximum %d actions per rule", MaxActionsPerRule))
+	if err := validateRuleDefinition(r, path); err != nil {
+		return compiledRule{}, err
 	}
 	nodes := 0
 	when, e := compileCondition(r.When, joinPointer(path, "when"), r.Phase, false, 0, &nodes)
@@ -169,18 +138,36 @@ func compileRule(r Rule, path string) (compiledRule, error) {
 	}
 	return out, nil
 }
+func validateRuleDefinition(r Rule, path string) error {
+	bad := func(k, msg string) error {
+		return invalid(joinPointer(path, k), "%s", msg)
+	}
+	if r.SchemaVersion != 1 && r.SchemaVersion != SchemaVersion {
+		return bad("schema_version", "unsupported schema version")
+	}
+	if strings.TrimSpace(r.Name) == "" {
+		return bad("name", "must be a nonempty string")
+	}
+	if !contains(phases, r.Phase) {
+		return bad("phase", "unknown phase")
+	}
+	if err := validateRuleMetadata(r, path); err != nil {
+		return err
+	}
+	if r.OnError != OnErrorAbort && r.OnError != OnErrorSkipRule {
+		return bad("on_error", "must be abort or skip_rule")
+	}
+	if len(r.Actions) > MaxActionsPerRule {
+		return bad("actions", fmt.Sprintf("maximum %d actions per rule", MaxActionsPerRule))
+	}
+
+	return nil
+}
 func validateFields(params map[string]any, fs []FieldSpec, path string, phase string, item bool) (map[string]any, error) {
-	// Normalize programmatically generated recipe ASTs exactly like submitted JSON.
-	if params != nil {
-		raw, err := json.Marshal(params)
-		if err != nil {
-			return nil, invalid(path, "%v", err)
-		}
-		v, err := decodeAny(raw, path)
-		if err != nil {
-			return nil, err
-		}
-		params = v.(map[string]any)
+	var err error
+	params, err = normalizeFieldParams(params, path)
+	if err != nil {
+		return nil, err
 	}
 	known := map[string]FieldSpec{}
 	out := make(map[string]any, len(fs))
@@ -193,87 +180,40 @@ func validateFields(params map[string]any, fs []FieldSpec, path string, phase st
 		}
 	}
 	for _, f := range fs {
-		v, exists := params[f.Name]
-		p := joinPointer(path, f.Name)
-		if !exists {
-			if f.Required {
-				return nil, invalid(p, "required field is missing")
-			}
-			if f.Default != nil {
-				out[f.Name] = mustClone(f.Default)
-			}
-			continue
+		value, present, err := validateOneField(params, f, path, phase, item)
+		if err != nil {
+			return nil, err
 		}
-		if e := validateFieldValue(v, f, p, phase, item); e != nil {
-			return nil, e
+		if present {
+			out[f.Name] = value
 		}
-		c, e := cloneJSON(v)
-		if e != nil {
-			return nil, invalid(p, "%v", e)
-		}
-		out[f.Name] = c
+
 	}
 	return out, nil
 }
 func validateFieldValue(v any, f FieldSpec, path, phase string, item bool) error {
-	bad := func() error { return invalid(path, "must be %s", f.Type) }
 	switch f.Type {
 	case "string", "pointer":
-		s, ok := v.(string)
-		if !ok {
-			return bad()
-		}
-		if f.NonEmpty && (s == "" || (f.Name == "model" && strings.TrimSpace(s) == "")) {
-			return invalid(path, "must be nonempty")
-		}
-		if len(f.Enum) > 0 && !contains(f.Enum, s) {
-			return invalid(path, "must be one of %s", strings.Join(f.Enum, ", "))
-		}
-		if f.Type == "pointer" {
-			if _, e := pointerSegments(s); e != nil {
-				return invalid(path, "%v", e)
-			}
+		if err := validateFieldString(v, f, path, phase, item); err != nil {
+			return err
 		}
 	case "boolean":
 		if _, ok := v.(bool); !ok {
-			return bad()
+			return invalid(path, "must be %s", f.Type)
 		}
 	case "integer":
-		n, ok := number(v)
-		if !ok || math.Trunc(n) != n || math.Abs(n) > float64(MaxSafeInteger) {
-			return invalid(path, "must be a JavaScript-safe integer")
-		}
-		if f.Minimum != nil && n < float64(*f.Minimum) {
-			return invalid(path, "must be >= %d", *f.Minimum)
-		}
-		if f.Maximum != nil && n > float64(*f.Maximum) {
-			return invalid(path, "must be <= %d", *f.Maximum)
+		if err := validateFieldInteger(v, f, path, phase, item); err != nil {
+			return err
 		}
 	case "string_array", "pointer_array":
-		a, ok := asArray(v)
-		if !ok {
-			return bad()
-		}
-		for i, x := range a {
-			typ := "string"
-			if f.Type == "pointer_array" {
-				typ = "pointer"
-			}
-			if e := validateFieldValue(x, FieldSpec{Type: typ}, fmt.Sprintf("%s/%d", path, i), phase, item); e != nil {
-				return e
-			}
+		if err := validateFieldStringArray(v, f, path, phase, item); err != nil {
+			return err
 		}
 	case "value":
 		return validateExpression(v, path, phase, item, 0)
 	case "value_array":
-		a, ok := asArray(v)
-		if !ok {
-			return bad()
-		}
-		for i, x := range a {
-			if e := validateExpression(x, fmt.Sprintf("%s/%d", path, i), phase, item, 0); e != nil {
-				return e
-			}
+		if err := validateFieldValueArray(v, f, path, phase, item); err != nil {
+			return err
 		}
 	case "condition":
 		_, e := asCondition(v, path)
@@ -282,16 +222,15 @@ func validateFieldValue(v any, f FieldSpec, path, phase string, item bool) error
 		_, err := decodeActions(v, path)
 		return err
 	case "condition_array":
-		switch v.(type) {
-		case []Condition, []any:
-		default:
-			return bad()
+		if err := validateFieldConditionArray(v, f, path, phase, item); err != nil {
+			return err
 		}
 	default:
 		return invalid(path, "unsupported schema field type %q", f.Type)
 	}
 	return validateLiteral(v, path, 0)
 }
+
 func asArray(v any) ([]any, bool) {
 	switch a := v.(type) {
 	case []any:
@@ -349,34 +288,27 @@ func validateExpression(v any, path, phase string, item bool, depth int) error {
 	if depth > MaxDepth {
 		return invalid(path, "maximum expression depth exceeded")
 	}
-	if m, ok := v.(map[string]any); ok {
-		if expr, exists := m["$expr"]; exists {
-			if len(m) != 1 {
-				return invalid(path, "$expr must be the only key")
-			}
-			return validateComputed(expr, path+"/$expr", phase, item, depth+1)
+	m, ok := v.(map[string]any)
+	if !ok {
+		return validateLiteral(v, path, depth)
+	}
+	if expr, exists := m["$expr"]; exists {
+		if len(m) != 1 {
+			return invalid(path, "$expr must be the only key")
 		}
-		if literal, exists := m["$literal"]; exists {
-			if len(m) != 1 {
-				return invalid(path, "$literal must be the only key")
-			}
-			return validateLiteral(literal, path+"/$literal", depth+1)
+		return validateComputed(expr, path+"/$expr", phase, item, depth+1)
+	}
+	if literal, exists := m["$literal"]; exists {
+		if len(m) != 1 {
+			return invalid(path, "$literal must be the only key")
 		}
-		if ref, exists := m["$ref"]; exists {
-			if len(m) != 1 {
-				return invalid(path, "$ref must be the only key")
-			}
-			r, ok := ref.(map[string]any)
-			if !ok {
-				return invalid(path+"/$ref", "must be an object")
-			}
-			if _, e := validateFields(r, selectorFields(), path+"/$ref", phase, item); e != nil {
-				return e
-			}
-			source, _ := r["source"].(string)
-			p, _ := r["path"].(string)
-			return validateSource(source, p, path+"/$ref", phase, item)
+		return validateLiteral(literal, path+"/$literal", depth+1)
+	}
+	if ref, exists := m["$ref"]; exists {
+		if len(m) != 1 {
+			return invalid(path, "$ref must be the only key")
 		}
+		return validateReference(ref, path, phase, item)
 	}
 	return validateLiteral(v, path, depth)
 }
@@ -426,51 +358,26 @@ func compileCondition(c Condition, path, phase string, item bool, depth int, nod
 	if depth > MaxDepth {
 		return nil, invalid(path, "maximum condition depth %d exceeded", MaxDepth)
 	}
-	cap, ok := lookupCapability(conditionSpecs, c.Op)
+	capability, ok := lookupCapability(conditionSpecs, c.Op)
 	if !ok {
 		return nil, invalid(path+"/op", "unknown condition operator %q", c.Op)
 	}
 	m := conditionMap(c)
 	delete(m, "op")
-	if _, e := validateFields(m, cap.Fields, path, phase, item); e != nil {
+	if _, e := validateFields(m, capability.Fields, path, phase, item); e != nil {
 		return nil, e
 	}
 	if e := validateSource(c.Source, c.Path, path, phase, item); e != nil {
 		return nil, e
 	}
 	out := &compiledCondition{raw: c, path: path}
-	if c.Op == "all" || c.Op == "any" || c.Op == "not" {
-		if len(c.Conditions) == 0 {
-			return nil, invalid(path+"/conditions", "empty groups are forbidden; use always")
-		}
-		if c.Op == "not" && len(c.Conditions) != 1 {
-			return nil, invalid(path+"/conditions", "not requires exactly one condition")
-		}
-		for i, ch := range c.Conditions {
-			cc, e := compileCondition(ch, fmt.Sprintf("%s/conditions/%d", path, i), phase, item, depth+1, nodes)
-			if e != nil {
-				return nil, e
-			}
-			out.children = append(out.children, cc)
-		}
+	if err := out.compileChildren(phase, item, depth, nodes); err != nil {
+		return nil, err
 	}
-	if c.Op == "regex" || c.Op == "not_regex" {
-		re, e := validRegex(c.Value.(string), c.CaseInsensitive, c.DotAll, c.Multiline)
-		if e != nil {
-			return nil, invalid(path+"/value", "invalid regular expression: %v", e)
-		}
-		out.re = re
+	if err := out.validateComparison(); err != nil {
+		return nil, err
 	}
-	if contains([]string{"gt", "gte", "lt", "lte"}, c.Op) && !isReference(c.Value) && !isComputed(c.Value) {
-		if _, ok := number(expressionLiteral(c.Value)); !ok {
-			return nil, invalid(path+"/value", "numeric comparison requires a number or reference")
-		}
-	}
-	if (c.Op == "in" || c.Op == "not_in") && !isReference(c.Value) && !isComputed(c.Value) {
-		if _, ok := expressionLiteral(c.Value).([]any); !ok {
-			return nil, invalid(path+"/value", "membership requires an array or reference")
-		}
-	}
+
 	return out, nil
 }
 func isReference(v any) bool {
@@ -497,14 +404,14 @@ func compileScopedAction(a Action, path, phase string, nodes *int, item bool, de
 		return compiledAction{}, invalid(path, "maximum flow depth exceeded")
 	}
 
-	cap, ok := lookupCapability(actionSpecs, a.Type)
+	capability, ok := lookupCapability(actionSpecs, a.Type)
 	if !ok {
 		return compiledAction{}, invalid(path+"/type", "unknown action %q", a.Type)
 	}
-	if !contains(cap.Phases, phase) {
+	if !contains(capability.Phases, phase) {
 		return compiledAction{}, invalid(path+"/type", "%s is not allowed in %s", a.Type, phase)
 	}
-	p, e := validateFields(a.Params, cap.Fields, path+"/params", phase, item)
+	p, e := validateFields(a.Params, capability.Fields, path+"/params", phase, item)
 	if e != nil {
 		return compiledAction{}, e
 	}
@@ -522,77 +429,9 @@ func compileScopedAction(a Action, path, phase string, nodes *int, item bool, de
 			return out, e
 		}
 	}
-	if a.Type == "let" && !variableName.MatchString(stringParam(p, "name")) {
-		return out, invalid(path+"/params/name", "invalid variable name")
-	}
-	if a.Type == "array_filter" {
-		c, e := asCondition(p["predicate"], path+"/params/predicate")
-		if e != nil {
-			return out, e
-		}
-		out.predicate, e = compileCondition(c, path+"/params/predicate", phase, true, 0, nodes)
-		if e != nil {
-			return out, e
-		}
-	}
-	if a.Type == "array_insert" {
-		_, has := p["index"]
-		if p["position"] == "index" && !has {
-			return out, invalid(path+"/params/index", "required when position is index")
-		}
-		if p["position"] != "index" && has {
-			return out, invalid(path+"/params/index", "only valid when position is index")
-		}
-	}
-	if a.Type == "text_replace" || a.Type == "drop_input_items" {
-		pattern := stringParam(p, "pattern")
-		if a.Type == "drop_input_items" || p["match"] == "regex" {
-			if pattern != "" {
-				out.re, e = validRegex(pattern, boolParam(p, "case_insensitive"), boolParam(p, "dot_all"), boolParam(p, "multiline"))
-				if e != nil {
-					return out, invalid(path+"/params/pattern", "invalid regular expression: %v", e)
-				}
-			}
-		} else {
-			for _, k := range []string{"case_insensitive", "dot_all", "multiline"} {
-				if boolParam(p, k) {
-					return out, invalid(path+"/params/"+k, "requires match=regex")
-				}
-			}
-		}
-	}
-	if a.Type == "json_remove" {
-		for i, v := range p["paths"].([]any) {
-			if v == "" {
-				return out, invalid(fmt.Sprintf("%s/params/paths/%d", path, i), "root removal is forbidden")
-			}
-		}
-	}
-	if a.Type == "json_transfer" {
-		source := stringParam(p, "source")
-		sp := stringParam(p, "source_path")
-		tp := stringParam(p, "target_path")
-		if e := validateSource(source, sp, path+"/params", phase, false); e != nil {
-			if ve, ok := e.(*ValidationError); ok && ve.Path == path+"/params/path" {
-				ve.Path = path + "/params/source_path"
-			}
-			return out, e
-		}
-		if p["operation"] == "move" {
-			if source != "current" {
-				return out, invalid(path+"/params/source", "move requires current source")
-			}
-			if sp == "" {
-				return out, invalid(path+"/params/source_path", "moving root is forbidden")
-			}
-			if strings.HasPrefix(tp, sp+"/") {
-				return out, invalid(path+"/params/target_path", "cannot move into source subtree")
-			}
-		}
-	}
-	if a.Type == "json_merge" && !isReference(p["value"]) && !isComputed(p["value"]) {
-		if _, ok := object(expressionLiteral(p["value"])); !ok {
-			return out, invalid(path+"/params/value", "merge value must be an object or reference")
+	for _, validate := range []func(string, *int) error{out.validateVariable, out.compileArrayPredicate, out.validateArrayPosition, out.compileTextPattern, out.validateRemovalPaths, out.validateTransferPaths, out.validateMergeValue} {
+		if err := validate(phase, nodes); err != nil {
+			return out, err
 		}
 	}
 	if e := validateProtectedAction(a, phase, path); e != nil {
@@ -602,3 +441,323 @@ func compileScopedAction(a Action, path, phase string, nodes *int, item bool, de
 }
 func stringParam(p map[string]any, k string) string { s, _ := p[k].(string); return s }
 func boolParam(p map[string]any, k string) bool     { b, _ := p[k].(bool); return b }
+
+func (out *compiledAction) validateVariable(phase string, nodes *int) error {
+	a := out.raw
+	p, path := a.Params, out.path
+	if a.Type == "let" && !variableName.MatchString(stringParam(p, "name")) {
+		return invalid(path+"/params/name", "invalid variable name")
+	}
+
+	return nil
+}
+
+func (out *compiledAction) compileArrayPredicate(phase string, nodes *int) error {
+	a := out.raw
+	p, path := a.Params, out.path
+	if a.Type == "array_filter" {
+		c, e := asCondition(p["predicate"], path+"/params/predicate")
+		if e != nil {
+			return e
+		}
+		out.predicate, e = compileCondition(c, path+"/params/predicate", phase, true, 0, nodes)
+		if e != nil {
+			return e
+		}
+	}
+
+	return nil
+}
+
+func (out *compiledAction) validateArrayPosition(phase string, nodes *int) error {
+	a := out.raw
+	p, path := a.Params, out.path
+	if a.Type == "array_insert" {
+		_, has := p["index"]
+		if p["position"] == "index" && !has {
+			return invalid(path+"/params/index", "required when position is index")
+		}
+		if p["position"] != "index" && has {
+			return invalid(path+"/params/index", "only valid when position is index")
+		}
+	}
+
+	return nil
+}
+
+func (out *compiledAction) compileTextPattern(phase string, nodes *int) error {
+	a := out.raw
+	p, path := a.Params, out.path
+	var e error
+	if a.Type != "text_replace" && a.Type != "drop_input_items" {
+		return nil
+	}
+
+	pattern := stringParam(p, "pattern")
+	if a.Type == "drop_input_items" || p["match"] == "regex" {
+		if pattern != "" {
+			out.re, e = validRegex(pattern, boolParam(p, "case_insensitive"), boolParam(p, "dot_all"), boolParam(p, "multiline"))
+			if e != nil {
+				return invalid(path+"/params/pattern", "invalid regular expression: %v", e)
+			}
+		}
+	} else {
+		for _, k := range []string{"case_insensitive", "dot_all", "multiline"} {
+			if boolParam(p, k) {
+				return invalid(path+"/params/"+k, "requires match=regex")
+			}
+		}
+	}
+
+	return nil
+}
+
+func (out *compiledAction) validateRemovalPaths(phase string, nodes *int) error {
+	a := out.raw
+	p, path := a.Params, out.path
+	if a.Type == "json_remove" {
+		for i, v := range p["paths"].([]any) {
+			if v == "" {
+				return invalid(fmt.Sprintf("%s/params/paths/%d", path, i), "root removal is forbidden")
+			}
+		}
+	}
+
+	return nil
+}
+
+func (out *compiledAction) validateTransferPaths(phase string, nodes *int) error {
+	a := out.raw
+	p, path := a.Params, out.path
+	if a.Type != "json_transfer" {
+		return nil
+	}
+	source := stringParam(p, "source")
+	sp := stringParam(p, "source_path")
+	tp := stringParam(p, "target_path")
+	if e := validateSource(source, sp, path+"/params", phase, false); e != nil {
+		if ve, ok := e.(*ValidationError); ok && ve.Path == path+"/params/path" {
+			ve.Path = path + "/params/source_path"
+		}
+		return e
+	}
+	if p["operation"] == "move" {
+		if source != "current" {
+			return invalid(path+"/params/source", "move requires current source")
+		}
+		if sp == "" {
+			return invalid(path+"/params/source_path", "moving root is forbidden")
+		}
+		if strings.HasPrefix(tp, sp+"/") {
+			return invalid(path+"/params/target_path", "cannot move into source subtree")
+		}
+	}
+
+	return nil
+}
+
+func (out *compiledAction) validateMergeValue(phase string, nodes *int) error {
+	a := out.raw
+	p, path := a.Params, out.path
+	if a.Type == "json_merge" && !isReference(p["value"]) && !isComputed(p["value"]) {
+		if _, ok := object(expressionLiteral(p["value"])); !ok {
+			return invalid(path+"/params/value", "merge value must be an object or reference")
+		}
+	}
+
+	return nil
+}
+
+func validateFieldString(v any, f FieldSpec, path, phase string, item bool) error {
+	s, ok := v.(string)
+	if !ok {
+		return invalid(path, "must be %s", f.Type)
+	}
+	if f.NonEmpty && (s == "" || (f.Name == "model" && strings.TrimSpace(s) == "")) {
+		return invalid(path, "must be nonempty")
+	}
+	if len(f.Enum) > 0 && !contains(f.Enum, s) {
+		return invalid(path, "must be one of %s", strings.Join(f.Enum, ", "))
+	}
+	if f.Type == "pointer" {
+		if _, e := pointerSegments(s); e != nil {
+			return invalid(path, "%v", e)
+		}
+	}
+
+	return nil
+}
+
+func validateFieldInteger(v any, f FieldSpec, path, phase string, item bool) error {
+	n, ok := number(v)
+	if !ok || math.Trunc(n) != n || math.Abs(n) > float64(MaxSafeInteger) {
+		return invalid(path, "must be a JavaScript-safe integer")
+	}
+	if f.Minimum != nil && n < float64(*f.Minimum) {
+		return invalid(path, "must be >= %d", *f.Minimum)
+	}
+	if f.Maximum != nil && n > float64(*f.Maximum) {
+		return invalid(path, "must be <= %d", *f.Maximum)
+	}
+
+	return nil
+}
+
+func validateFieldStringArray(v any, f FieldSpec, path, phase string, item bool) error {
+	a, ok := asArray(v)
+	if !ok {
+		return invalid(path, "must be %s", f.Type)
+	}
+	for i, x := range a {
+		typ := "string"
+		if f.Type == "pointer_array" {
+			typ = "pointer"
+		}
+		if e := validateFieldValue(x, FieldSpec{Type: typ}, fmt.Sprintf("%s/%d", path, i), phase, item); e != nil {
+			return e
+		}
+	}
+
+	return nil
+}
+
+func validateFieldValueArray(v any, f FieldSpec, path, phase string, item bool) error {
+	a, ok := asArray(v)
+	if !ok {
+		return invalid(path, "must be %s", f.Type)
+	}
+	for i, x := range a {
+		if e := validateExpression(x, fmt.Sprintf("%s/%d", path, i), phase, item, 0); e != nil {
+			return e
+		}
+	}
+
+	return nil
+}
+
+func validateFieldConditionArray(v any, f FieldSpec, path, phase string, item bool) error {
+	switch v.(type) {
+	case []Condition, []any:
+	default:
+		return invalid(path, "must be %s", f.Type)
+	}
+
+	return nil
+}
+
+func validateRuleMetadata(r Rule, path string) error {
+	bad := func(k, msg string) error { return invalid(joinPointer(path, k), "%s", msg) }
+	if int64(r.Priority) < -2147483648 || int64(r.Priority) > 2147483647 {
+		return bad("priority", "must be an integer in -2147483648..2147483647")
+	}
+	if r.OrderIndex < -MaxSafeInteger || r.OrderIndex > MaxSafeInteger {
+		return bad("order_index", "must be a safe integer")
+	}
+	if r.Revision < 0 || r.Revision > MaxSafeInteger {
+		return bad("revision", "must be a nonnegative safe integer")
+	}
+	for k, v := range map[string]string{"created_at": r.CreatedAt, "updated_at": r.UpdatedAt} {
+		if v != "" {
+			if _, e := time.Parse(time.RFC3339Nano, v); e != nil {
+				return bad(k, "must be an RFC3339 timestamp")
+			}
+		}
+	}
+
+	return nil
+}
+
+func normalizeFieldParams(params map[string]any, path string) (map[string]any, error) {
+	// Normalize programmatically generated recipe ASTs exactly like submitted JSON.
+	if params != nil {
+		raw, err := json.Marshal(params)
+		if err != nil {
+			return nil, invalid(path, "%v", err)
+		}
+		v, err := decodeAny(raw, path)
+		if err != nil {
+			return nil, err
+		}
+		return v.(map[string]any), nil
+	}
+
+	return params, nil
+}
+
+func validateOneField(params map[string]any, f FieldSpec, path, phase string, item bool) (any, bool, error) {
+	v, exists := params[f.Name]
+	p := joinPointer(path, f.Name)
+	if !exists {
+		if f.Required {
+			return nil, false, invalid(p, "required field is missing")
+		}
+		if f.Default != nil {
+			return mustClone(f.Default), true, nil
+		}
+		return nil, false, nil
+	}
+	if e := validateFieldValue(v, f, p, phase, item); e != nil {
+		return nil, false, e
+	}
+	c, e := cloneJSON(v)
+	if e != nil {
+		return nil, false, invalid(p, "%v", e)
+	}
+	return c, true, nil
+}
+
+func (out *compiledCondition) compileChildren(phase string, item bool, depth int, nodes *int) error {
+	c, path := out.raw, out.path
+	if c.Op == "all" || c.Op == "any" || c.Op == "not" {
+		if len(c.Conditions) == 0 {
+			return invalid(path+"/conditions", "empty groups are forbidden; use always")
+		}
+		if c.Op == "not" && len(c.Conditions) != 1 {
+			return invalid(path+"/conditions", "not requires exactly one condition")
+		}
+		for i, ch := range c.Conditions {
+			cc, e := compileCondition(ch, fmt.Sprintf("%s/conditions/%d", path, i), phase, item, depth+1, nodes)
+			if e != nil {
+				return e
+			}
+			out.children = append(out.children, cc)
+		}
+	}
+	return nil
+}
+
+func (out *compiledCondition) validateComparison() error {
+	c, path := out.raw, out.path
+
+	if c.Op == "regex" || c.Op == "not_regex" {
+		re, e := validRegex(c.Value.(string), c.CaseInsensitive, c.DotAll, c.Multiline)
+		if e != nil {
+			return invalid(path+valuePointer, "invalid regular expression: %v", e)
+		}
+		out.re = re
+	}
+	if contains([]string{"gt", "gte", "lt", "lte"}, c.Op) && !isReference(c.Value) && !isComputed(c.Value) {
+		if _, ok := number(expressionLiteral(c.Value)); !ok {
+			return invalid(path+valuePointer, "numeric comparison requires a number or reference")
+		}
+	}
+	if (c.Op == "in" || c.Op == "not_in") && !isReference(c.Value) && !isComputed(c.Value) {
+		if _, ok := expressionLiteral(c.Value).([]any); !ok {
+			return invalid(path+valuePointer, "membership requires an array or reference")
+		}
+	}
+	return nil
+}
+
+func validateReference(ref any, path, phase string, item bool) error {
+	r, ok := ref.(map[string]any)
+	if !ok {
+		return invalid(path+"/$ref", "must be an object")
+	}
+	if _, e := validateFields(r, selectorFields(), path+"/$ref", phase, item); e != nil {
+		return e
+	}
+	source, _ := r["source"].(string)
+	p, _ := r["path"].(string)
+	return validateSource(source, p, path+"/$ref", phase, item)
+}

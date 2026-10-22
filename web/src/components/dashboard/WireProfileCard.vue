@@ -18,7 +18,7 @@ const { t } = useI18n()
 			<dl class="identity-attributes"><div><dt><Radio :size="13" />{{ t('dashboard.transport') }}</dt><dd>{{ transportLabel(overview.upstream.transport) }}<p class="transport-description">{{ transportDescription(overview.upstream.transport) }}</p></dd></div><div><dt><Network :size="13" />{{ t('dashboard.pooledSockets') }}</dt><dd>{{ overview.upstream.websocket_pool }}</dd></div></dl>
 			<footer><span><Terminal :size="13" />{{ t('dashboard.baseUrl') }}</span><code>{{ overview.upstream.base_url || '—' }}</code></footer>
 		</section>
-		<div v-else class="identity-empty" role="status">{{ error || t('stats.loading') }}</div>
+		<output v-else class="identity-empty" >{{ error || t('stats.loading') }}</output>
 	</article>
 </template>
 

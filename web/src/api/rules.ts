@@ -3,7 +3,6 @@ export type JsonValue = null | boolean | number | string | JsonValue[] | { [key:
 export type RulePhase = 'client_request' | 'request_normalize' | 'request' | 'request_finalize' | 'upstream_headers' | 'response_event' | 'response_body'
 export type RuleSource = 'current' | 'original' | 'client' | 'context' | 'vars' | 'item'
 export type RuleEncoding = 'value' | 'json'
-export type ValueExpr = JsonValue
 
 export interface ValueReference {
     source?: RuleSource;
@@ -17,7 +16,7 @@ export interface RuleCondition {
     source?: RuleSource
     path?: string
     encoding?: RuleEncoding
-    value?: ValueExpr
+    value?: JsonValue
     pattern?: string
     case_insensitive?: boolean
     dot_all?: boolean

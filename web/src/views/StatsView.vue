@@ -62,30 +62,43 @@ const performanceOptions = computed(() => [
 const modelRows = computed(() => models.value.map(item => ({ ...item, name: item.key })))
 const keyRows = computed(() => keys.value.map(item => ({ ...item, name: String(item.key) })))
 const accountRows = computed(() => accounts.value.map(item => ({ ...item, name: accountNames.value[String(item.id)] || `#${item.id}` })))
-const activeRows = computed(() => dimension.value === 'model' ? modelRows.value : dimension.value === 'account' ? accountRows.value : keyRows.value)
+const activeRows = computed(() => (() => {
+    if (dimension.value === 'model') {
+        return modelRows.value
+    }
+    if (dimension.value === 'account') {
+        return accountRows.value
+    }
+    return keyRows.value
+})())
 const dimensionLabel = computed(() => dimensions.value.find(item => item.value === dimension.value)!.label)
 function throughput(value: number | null | undefined) { return value == null ? '—' : `${metric(value, 2)} /s` }
-const trendSummary = computed(() => trendMetric.value === 'tokens' ? [
+const trendSummary = computed(() => (() => {
+    if (trendMetric.value === 'tokens') {
+        return [
 	{ label: labels.value.totalTokens, value: metric(summary.value?.total_tokens), tone: 'blue' },
 	{ label: labels.value.output, value: metric(summary.value?.output_tokens), tone: 'green' },
 	{ label: labels.value.cached, value: metric(summary.value?.cached_tokens), tone: 'muted' },
-] : [
+]
+    }
+    return [
 	{ label: t('stats.requests'), value: metric(summary.value?.request_count), tone: 'blue' },
 	{ label: labels.value.success, value: percent(summary.value ? rate(summary.value.success_count, summary.value.request_count) : null), tone: 'green' },
 	{ label: labels.value.failures, value: metric(summary.value?.failure_count), tone: 'orange' },
-])
+]
+})())
 const performanceSummary = computed(() => {
 	const s = summary.value
-	if (performanceMetric.value === 'throughput') return [
+	if (performanceMetric.value === 'throughput') { return [
 		{ label: 'P50', value: throughput(s?.output_tps_p50) },
 		{ label: 'P90', value: throughput(s?.output_tps_p90) },
 		{ label: t('stats.outputTokens'), value: metric(s?.output_tokens) },
-	]
-	if (performanceMetric.value === 'ttft') return [
+	] }
+	if (performanceMetric.value === 'ttft') { return [
 		{ label: 'P50', value: duration(s?.ttft_p50_ms) },
 		{ label: 'P90', value: duration(s?.ttft_p90_ms) },
 		{ label: 'P95', value: duration(s?.ttft_p95_ms) },
-	]
+	] }
 	return [
 		{ label: labels.value.average, value: duration(s?.avg_latency_ms) },
 		{ label: 'TTFT · P50', value: duration(s?.ttft_p50_ms) },
@@ -105,8 +118,8 @@ const trendSeries = computed<StatsSeries[]>(() => trendMetric.value === 'request
 	{ name: labels.value.cached, values: buckets.value.map(bucket => bucket.cached_tokens), color: palette.value.muted },
 ])
 const performanceSeries = computed<StatsSeries[]>(() => {
-	if (performanceMetric.value === 'throughput') return [{ name: t('stats.tps'), values: buckets.value.map(bucket => bucket.output_tps), unit: 'throughput', color: palette.value.green, area: true }]
-	if (performanceMetric.value === 'ttft') return [{ name: labels.value.first, values: buckets.value.map(bucket => bucket.ttft_ms), unit: 'duration', color: palette.value.cyan, area: true }]
+	if (performanceMetric.value === 'throughput') { return [{ name: t('stats.tps'), values: buckets.value.map(bucket => bucket.output_tps), unit: 'throughput', color: palette.value.green, area: true }] }
+	if (performanceMetric.value === 'ttft') { return [{ name: labels.value.first, values: buckets.value.map(bucket => bucket.ttft_ms), unit: 'duration', color: palette.value.cyan, area: true }] }
 	return [{ name: labels.value.average, values: buckets.value.map(bucket => bucket.avg_latency_ms), unit: 'duration', color: palette.value.orange, area: true }]
 })
 const costSeries = computed<StatsSeries[]>(() => costMetric.value === 'cost' ? [
@@ -121,7 +134,7 @@ const costOption = computed(() => option(buckets.value, costSeries.value))
 function hasSamples(series: StatsSeries[]) { return !loading.value && series.some(item => item.values.some(value => value != null && Number.isFinite(value))) }
 function refreshRange() { rangePicker.value?.refresh() }
 async function load(next?: StatsRange) {
-	if (next) range.value = next
+	if (next) { range.value = next }
 	const run = ++generation
 	loading.value = true
 	error.value = ''
@@ -132,11 +145,11 @@ async function load(next?: StatsRange) {
 			api.statsSummary(start, end), api.statsTrend(start, end, end - start > 172800000 ? 'day' : 'hour'),
 			api.statsModels(start, end), api.statsKeys(start, end), api.statsAccounts(start, end),
 		])
-		if (run !== generation) return
+		if (run !== generation) { return }
 		summary.value = s; buckets.value = trend.buckets ?? []; models.value = m.items ?? []; keys.value = k.items ?? []; accounts.value = a.items ?? []
 	} catch (err) {
-		if (run === generation) error.value = err instanceof Error ? err.message : t('stats.loadFailed')
-	} finally { if (run === generation) loading.value = false }
+		if (run === generation) { error.value = err instanceof Error ? err.message : t('stats.loadFailed') }
+	} finally { if (run === generation) { loading.value = false } }
 }
 onMounted(() => {
 	void load()
@@ -153,24 +166,24 @@ onBeforeUnmount(() => { generation++ })
 			<p v-if="error" role="alert" class="notice notice-error">{{ error }}</p>
 			<section class="insights-grid" :aria-label="t('stats.title')">
 				<article class="card insight-card">
-					<header class="insight-header"><div><h2>{{ labels.trend }}</h2><p>{{ labels.trendDescription }}</p></div><div class="segmented" role="group" :aria-label="t('stats.metric')"><button type="button" class="segmented-button" :class="{ 'is-active': trendMetric === 'requests' }" :aria-pressed="trendMetric === 'requests'" @click="trendMetric = 'requests'">{{ labels.requests }}</button><button type="button" class="segmented-button" :class="{ 'is-active': trendMetric === 'tokens' }" :aria-pressed="trendMetric === 'tokens'" @click="trendMetric = 'tokens'">{{ labels.tokens }}</button></div></header>
-					<div class="insight-body"><div class="metric-strip"><div v-for="item in trendSummary" :key="item.label" class="marked-metric"><i class="summary-dot" :class="`dot-${item.tone}`" /><span><small>{{ item.label }}</small><strong :title="item.value">{{ item.value }}</strong></span></div></div><BaseChart v-if="hasSamples(trendSeries)" :option="trendOption" :label="labels.trend" :height="210" /><div v-else class="insight-empty" role="status"><ChartNoAxesCombined :size="28" /><span>{{ loading ? t('stats.loading') : t('stats.empty') }}</span></div></div>
+					<header class="insight-header"><div><h2>{{ labels.trend }}</h2><p>{{ labels.trendDescription }}</p></div><fieldset class="segmented"  :aria-label="t('stats.metric')"><button type="button" class="segmented-button" :class="{ 'is-active': trendMetric === 'requests' }" :aria-pressed="trendMetric === 'requests'" @click="trendMetric = 'requests'">{{ labels.requests }}</button><button type="button" class="segmented-button" :class="{ 'is-active': trendMetric === 'tokens' }" :aria-pressed="trendMetric === 'tokens'" @click="trendMetric = 'tokens'">{{ labels.tokens }}</button></fieldset></header>
+					<div class="insight-body"><div class="metric-strip"><div v-for="item in trendSummary" :key="item.label" class="marked-metric"><i class="summary-dot" :class="`dot-${item.tone}`" /><span><small>{{ item.label }}</small><strong :title="item.value">{{ item.value }}</strong></span></div></div><BaseChart v-if="hasSamples(trendSeries)" :option="trendOption" :label="labels.trend" :height="210" /><output v-else class="insight-empty" ><ChartNoAxesCombined :size="28" /><span>{{ loading ? t('stats.loading') : t('stats.empty') }}</span></output></div>
 				</article>
 				<article class="card insight-card diagnostic-card">
-					<header class="insight-header"><div><h2>{{ labels.diagnostic }}</h2><p>{{ labels.diagnosticDescription }}</p></div><div class="segmented" role="group" :aria-label="labels.dimension"><button v-for="item in dimensions" :key="item.value" type="button" class="segmented-button" :class="{ 'is-active': dimension === item.value }" :aria-pressed="dimension === item.value" @click="dimension = item.value">{{ item.label }}</button></div></header>
+					<header class="insight-header"><div><h2>{{ labels.diagnostic }}</h2><p>{{ labels.diagnosticDescription }}</p></div><fieldset class="segmented"  :aria-label="labels.dimension"><button v-for="item in dimensions" :key="item.value" type="button" class="segmented-button" :class="{ 'is-active': dimension === item.value }" :aria-pressed="dimension === item.value" @click="dimension = item.value">{{ item.label }}</button></fieldset></header>
 					<div class="diagnostic-body"><StatsTable :rows="activeRows" :name-label="dimensionLabel" :show-share="dimension === 'model'" :loading="loading" compact /></div>
 				</article>
 				<article class="card insight-card">
-					<header class="insight-header"><div><h2>{{ labels.response }}</h2><p :title="labels.quantileHint">{{ labels.responseDescription }}</p></div><div class="segmented" role="group" :aria-label="t('stats.metric')"><button v-for="item in performanceOptions" :key="item.value" type="button" class="segmented-button" :class="{ 'is-active': performanceMetric === item.value }" :aria-pressed="performanceMetric === item.value" @click="performanceMetric = item.value">{{ item.label }}</button></div></header>
-					<div class="insight-body"><div class="metric-strip"><div v-for="item in performanceSummary" :key="item.label"><small>{{ item.label }}</small><strong :title="item.value">{{ item.value }}</strong></div></div><BaseChart v-if="hasSamples(performanceSeries)" :option="performanceOption" :label="`${labels.response}: ${labels.quantileHint}`" :height="210" /><div v-else class="insight-empty" role="status"><ChartNoAxesCombined :size="28" /><span>{{ loading ? t('stats.loading') : t('stats.empty') }}</span></div></div>
+					<header class="insight-header"><div><h2>{{ labels.response }}</h2><p :title="labels.quantileHint">{{ labels.responseDescription }}</p></div><fieldset class="segmented"  :aria-label="t('stats.metric')"><button v-for="item in performanceOptions" :key="item.value" type="button" class="segmented-button" :class="{ 'is-active': performanceMetric === item.value }" :aria-pressed="performanceMetric === item.value" @click="performanceMetric = item.value">{{ item.label }}</button></fieldset></header>
+					<div class="insight-body"><div class="metric-strip"><div v-for="item in performanceSummary" :key="item.label"><small>{{ item.label }}</small><strong :title="item.value">{{ item.value }}</strong></div></div><BaseChart v-if="hasSamples(performanceSeries)" :option="performanceOption" :label="`${labels.response}: ${labels.quantileHint}`" :height="210" /><output v-else class="insight-empty" ><ChartNoAxesCombined :size="28" /><span>{{ loading ? t('stats.loading') : t('stats.empty') }}</span></output></div>
 				</article>
 				<article class="card insight-card">
-					<header class="insight-header"><div><h2>{{ labels.costTitle }}</h2><p>{{ labels.costDescription }}</p></div><div class="segmented" role="group" :aria-label="t('stats.metric')"><button type="button" class="segmented-button" :class="{ 'is-active': costMetric === 'cost' }" :aria-pressed="costMetric === 'cost'" @click="costMetric = 'cost'">{{ labels.cost }}</button><button type="button" class="segmented-button" :class="{ 'is-active': costMetric === 'cache' }" :aria-pressed="costMetric === 'cache'" @click="costMetric = 'cache'">{{ labels.cache }}</button></div></header>
-					<div class="insight-body"><div class="metric-strip"><div v-for="item in costSummary" :key="item.label"><small>{{ item.label }}</small><strong :title="item.value">{{ item.value }}</strong></div></div><BaseChart v-if="hasSamples(costSeries)" :option="costOption" :label="labels.costTitle" :height="210" /><div v-else class="insight-empty" role="status"><ChartNoAxesCombined :size="28" /><span>{{ loading ? t('stats.loading') : t('stats.empty') }}</span></div></div>
+					<header class="insight-header"><div><h2>{{ labels.costTitle }}</h2><p>{{ labels.costDescription }}</p></div><fieldset class="segmented"  :aria-label="t('stats.metric')"><button type="button" class="segmented-button" :class="{ 'is-active': costMetric === 'cost' }" :aria-pressed="costMetric === 'cost'" @click="costMetric = 'cost'">{{ labels.cost }}</button><button type="button" class="segmented-button" :class="{ 'is-active': costMetric === 'cache' }" :aria-pressed="costMetric === 'cache'" @click="costMetric = 'cache'">{{ labels.cache }}</button></fieldset></header>
+					<div class="insight-body"><div class="metric-strip"><div v-for="item in costSummary" :key="item.label"><small>{{ item.label }}</small><strong :title="item.value">{{ item.value }}</strong></div></div><BaseChart v-if="hasSamples(costSeries)" :option="costOption" :label="labels.costTitle" :height="210" /><output v-else class="insight-empty" ><ChartNoAxesCombined :size="28" /><span>{{ loading ? t('stats.loading') : t('stats.empty') }}</span></output></div>
 				</article>
 			</section>
 			<section class="card breakdown-card">
-				<header class="insight-header"><div><h2>{{ labels.details }}</h2><p>{{ labels.detailsDescription }}</p></div><div class="segmented" role="group" :aria-label="labels.dimension"><button v-for="item in dimensions" :key="item.value" type="button" class="segmented-button" :class="{ 'is-active': dimension === item.value }" :aria-pressed="dimension === item.value" @click="dimension = item.value">{{ item.label }}</button></div></header>
+				<header class="insight-header"><div><h2>{{ labels.details }}</h2><p>{{ labels.detailsDescription }}</p></div><fieldset class="segmented"  :aria-label="labels.dimension"><button v-for="item in dimensions" :key="item.value" type="button" class="segmented-button" :class="{ 'is-active': dimension === item.value }" :aria-pressed="dimension === item.value" @click="dimension = item.value">{{ item.label }}</button></fieldset></header>
 				<StatsTable :rows="activeRows" :name-label="dimensionLabel" :show-share="dimension === 'model'" :loading="loading" />
 			</section>
 			<div class="stats-scope"><span>{{ formatDateTime(range.start) }} — {{ formatDateTime(range.end) }}</span><span>{{ t('stats.unknownHint') }}</span></div>

@@ -17,13 +17,13 @@ const showOptions = ref(false)
 const primary = (f: import('../../api/rules').RuleField) => props.itemContext && f.name === 'source' && props.modelValue.source === 'item' ? false : f.required || ['path', 'source'].includes(f.name) || (props.modelValue as unknown as Record<string, unknown>)[f.name] !== undefined && JSON.stringify((props.modelValue as unknown as Record<string, unknown>)[f.name]) !== JSON.stringify(defaultForField(f)) || props.errors?.some(e => e.path.startsWith(`${props.path}/${f.name}`))
 const hiddenCount = computed(() => (cap.value?.fields ?? []).filter(f => !primary(f)).length)
 const visibleFields = computed(() => (cap.value?.fields ?? []).filter(f => !props.compact || showOptions.value || primary(f)))
-function field(name: string, value: unknown) { const next = {...props.modelValue} as Record<string, unknown>; if (value === undefined) delete next[name]; else next[name] = value; emit('update:modelValue', next as unknown as RuleCondition) }
+function field(name: string, value: unknown) { const next = {...props.modelValue} as Record<string, unknown>; if (value === undefined) { delete next[name]; } else { next[name] = value; } emit('update:modelValue', next as unknown as RuleCondition) }
 function updateChild(index: number, value: RuleCondition) { field('conditions', children.value.map((c, i) => i === index ? value : c)) }
 function changeOp(op: string) {
   const next = defaultCondition(op, props.schema)
   const allowed = new Set(props.schema.conditions.find(c => c.id === op)?.fields.map(f => f.name))
-  for (const [key, value] of Object.entries(props.modelValue)) if (allowed.has(key)) (next as unknown as Record<string, unknown>)[key] = value
-  if (props.itemContext && allowed.has('source') && props.modelValue.source === 'item') next.source = 'item'
+  for (const [key, value] of Object.entries(props.modelValue)) if (allowed.has(key)) { (next as unknown as Record<string, unknown>)[key] = value }
+  if (props.itemContext && allowed.has('source') && props.modelValue.source === 'item') { next.source = 'item' }
   emit('update:modelValue', next)
 }
 </script>
@@ -57,10 +57,10 @@ function changeOp(op: string) {
 <style scoped>
 .rule-condition-card { min-width: 0; }
 .rule-condition-fields { display: grid; gap: 10px; }
-.rule-condition-card.is-compact { padding: 8px; background: var(--color-surface); }
+.rule-condition-card.is-compact { padding: 8px; background: var(--color-surface); margin-top: 0; }
 .rule-condition-card.is-compact > div:first-child { display: block; }
 .rule-condition-card.is-compact > div:first-child > p { display: none; }
-.rule-condition-card.is-compact { margin-top: 0; }
+
 .rule-condition-card.is-compact .rule-condition-fields { gap: 2px; }
 .condition-options { width: 100%; min-height: 26px; font-size: 11px; color: var(--color-ink-muted); background: var(--color-surface-2); border-radius: 4px; }
 </style>

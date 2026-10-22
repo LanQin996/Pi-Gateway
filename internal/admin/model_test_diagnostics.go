@@ -99,20 +99,8 @@ func (r *modelTestRedactor) scrub(text string, depth int) string {
 	if depth > 32 {
 		return modelTestRedacted
 	}
-	trimmed := strings.TrimSpace(text)
-	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, `"`) {
-		var value any
-		if json.Valid([]byte(text)) {
-			decoder := json.NewDecoder(strings.NewReader(text))
-			decoder.UseNumber()
-			if decoder.Decode(&value) == nil {
-				value = r.scrubValue(value, depth+1)
-				encoded, err := json.MarshalIndent(value, "", "  ")
-				if err == nil {
-					return string(encoded)
-				}
-			}
-		}
+	if encoded, ok := r.scrubJSONDocument(text, depth); ok {
+		return encoded
 	}
 	// A proxy can embed JSON-escaped text without the outer JSON string
 	// quotes. Decode one layer for inspection, then preserve that wire shape.
@@ -176,38 +164,8 @@ func (r *modelTestRedactor) bounded(text string, limit int, sourceTruncated bool
 		// A clipped JSON string may end in a partial Unicode escape. Its
 		// decoded credential cannot safely be matched, so omit that unfinished
 		// literal rather than return any undecodable secret fragment.
-		quotedAt, escaped := -1, false
-		for i, c := range text {
-			if escaped {
-				escaped = false
-				continue
-			}
-			if c == '\\' {
-				escaped = true
-				continue
-			}
-			if c == '"' {
-				if quotedAt < 0 {
-					quotedAt = i
-				} else {
-					quotedAt = -1
-				}
-			}
-		}
-		if quotedAt >= 0 {
-			text = text[:quotedAt] + `"` + modelTestRedacted + `"`
-		}
-		longest := 0
-		for _, secret := range r.secrets {
-			for n := 1; n < len(secret) && n <= len(text); n++ {
-				if n > longest && strings.HasSuffix(text, secret[:n]) {
-					longest = n
-				}
-			}
-		}
-		if longest > 0 {
-			text = text[:len(text)-longest] + modelTestRedacted
-		}
+		text = redactUnfinishedLiteral(text)
+		text = r.redactPartialSecret(text)
 	}
 	text = strings.ToValidUTF8(r.scrub(text, 0), "\uFFFD")
 	truncated := sourceTruncated || len(text) > limit
@@ -249,4 +207,63 @@ func modelTestErrorMessage(value any) string {
 		}
 	}
 	return ""
+}
+
+func redactUnfinishedLiteral(text string) string {
+	quotedAt, escaped := -1, false
+	for i, c := range text {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if c == '\\' {
+			escaped = true
+			continue
+		}
+		if c == '"' {
+			if quotedAt < 0 {
+				quotedAt = i
+			} else {
+				quotedAt = -1
+			}
+		}
+	}
+	if quotedAt >= 0 {
+		text = text[:quotedAt] + `"` + modelTestRedacted + `"`
+	}
+	return text
+}
+
+func (r *modelTestRedactor) redactPartialSecret(text string) string {
+	longest := 0
+	for _, secret := range r.secrets {
+		for n := 1; n < len(secret) && n <= len(text); n++ {
+			if n > longest && strings.HasSuffix(text, secret[:n]) {
+				longest = n
+			}
+		}
+	}
+	if longest > 0 {
+		text = text[:len(text)-longest] + modelTestRedacted
+	}
+	return text
+}
+
+func (r *modelTestRedactor) scrubJSONDocument(text string, depth int) (string, bool) {
+	trimmed := strings.TrimSpace(text)
+	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, `"`) {
+		var value any
+		if json.Valid([]byte(text)) {
+			decoder := json.NewDecoder(strings.NewReader(text))
+			decoder.UseNumber()
+			if decoder.Decode(&value) == nil {
+				value = r.scrubValue(value, depth+1)
+				encoded, err := json.MarshalIndent(value, "", "  ")
+				if err == nil {
+					return string(encoded), true
+				}
+			}
+		}
+	}
+	return "", false
 }

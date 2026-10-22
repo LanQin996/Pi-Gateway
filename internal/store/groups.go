@@ -156,39 +156,9 @@ type AccountGroupPatch struct {
 }
 
 func (s *Store) PatchAccountGroup(ctx context.Context, id int64, patch AccountGroupPatch) error {
-	sets := []string{"updated_at=?"}
-	args := []any{NowMS()}
-	if patch.SwitchOn429 != nil {
-		if err := validateSwitchOn429(*patch.SwitchOn429); err != nil {
-			return err
-		}
-		sets = append(sets, "switch_on_429=?")
-		args = append(args, *patch.SwitchOn429)
-	}
-	if patch.Name != nil {
-		name := strings.TrimSpace(*patch.Name)
-		if name == "" {
-			return fmt.Errorf("%w: group name cannot be empty", ErrInvalidPolicy)
-		}
-		sets = append(sets, "name=?")
-		args = append(args, name)
-	}
-	if patch.Enabled != nil {
-		sets = append(sets, "enabled=?")
-		args = append(args, boolToInt(*patch.Enabled))
-	}
-	if patch.Notes != nil {
-		sets = append(sets, "notes=?")
-		args = append(args, strings.TrimSpace(*patch.Notes))
-	}
-	if patch.DisabledModels != nil {
-		models, err := NormalizeDisabledModels(patch.DisabledModels)
-		if err != nil {
-			return err
-		}
-		raw, _ := json.Marshal(models)
-		sets = append(sets, "disabled_models=?")
-		args = append(args, string(raw))
+	sets, args, err := accountGroupUpdate(patch)
+	if err != nil {
+		return err
 	}
 	tx, err := s.BeginTx(ctx, nil)
 	if err != nil {
@@ -602,4 +572,42 @@ func validateSwitchOn429(v string) error {
 		return nil
 	}
 	return fmt.Errorf("%w: switch_on_429 must be inherit, enabled or disabled", ErrInvalidPolicy)
+}
+
+func accountGroupUpdate(patch AccountGroupPatch) ([]string, []any, error) {
+	sets := []string{"updated_at=?"}
+	args := []any{NowMS()}
+	if patch.SwitchOn429 != nil {
+		if err := validateSwitchOn429(*patch.SwitchOn429); err != nil {
+			return nil, nil, err
+		}
+		sets = append(sets, "switch_on_429=?")
+		args = append(args, *patch.SwitchOn429)
+	}
+	if patch.Name != nil {
+		name := strings.TrimSpace(*patch.Name)
+		if name == "" {
+			return nil, nil, fmt.Errorf("%w: group name cannot be empty", ErrInvalidPolicy)
+		}
+		sets = append(sets, "name=?")
+		args = append(args, name)
+	}
+	if patch.Enabled != nil {
+		sets = append(sets, "enabled=?")
+		args = append(args, boolToInt(*patch.Enabled))
+	}
+	if patch.Notes != nil {
+		sets = append(sets, "notes=?")
+		args = append(args, strings.TrimSpace(*patch.Notes))
+	}
+	if patch.DisabledModels != nil {
+		models, err := NormalizeDisabledModels(patch.DisabledModels)
+		if err != nil {
+			return nil, nil, err
+		}
+		raw, _ := json.Marshal(models)
+		sets = append(sets, "disabled_models=?")
+		args = append(args, string(raw))
+	}
+	return sets, args, nil
 }

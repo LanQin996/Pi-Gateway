@@ -72,7 +72,7 @@ for (const lang of ['en', 'zh-CN']) {
     assert.equal(ui.formatUntil(1), '1m')
     assert.equal(ui.formatUntil(0), t('common.expired'))
     assert.equal(ui.formatUntil(-1), t('common.expired'))
-    assert.equal(ui.formatUntil(NaN), '—')
+    assert.equal(ui.formatUntil(Number.NaN), '—')
     const html = await render({usage, windowCost})
     for (const amount of [10, 40, 30]) assert.ok(html.includes(money.money(amount)), html)
     for (const key of ['quota.windowCost', 'quota.estimatedTotal', 'quota.estimatedRemaining', 'quota.costHint', 'quota.costEstimateHint']) assert.ok(html.includes(t(key)), key)
@@ -84,7 +84,7 @@ for (const lang of ['en', 'zh-CN']) {
         compact: true,
         cycleLabel: '7d'
     })
-    const visibleText = partialHTML.replace(/<[^>]*>/g, '')
+    const visibleText = textContent(partialHTML)
     for (const key of ['quota.usedShort', 'quota.estimateShort']) assert.ok(visibleText.includes(t(key)))
     assert.ok(visibleText.includes(money.money(10)))
     assert.ok(visibleText.includes(money.money(40)))
@@ -112,8 +112,21 @@ for (const lang of ['en', 'zh-CN']) {
     assert.ok(unavailable.includes('—'))
     assert.ok(unavailable.includes(t('quota.costMissingSnapshot')))
     const precision = await render({usage: {...usage, cost_micros: 1234567}})
-    assert.ok(precision.replace(/<[^>]*>/g, '').includes(money.money(1.23)))
+    assert.ok(textContent(precision).includes(money.money(1.23)))
     assert.ok(precision.includes(money.money(1.234567)))
 
 }
 console.log('PASS: quota USD cost/estimate rendering in both languages, partial/missing/zero costs and day/hour countdown boundaries')
+
+function textContent(html) {
+    let result = '', start = 0
+    while (start < html.length) {
+        const open = html.indexOf('<', start)
+        if (open === -1) return result + html.slice(start)
+        const close = html.indexOf('>', open + 1)
+        if (close === -1) return result + html.slice(start)
+        result += html.slice(start, open)
+        start = close + 1
+    }
+    return result
+}

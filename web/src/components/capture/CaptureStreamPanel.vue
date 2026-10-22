@@ -12,12 +12,12 @@ const snapshot = computed(() => streamSnapshot(props.capture, props.side))
 const direction = computed(() => c(props.side === 'upstream' ? 'upstreamIn' : 'clientOut'))
 const status = computed(() => props.side === 'upstream' ? props.capture.status : responseHeaderSnapshots(props.capture).status)
 const explanation = computed(() => {
-	if (snapshot.value.text) return ''
-	if (props.side === 'upstream' && props.capture.status >= 400 && snapshot.value.http.length) return c('noSseHttpError', { status: props.capture.status })
-	if (props.side === 'client' && !snapshot.value.frames.some(frame => ['http_response', 'ws_frame', 'ws_binary', 'sse_event'].includes(frame.kind))) return c('noClientResponse')
-	if (snapshot.value.protocol === 'ws') return c('noSseWs')
-	if (props.side === 'client' && payloadObject(requestSnapshots(props.capture).beforeBody.value)?.stream === false) return c('noSseAggregate')
-	if (props.side === 'client' && snapshot.value.http.length && (status.value ?? 0) >= 400) return c('noSseClientError')
+	if (snapshot.value.text) { return '' }
+	if (props.side === 'upstream' && props.capture.status >= 400 && snapshot.value.http.length) { return c('noSseHttpError', { status: props.capture.status }) }
+	if (props.side === 'client' && !snapshot.value.frames.some(frame => ['http_response', 'ws_frame', 'ws_binary', 'sse_event'].includes(frame.kind))) { return c('noClientResponse') }
+	if (snapshot.value.protocol === 'ws') { return c('noSseWs') }
+	if (props.side === 'client' && payloadObject(requestSnapshots(props.capture).beforeBody.value)?.stream === false) { return c('noSseAggregate') }
+	if (props.side === 'client' && snapshot.value.http.length && (status.value ?? 0) >= 400) { return c('noSseClientError') }
 	return c('noSseRecorded')
 })
 const socketGroups = computed(() => groupCaptureRows(snapshot.value.socket.map(frame => ({key:String(frame.seq), frame}))))
@@ -28,7 +28,7 @@ const limits = ref<Record<string, number>>({})
 <template>
 	<section class="stream-panel card" :data-side="side">
 		<header><h3>{{ direction }}</h3><Badge tone="info">{{ c(snapshot.protocol) }}</Badge><Badge v-if="status">{{ c('status', { status }) }}</Badge><small v-else>{{ c('unrecorded') }}</small></header>
-		<p v-if="explanation" class="stream-explanation" role="status">{{ explanation }}</p>
+		<output v-if="explanation" class="stream-explanation" >{{ explanation }}</output>
 		<template v-if="snapshot.text">
 			<p class="stream-hint">{{ c(side === 'upstream' || snapshot.reconstructed ? 'reconstructed' : 'clientSseNote') }}</p>
 			<JsonViewer :value="snapshot.text" raw :label="c(side === 'upstream' ? 'upstreamSse' : 'clientSse')" max-height="38rem" />

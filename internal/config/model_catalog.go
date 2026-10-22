@@ -51,15 +51,8 @@ func (c *Config) codexModelsURL() (*url.URL, error) {
 	if version == "" || version == AutoCodexClientVersion {
 		version = DefaultCodexClientVersion
 	}
-	if len(version) > 64 {
-		return nil, errors.New("models.codex_client_version: invalid length (maximum 64 bytes)")
-	}
-	for i := 0; i < len(version); i++ {
-		ch := version[i]
-		alnum := ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9'
-		if !alnum && (i == 0 || !strings.ContainsRune("._+-", rune(ch))) {
-			return nil, errors.New("models.codex_client_version: invalid characters (use ASCII letters, digits, '.', '_', '+', '-'; start with a letter or digit)")
-		}
+	if err := validateCodexVersion(version); err != nil {
+		return nil, err
 	}
 	if strings.TrimSpace(base) != base {
 		return nil, errors.New("models.codex_base_url: invalid surrounding whitespace")
@@ -68,41 +61,15 @@ func (c *Config) codexModelsURL() (*url.URL, error) {
 	if err != nil || u.Opaque != "" {
 		return nil, errors.New("models.codex_base_url: invalid URL syntax")
 	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return nil, errors.New("models.codex_base_url: unsupported scheme (want http or https)")
-	}
-	if u.User != nil {
-		return nil, errors.New("models.codex_base_url: userinfo is not allowed")
-	}
-	if strings.Contains(base, "#") {
-		return nil, errors.New("models.codex_base_url: fragments are not allowed")
-	}
-	if !validCodexCatalogHost(u) {
-		return nil, errors.New("models.codex_base_url: invalid host or port")
-	}
-	if strings.EqualFold(strings.TrimSuffix(u.Hostname(), "."), "api.openai.com") {
-		return nil, errors.New("models.codex_base_url: main OpenAI API host is not allowed for Codex credentials")
-	}
-	if hasCodexURLControl(u.Path) {
-		return nil, errors.New("models.codex_base_url: invalid path characters")
+	if err := validateCodexURL(u, base); err != nil {
+		return nil, err
 	}
 	query, err := url.ParseQuery(u.RawQuery)
 	if err != nil {
 		return nil, errors.New("models.codex_base_url: invalid query syntax")
 	}
-	for key, values := range query {
-		if hasCodexURLControl(key) {
-			return nil, errors.New("models.codex_base_url: invalid query characters")
-		}
-		switch strings.ToLower(strings.ReplaceAll(key, "-", "_")) {
-		case "token", "access_token", "refresh_token", "id_token", "api_key", "apikey", "key", "authorization", "auth", "bearer", "password", "client_secret", "secret":
-			return nil, errors.New("models.codex_base_url: credential query parameters are not allowed")
-		}
-		for _, value := range values {
-			if hasCodexURLControl(value) {
-				return nil, errors.New("models.codex_base_url: invalid query characters")
-			}
-		}
+	if err := validateCodexQuery(query); err != nil {
+		return nil, err
 	}
 	// Preserve escaped proxy prefixes and query values; never append to RawQuery.
 	path := strings.TrimRight(u.EscapedPath(), "/")
@@ -135,32 +102,13 @@ func validCodexCatalogHost(u *url.URL) bool {
 		if addr.Is6() != strings.HasPrefix(u.Host, "[") {
 			return false
 		}
-		// Scoped local IPv6 is allowed, without escaped whitespace or delimiters.
-		for _, ch := range addr.Zone() {
-			if !(ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || strings.ContainsRune("._~-", ch)) {
-				return false
-			}
-		}
-	} else {
-		if strings.ContainsAny(u.Host, "[]") {
+		if !validCodexZone(addr.Zone()) {
 			return false
 		}
-		host = strings.TrimSuffix(host, ".")
-		if len(host) == 0 || len(host) > 253 {
-			return false
-		}
-		for _, label := range strings.Split(host, ".") {
-			if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
-				return false
-			}
-			for i := 0; i < len(label); i++ {
-				ch := label[i]
-				if !(ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || ch == '-') {
-					return false
-				}
-			}
-		}
+	} else if !validCodexDNSHost(u, host) {
+		return false
 	}
+
 	if port := u.Port(); port != "" {
 		n, err := strconv.Atoi(port)
 		if err != nil || n < 1 || n > 65535 {
@@ -179,4 +127,97 @@ func hasCodexURLControl(value string) bool {
 		}
 	}
 	return false
+}
+
+func validateCodexVersion(version string) error {
+	if len(version) > 64 {
+		return errors.New("models.codex_client_version: invalid length (maximum 64 bytes)")
+	}
+	for i := 0; i < len(version); i++ {
+		ch := version[i]
+		alnum := ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9'
+		if !alnum && (i == 0 || !strings.ContainsRune("._+-", rune(ch))) {
+			return errors.New("models.codex_client_version: invalid characters (use ASCII letters, digits, '.', '_', '+', '-'; start with a letter or digit)")
+		}
+	}
+	return nil
+}
+
+func validateCodexQuery(query url.Values) error {
+	for key, values := range query {
+		if hasCodexURLControl(key) {
+			return errors.New("models.codex_base_url: invalid query characters")
+		}
+		switch strings.ToLower(strings.ReplaceAll(key, "-", "_")) {
+		case "token", "access_token", "refresh_token", "id_token", "api_key", "apikey", "key", "authorization", "auth", "bearer", "password", "client_secret", "secret":
+			return errors.New("models.codex_base_url: credential query parameters are not allowed")
+		}
+		for _, value := range values {
+			if hasCodexURLControl(value) {
+				return errors.New("models.codex_base_url: invalid query characters")
+			}
+		}
+	}
+	return nil
+}
+
+func validCodexDNSHost(u *url.URL, host string) bool {
+	if strings.ContainsAny(u.Host, "[]") {
+		return false
+	}
+	host = strings.TrimSuffix(host, ".")
+	if len(host) == 0 || len(host) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		if !validCodexDNSLabel(label) {
+			return false
+		}
+	}
+	return true
+}
+
+func validCodexDNSLabel(label string) bool {
+	for i := 0; i < len(label); i++ {
+		ch := label[i]
+		if !(ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || ch == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+func validCodexZone(zone string) bool {
+	// Scoped local IPv6 is allowed, without escaped whitespace or delimiters.
+	for _, ch := range zone {
+		if !(ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || strings.ContainsRune("._~-", ch)) {
+			return false
+		}
+	}
+	return true
+}
+
+func validateCodexURL(u *url.URL, base string) error {
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return errors.New("models.codex_base_url: unsupported scheme (want http or https)")
+	}
+	if u.User != nil {
+		return errors.New("models.codex_base_url: userinfo is not allowed")
+	}
+	if strings.Contains(base, "#") {
+		return errors.New("models.codex_base_url: fragments are not allowed")
+	}
+	if !validCodexCatalogHost(u) {
+		return errors.New("models.codex_base_url: invalid host or port")
+	}
+	if strings.EqualFold(strings.TrimSuffix(u.Hostname(), "."), "api.openai.com") {
+		return errors.New("models.codex_base_url: main OpenAI API host is not allowed for Codex credentials")
+	}
+	if hasCodexURLControl(u.Path) {
+		return errors.New("models.codex_base_url: invalid path characters")
+	}
+	return nil
 }

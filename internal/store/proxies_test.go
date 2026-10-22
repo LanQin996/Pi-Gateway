@@ -47,7 +47,7 @@ func TestSavedProxyPersistenceBindingsAndDeleteProtection(t *testing.T) {
 	}
 	assertBinding(p.URL, &p.ID)
 	// A stale management/credential snapshot cannot undo the authoritative URL.
-	if err := s.UpdateAccountManagementFields(ctx, a.ID, "renamed", true, 1, 3, "http://old:old@localhost:1", ""); err != nil {
+	if err := s.UpdateAccountManagementFields(ctx, a.ID, AccountManagementFields{Name: "renamed", Enabled: true, Weight: 1, Concurrency: 3, ProxyURL: "http://old:old@localhost:1"}); err != nil {
 		t.Fatal(err)
 	}
 	assertBinding(p.URL, &p.ID)

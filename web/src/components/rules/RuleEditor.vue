@@ -2,7 +2,7 @@
 import { copyText } from "../../utils/clipboard"
 import {computed, ref, shallowRef, toRaw, watch, onBeforeUnmount} from 'vue'
 import {api, ApiError} from '../../api/client'
-import type {Rule, RuleAction, RuleCondition, RuleFieldError, RuleSchema} from '../../api/rules'
+import type {Rule, RuleAction, RuleFieldError, RuleSchema} from '../../api/rules'
 import type {RuleCanvasDiagnostics, RuleDebugFocus} from '../../api/ruleSimulation'
 import {useI18n} from '../../i18n'
 import {useToastStore} from '../../stores/ui'
@@ -31,22 +31,30 @@ const debuggerDisabled = computed(() => !!props.busy || graphProblems.value.leng
 const sample = shallowRef<unknown>()
 let editingNode: string | undefined
 let inlineHistoryRecorded = false
-watch(debuggerDisabled, disabled=>{if(disabled) sample.value=undefined}, {flush:'sync'})
+watch(debuggerDisabled, disabled=>{if(disabled) { sample.value=undefined }}, {flush:'sync'})
 onBeforeUnmount(()=>persistGraphLayout(graph.value))
 function receiveSample(value:unknown) { sample.value=debuggerDisabled.value ? undefined : value }
-function receiveDiagnostics(value:RuleCanvasDiagnostics|null) { diagnostics.value=value; if(!value)sample.value=undefined }
+function receiveDiagnostics(value:RuleCanvasDiagnostics|null) { diagnostics.value=value; if(!value){ sample.value=undefined } }
 const validating = ref(false)
 const diagnostics = shallowRef<RuleCanvasDiagnostics|null>(null)
 const diagnosticLabels = computed(() => {
     const result: Record<string,string> = {}
-    if (!diagnostics.value) return result
+    if (!diagnostics.value) { return result }
     const current = diagnostics.value
-    for (const condition of current.conditions ?? []) if (condition.rule_id === current.ruleId) result[condition.path] = ruleLabel('status',condition.status,locale.value)
+    for (const condition of current.conditions ?? []) if (condition.rule_id === current.ruleId) { result[condition.path] = ruleLabel('status',condition.status,locale.value) }
     for (const trace of current.traces ?? []) {
-        if (trace.rule_id !== current.ruleId) continue
+        if (trace.rule_id !== current.ruleId) { continue }
         const action = graph.value.nodes.find(n => n.kind === 'action' && (n.data as RuleAction).id === trace.action_id)
         const path = action ? paths.value[action.id] : undefined
-        if (path) result[path] = ruleLabel('status',trace.rolled_back ? 'rolled_back' : trace.error ? 'failed' : trace.status ?? (trace.matched === false ? 'not_matched' : 'success'),locale.value)
+        if (path) { result[path] = ruleLabel('status',(() => {
+    if (trace.rolled_back) {
+        return 'rolled_back'
+    }
+    if (trace.error) {
+        return 'failed'
+    }
+    return trace.status ?? (trace.matched === false ? 'not_matched' : 'success')
+})(),locale.value) }
     }
     return result
 })
@@ -65,35 +73,35 @@ function updateRule(next:Rule) {
  if(props.modelValue.mode==='steps'){
  diagnostics.value=null; sample.value=undefined
  patch({rule:next,code:stringifyRule(next),graph:ruleToGraph(next,graph.value),errors:[]})
- } else updateGraph(ruleToGraph(next,graph.value))
+ } else { updateGraph(ruleToGraph(next,graph.value)) }
 }
 function updateField(name:string,value:unknown) {
- if(props.modelValue.mode==='steps'){const next={...rule.value} as unknown as Record<string,unknown>;if(value===undefined)delete next[name];else next[name]=value;updateRule(next as unknown as Rule);return}
+ if(props.modelValue.mode==='steps'){const next={...rule.value} as unknown as Record<string,unknown>;if(value===undefined){ delete next[name]; }else { next[name]=value; }updateRule(next as unknown as Rule);return}
     const root = graph.value.nodes.find(n=>n.kind==='rule')!
     const data = {...root.data} as unknown as Record<string,unknown>
-    if(value===undefined) delete data[name]; else data[name]=value
+    if(value===undefined) { delete data[name]; } else { data[name]=value }
     updateGraph(replaceGraphNode(graph.value,root.id,data as unknown as Rule))
 }
 function beginNodeEdit(id:string) {
-    if(editingNode===id)return
+    if(editingNode===id){ return }
     editingNode=id;inlineHistoryRecorded=false
-    if(!graph.value.selected.includes(id))updateGraph({...graph.value,selected:[id]},false)
+    if(!graph.value.selected.includes(id)){ updateGraph({...graph.value,selected:[id]},false) }
 }
 function endNodeEdit(id?:string) {
-    if(id!==undefined&&editingNode!==id)return
+    if(id!==undefined&&editingNode!==id){ return }
     editingNode=undefined;inlineHistoryRecorded=false
 }
 function updateNodeById(id:string,data:import('../../utils/ruleGraph').RuleGraphNode['data']) {
-    if(!graph.value.nodes.some(node=>node.id===id))return
+    if(!graph.value.nodes.some(node=>node.id===id)){ return }
     const next=replaceGraphNode(graph.value,id,data)
     const changed=graphSignature(next)!==graphSignature(graph.value)
     updateGraph(next,editingNode!==id||!inlineHistoryRecorded)
-    if(changed&&editingNode===id)inlineHistoryRecorded=true
+    if(changed&&editingNode===id){ inlineHistoryRecorded=true }
 }
 function undo(redo=false) {
     endNodeEdit()
     const stack=redo?props.modelValue.graphRedo:props.modelValue.graphUndo
-    const next=stack?.at(-1); if(!next) return
+    const next=stack?.at(-1); if(!next) { return }
     const other=redo?props.modelValue.graphUndo:props.modelValue.graphRedo
     const fields:Partial<RuleDraft>={graph:clone(next),errors:[],graphUndo:redo?[...(other??[]),clone(graph.value)].slice(-50):stack!.slice(0,-1),graphRedo:redo?stack!.slice(0,-1):[...(other??[]),clone(graph.value)].slice(-50)}
     try {fields.rule=graphToRule(next,props.schema,false);fields.code=stringifyRule(fields.rule)} catch {}
@@ -101,46 +109,54 @@ function undo(redo=false) {
 }
 function reportErrors(error:unknown) {
     let errors:RuleFieldError[]=[]
-    if(error instanceof RuleInputError) errors=error.errors
+    if(error instanceof RuleInputError) { errors=error.errors }
     else if(error instanceof ApiError && error.payload && typeof error.payload==='object') {
         const payload=error.payload as {errors?:RuleFieldError[]}
-        if(Array.isArray(payload.errors)) errors=payload.errors
+        if(Array.isArray(payload.errors)) { errors=payload.errors }
     }
-    if(!errors.length) errors=[{path:'',message:error instanceof Error?error.message:String(error)}]
+    if(!errors.length) { errors=[{path:'',message:error instanceof Error?error.message:String(error)}] }
     patch({errors})
 }
 function synchronize():Rule|undefined {
     try {
-        if(form.value && !form.value.reportValidity()) return
-        const next=props.modelValue.mode==='code'?parseRule(props.modelValue.code,props.schema):props.modelValue.mode==='steps'?rule.value:graphToRule(graph.value,props.schema)
+        if(form.value && !form.value.reportValidity()) { return }
+        const next=(() => {
+    if (props.modelValue.mode==='code') {
+        return parseRule(props.modelValue.code,props.schema)
+    }
+    if (props.modelValue.mode==='steps') {
+        return rule.value
+    }
+    return graphToRule(graph.value,props.schema)
+})()
         const errors=validateRule(next,props.schema)
         if(errors.length) {patch({errors});return}
         patch({rule:next,errors:[]});return next
     } catch(error) {reportErrors(error)}
 }
 function switchMode(mode:'steps'|'visual'|'code') {
-    if(mode===props.modelValue.mode) return
-    const next=synchronize();if(!next) return
+    if(mode===props.modelValue.mode) { return }
+    const next=synchronize();if(!next) { return }
     patch({rule:next,code:stringifyRule(next),graph:mode==='visual'?ruleToGraph(next,graph.value):graph.value,mode,errors:[]})
 }
 function formatCode() {
     try {const next=parseRule(props.modelValue.code,props.schema);patch({rule:next,code:stringifyRule(next),graph:ruleToGraph(next,graph.value),errors:[]})}catch(error){reportErrors(error)}
 }
 async function validate() {
-    const next=synchronize();if(!next)return
+    const next=synchronize();if(!next){ return }
     validating.value=true
-    try{const result=await api.validateRule(next);patch({errors:result.errors??[]});if(result.valid)toast.success(t('rules.validate'))}catch(error){reportErrors(error)}finally{validating.value=false}
+    try{const result=await api.validateRule(next);patch({errors:result.errors??[]});if(result.valid){ toast.success(t('rules.validate')) }}catch(error){reportErrors(error)}finally{validating.value=false}
 }
-function save(){const next=synchronize();if(next)emit('save',next)}
+function save(){const next=synchronize();if(next){ emit('save',next) }}
 function loadExample(example:Rule) {
-    if(!confirm(t('rules.exampleConfirm')))return
+    if(!confirm(t('rules.exampleConfirm'))){ return }
     const next=clone(example)
-    for(const key of readonlyRuleFields){const current=(rule.value as unknown as Record<string,unknown>)[key];if(current===undefined)delete(next as unknown as Record<string,unknown>)[key];else(next as unknown as Record<string,unknown>)[key]=current}
+    for(const key of readonlyRuleFields){const current=(rule.value as unknown as Record<string,unknown>)[key];if(current===undefined){ delete(next as unknown as Record<string,unknown>)[key]; }else{ (next as unknown as Record<string,unknown>)[key]=current }}
     updateRule(next)
 }
-async function copyCode(){try{const next=synchronize();if(next)await copyText(props.modelValue.mode==='code'?props.modelValue.code:stringifyRule(next))}catch{toast.error(t('common.clipboardBlocked'))}}
+async function copyCode(){try{const next=synchronize();if(next){ await copyText(props.modelValue.mode==='code'?props.modelValue.code:stringifyRule(next)) }}catch{toast.error(t('common.clipboardBlocked'))}}
 function focusPath(path:string){const entry=Object.entries(paths.value).filter(([,value])=>path===value||path.startsWith(`${value}/`)).sort((a,b)=>b[1].length-a[1].length)[0];if(entry){canvas.value?.focus(entry[0])}}
-function debugFocus(focus:RuleDebugFocus){const action=graph.value.nodes.find(n=>n.kind==='action'&&(n.data as RuleAction).id===focus.actionId);if(action){canvas.value?.focus(action.id)}else if(focus.path)focusPath(focus.path)}
+function debugFocus(focus:RuleDebugFocus){const action=graph.value.nodes.find(n=>n.kind==='action'&&(n.data as RuleAction).id===focus.actionId);if(action){canvas.value?.focus(action.id)}else if(focus.path){ focusPath(focus.path) }}
 const shownErrors=computed(()=>[...props.modelValue.errors,...(props.modelValue.mode==='visual'?graphProblems.value.filter(error=>error.code?.startsWith('graph.')):[])].filter((error,index,all)=>all.findIndex(e=>e.path===error.path&&e.message===error.message)===index))
 </script>
 <template>

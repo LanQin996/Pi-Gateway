@@ -10,9 +10,9 @@ const titleId = useId()
 const panel = ref<HTMLElement>()
 let returnFocus: HTMLElement | null = null
 function onKeydown(event: KeyboardEvent) {
-	if (!props.open) return
+	if (!props.open) { return }
 	if (event.key === 'Escape') { event.preventDefault(); emit('close'); return }
-	if (event.key !== 'Tab') return
+	if (event.key !== 'Tab') { return }
 	const items = Array.from(panel.value?.querySelectorAll<HTMLElement>('button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]') ?? []).filter(el => el.offsetParent !== null)
 	const first = items[0]
 	const last = items[items.length - 1]
@@ -37,15 +37,15 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 <template>
 	<Teleport to="body">
 		<div v-if="open" class="fixed inset-0 z-50 grid place-items-center overflow-hidden p-3 sm:p-6" @wheel.stop @touchmove.stop>
-			<div class="modal-mask" @click="emit('close')" />
-			<section ref="panel" class="modal-panel outline-none" :class="width" role="dialog" aria-modal="true" :aria-labelledby="titleId" tabindex="-1">
+			<button type="button" tabindex="-1" class="modal-mask" :aria-label="t('common.close')" @click="emit('close')" />
+			<dialog open ref="panel" class="modal-panel outline-none m-0 relative" :class="width" aria-modal="true" :aria-labelledby="titleId" tabindex="-1">
 				<div class="modal-header">
 					<h2 :id="titleId">{{ title }}</h2>
 					<button type="button" class="btn btn-ghost btn-icon btn-sm" :aria-label="t('common.close')" @click="emit('close')"><X /></button>
 				</div>
 				<div class="modal-body"><slot /></div>
 				<div v-if="$slots.footer" class="modal-footer"><slot name="footer" /></div>
-			</section>
+			</dialog>
 		</div>
 	</Teleport>
 </template>

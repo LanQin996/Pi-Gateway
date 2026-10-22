@@ -43,83 +43,37 @@ func TestCatalogCompleteAndExamplesExecutable(t *testing.T) {
 	}
 	seen := map[string]bool{}
 	for _, group := range [][]FieldSpec{c.RuleFields, c.ContextFields, selectorFields()} {
-		for _, f := range group {
-			assertFieldHelp(t, f)
-		}
+		assertFieldGroupHelp(t, group)
 	}
-	for _, cap := range c.ValueExpressions {
-		for _, f := range cap.Fields {
-			assertFieldHelp(t, f)
-		}
+	for _, capability := range c.ValueExpressions {
+		assertFieldGroupHelp(t, capability.Fields)
 	}
 	for _, a := range c.Actions {
-		if seen[a.ID] {
-			t.Fatal("duplicate action", a.ID)
-		}
-		seen[a.ID] = true
-		if a.Label == "" || a.Description == "" || len(a.Phases) == 0 {
-			t.Fatal("missing help", a.ID)
-		}
-		fields := map[string]bool{}
-		for _, f := range a.Fields {
-			assertFieldHelp(t, f)
-			if fields[f.Name] || f.Label == "" || f.Description == "" || f.Control == "" || f.Type == "" {
-				t.Fatalf("incomplete field %s/%s", a.ID, f.Name)
-			}
-			fields[f.Name] = true
-			if !contains([]string{"string", "pointer", "boolean", "integer", "string_array", "pointer_array", "value", "value_array", "condition", "condition_array", "action_array"}, f.Type) {
-				t.Fatalf("unrenderable field %s", f.Type)
-			}
-		}
+		assertCatalogAction(t, a, seen)
 	}
 	for _, cond := range c.Conditions {
-		if cond.Label == "" || cond.Description == "" {
-			t.Fatal("condition missing help")
-		}
+		requireCondition(t, !(cond.Label == "" || cond.Description == ""), "condition missing help")
 		for _, f := range cond.Fields {
 			assertFieldHelp(t, f)
-			if f.Label == "" || f.Description == "" || f.Control == "" {
-				t.Fatal("condition field incomplete")
-			}
+			requireCondition(t, !(f.Label == "" || f.Description == "" || f.Control == ""), "condition field incomplete")
 		}
 	}
-	if len(c.ValueExpressions) != 4 || len(c.ContextFields) == 0 {
-		t.Fatal("missing expression or context schema")
-	}
+	requireCondition(t, !(len(c.ValueExpressions) != 4 || len(c.ContextFields) == 0), "missing expression or context schema")
 	for _, r := range c.Examples {
 		if r.Source == "protocol" {
-			if _, err := Compile([]Rule{r}); err != nil {
-				t.Fatal(err)
+			{
+				_, err := Compile([]Rule{r})
+				requireTrue(t, err == nil, err)
 			}
 			continue
 		}
-		t.Run(r.ID, func(t *testing.T) {
-			raw, e := json.Marshal(r)
-			if e != nil {
-				t.Fatal(e)
-			}
-			parsed, e := ParseRule(raw)
-			if e != nil {
-				t.Fatal(e)
-			}
-			engine := compileTest(t, parsed)
-			body := map[string]any{"model": "old-model", "input": []any{map[string]any{"type": "reasoning"}}, "delta": "hello", "type": "response.output_text.delta"}
-			if r.Phase == PhaseRequest {
-				delete(body, "type")
-			}
-			_, e = engine.Apply(t.Context(), r.Phase, &Input{Body: body, ClientBody: map[string]any{"metadata": map[string]any{"a": true}}, Model: "old-model", EventType: "response.output_text.delta", Trace: true})
-			if e != nil {
-				t.Fatal(e)
-			}
-		})
+		t.Run(r.ID, func(t *testing.T) { testCatalogCompleteAndExamplesExecutableCase1(t, r) })
 	}
 	// Returned Catalog values are detached; a UI caller cannot corrupt validators.
 	c.Actions[0].ID = "mutated"
 	c.Actions[0].Fields[0].Name = "mutated"
 	c.Phases[0] = "mutated"
-	if Catalog().Actions[0].ID == "mutated" {
-		t.Fatal("catalog aliases registry")
-	}
+	requireCondition(t, Catalog().Actions[0].ID != "mutated", "catalog aliases registry")
 	compileTest(t, rule("untouched", act("rewrite_model", map[string]any{"model": "new"})))
 }
 
@@ -132,5 +86,53 @@ func assertFieldHelp(t *testing.T, f FieldSpec) {
 		if f.EnumHelp[option] == "" {
 			t.Fatalf("field %s lacks option help for %s", f.Name, option)
 		}
+	}
+}
+
+func testCatalogCompleteAndExamplesExecutableCase1(t *testing.T, r Rule) {
+	raw, e := json.Marshal(r)
+	requireNoError(t, e)
+	parsed, e := ParseRule(raw)
+	requireNoError(t, e)
+	engine := compileTest(t, parsed)
+	body := map[string]any{"model": "old-model", "input": []any{map[string]any{"type": "reasoning"}}, "delta": "hello", "type": "response.output_text.delta"}
+	if r.Phase == PhaseRequest {
+		delete(body, "type")
+	}
+	_, e = engine.Apply(t.Context(), r.Phase, &Input{Body: body, ClientBody: map[string]any{"metadata": map[string]any{"a": true}}, Model: "old-model", EventType: "response.output_text.delta", Trace: true})
+	requireNoError(t, e)
+}
+
+func assertCatalogAction(t *testing.T, a Capability, seen map[string]bool) {
+	t.Helper()
+	if seen[a.ID] {
+		t.Fatal("duplicate action", a.ID)
+	}
+	seen[a.ID] = true
+	if a.Label == "" || a.Description == "" || len(a.Phases) == 0 {
+		t.Fatal("missing help", a.ID)
+	}
+	fields := map[string]bool{}
+	for _, f := range a.Fields {
+		assertCatalogActionField(t, a.ID, f, fields)
+	}
+}
+
+func assertCatalogActionField(t *testing.T, actionID string, f FieldSpec, fields map[string]bool) {
+	t.Helper()
+	assertFieldHelp(t, f)
+	if fields[f.Name] || f.Label == "" || f.Description == "" || f.Control == "" || f.Type == "" {
+		t.Fatalf("incomplete field %s/%s", actionID, f.Name)
+	}
+	fields[f.Name] = true
+	if !contains([]string{"string", "pointer", "boolean", "integer", "string_array", "pointer_array", "value", "value_array", "condition", "condition_array", "action_array"}, f.Type) {
+		t.Fatalf("unrenderable field %s", f.Type)
+	}
+}
+
+func assertFieldGroupHelp(t *testing.T, fields []FieldSpec) {
+	t.Helper()
+	for _, f := range fields {
+		assertFieldHelp(t, f)
 	}
 }

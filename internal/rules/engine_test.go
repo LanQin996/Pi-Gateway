@@ -147,31 +147,7 @@ func TestAtomicRollback(t *testing.T) {
 	last := rule("last", act("json_set", map[string]any{"path": "/later", "value": true}))
 	last.Priority = 200
 	for _, policy := range []string{OnErrorAbort, OnErrorSkipRule} {
-		t.Run(policy, func(t *testing.T) {
-			bad.OnError = policy
-			res, e := compileTest(t, first, bad, last).Apply(context.Background(), PhaseRequest, &Input{Body: map[string]any{"model": "old", "n": 1}, Model: "old", Trace: true})
-			if (e != nil) != (policy == OnErrorAbort) {
-				t.Fatalf("wrong error %v", e)
-			}
-			if res.Model != "old" {
-				t.Fatal("model not rolled back")
-			}
-			if _, ok, _ := pointerGet(res.Body, "/partial"); ok {
-				t.Fatal("partial mutation escaped")
-			}
-			if v := pathValue(t, res.Body, "/committed"); v != true {
-				t.Fatal("prior commit rolled back")
-			}
-			_, later, _ := pointerGet(res.Body, "/later")
-			if later != (policy == OnErrorSkipRule) {
-				t.Fatal("wrong stop/continue")
-			}
-			for _, tr := range res.Traces {
-				if tr.RuleID == "bad" && (!tr.RolledBack || len(tr.Changes) != 0) {
-					t.Fatalf("rollback falsely attributed %+v", tr)
-				}
-			}
-		})
+		t.Run(policy, func(t *testing.T) { testAtomicRollbackCase5(t, bad, first, last, policy) })
 	}
 }
 func TestNoChangeAndRealDiff(t *testing.T) {
@@ -247,5 +223,22 @@ func TestCancellationAndEmptyFastPath(t *testing.T) {
 	cancel()
 	if _, err := e.Apply(ctx, PhaseRequest, &Input{}); err != context.Canceled {
 		t.Fatal(err)
+	}
+}
+
+func testAtomicRollbackCase5(t *testing.T, bad Rule, first Rule, last Rule, policy string) {
+	bad.OnError = policy
+	res, e := compileTest(t, first, bad, last).Apply(context.Background(), PhaseRequest, &Input{Body: map[string]any{"model": "old", "n": 1}, Model: "old", Trace: true})
+	requireTruef(t, (e != nil) == (policy == OnErrorAbort), "wrong error %v", e)
+	requireCondition(t, res.Model == "old", "model not rolled back")
+	{
+		_, ok, _ := pointerGet(res.Body, "/partial")
+		requireTrue(t, !(ok), "partial mutation escaped")
+	}
+	requireCondition(t, pathValue(t, res.Body, "/committed") == true, "prior commit rolled back")
+	_, later, _ := pointerGet(res.Body, "/later")
+	requireCondition(t, later == (policy == OnErrorSkipRule), "wrong stop/continue")
+	for _, tr := range res.Traces {
+		requireTruef(t, !(tr.RuleID == "bad" && (!tr.RolledBack || len(tr.Changes) != 0)), "rollback falsely attributed %+v", tr)
 	}
 }

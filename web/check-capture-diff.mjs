@@ -19,7 +19,7 @@ assert.equal(errors.length, 0, ts.formatDiagnosticsWithColorAndContext(errors, {
     getNewLine: () => '\n',
 }))
 const {normalizeHeaders, equalPayloads, diffPayloads} = await import(
-    `data:text/javascript;base64,${Buffer.from(compiled.outputText.replace("from 'diff'", `from '${diffDependencyURL}'`)).toString('base64')}`
+    `data:text/javascript;base64,${Buffer.from(compiled.outputText.replace("from 'diff'", "from '" + diffDependencyURL + "'")).toString('base64')}`
     )
 
 let checked = 0
@@ -223,11 +223,7 @@ check('large payloads retain every character and precisely isolate edits', () =>
 })
 
 check('deep, wide, cyclic, getter and proxy inputs do not crash or compare truncated prefixes', () => {
-    function deep(leaf) {
-        let value = leaf
-        for (let depth = 0; depth < 100; depth++) value = {child: value}
-        return value
-    }
+
 
     changed(deep('a'), deep('b'), true)
     const wideA = Array.from({length: 20_000}, () => 0)
@@ -262,6 +258,11 @@ check('deep, wide, cyclic, getter and proxy inputs do not crash or compare trunc
     changed(() => 1, () => 2, true)
 })
 
+check('canonical Unicode keys retain a total order despite equivalent locale collation', () => {
+    same({'é': 1, 'e\u0301': 2}, {'e\u0301': 2, 'é': 1})
+    changed({'é': 1, 'e\u0301': 2}, {'e\u0301': 1, 'é': 2})
+})
+
 check('HTML-like payloads are strings and are never executed', () => {
     globalThis.__captureDiffExecuted = false
     const html = '<script>globalThis.__captureDiffExecuted = true</script><img src=x onerror="globalThis.__captureDiffExecuted = true">'
@@ -282,15 +283,7 @@ check('small repeated-line diffs reconstruct both sides with minimal edits', () 
         return seed
     }
 
-    function lcsLength(a, b) {
-        const table = Array.from({length: a.length + 1}, () => Array(b.length + 1).fill(0))
-        for (let i = 1; i <= a.length; i++) {
-            for (let j = 1; j <= b.length; j++) {
-                table[i][j] = a[i - 1] === b[j - 1] ? table[i - 1][j - 1] + 1 : Math.max(table[i - 1][j], table[i][j - 1])
-            }
-        }
-        return table[a.length][b.length]
-    }
+
 
     for (let iteration = 0; iteration < 250; iteration++) {
         const a = Array.from({length: random() % 12 + 1}, () => `text ${random() % 4}`)
@@ -320,4 +313,20 @@ for (const path of process.argv.slice(2)) {
     assert.equal(diff.limited, false)
     assert.ok(diff.lines.some(line => line.kind === 'context'))
     console.log(`${path}: ${diff.lines.length} rows, +${diff.added}/-${diff.removed}, full diff`)
+}
+
+function deep(leaf) {
+    let value = leaf
+    for (let depth = 0; depth < 100; depth++) value = {child: value}
+    return value
+}
+
+function lcsLength(a, b) {
+    const table = Array.from({length: a.length + 1}, () => new Array(b.length + 1).fill(0))
+    for (let i = 1; i <= a.length; i++) {
+        for (let j = 1; j <= b.length; j++) {
+            table[i][j] = a[i - 1] === b[j - 1] ? table[i - 1][j - 1] + 1 : Math.max(table[i - 1][j], table[i][j - 1])
+        }
+    }
+    return table[a.length][b.length]
 }

@@ -924,6 +924,9 @@
     }
 
     .modal-panel {
+        border: 0;
+        padding: 0;
+        color: inherit;
         position: relative;
         z-index: 1;
         display: flex;
@@ -1159,4 +1162,10 @@
         transition-duration: .01ms !important;
         scroll-behavior: auto !important;
     }
+}
+
+/* Preserve neutral layout defaults while allowing component/utility styling. */
+@layer base {
+    fieldset { min-inline-size: 0; border: 0; margin: 0; padding: 0; }
+    output { display: block; }
 }

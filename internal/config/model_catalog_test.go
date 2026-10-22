@@ -26,11 +26,14 @@ func TestModelCatalogURLUsesConfiguredPrimaryEndpoint(t *testing.T) {
 }
 
 func TestCodexClientVersionDefaultsAndModes(t *testing.T) {
-	if AutoCodexClientVersion != "auto" || DefaultCodexClientVersion != "0.160.0" {
+	reportTestFailure(t, AutoCodexClientVersion != "auto" || DefaultCodexClientVersion != "0.160.0", func() {
 		t.Fatalf("unexpected automatic mode or offline fallback: %q / %q", AutoCodexClientVersion, DefaultCodexClientVersion)
-	}
-	if got := Default().Models.CodexClientVersion; got != AutoCodexClientVersion {
-		t.Fatalf("default client version = %q, want auto", got)
+	})
+	{
+		got := Default().Models.CodexClientVersion
+		reportTestFailure(t, got != AutoCodexClientVersion, func() {
+			t.Fatalf("default client version = %q, want auto", got)
+		})
 	}
 	for _, tt := range []struct {
 		name, version, normalized, wire string
@@ -49,33 +52,42 @@ func TestCodexClientVersionDefaultsAndModes(t *testing.T) {
 			for _, normalize := range []bool{false, true} {
 				if normalize {
 					cfg.normalize()
-					if got := cfg.Models.CodexClientVersion; got != tt.normalized {
-						t.Fatalf("normalized version = %q, want %q", got, tt.normalized)
+					{
+						got := cfg.Models.CodexClientVersion
+						reportTestFailure(t, got != tt.normalized, func() {
+							t.Fatalf("normalized version = %q, want %q", got, tt.normalized)
+						})
 					}
 				}
-				if err := cfg.Validate(); err != nil {
-					t.Fatal(err)
+				{
+					err := cfg.Validate()
+					reportTestFailure(t, err != nil, func() {
+						t.Fatal(err)
+					})
 				}
 				before := *cfg
 				got := cfg.CodexModelsURL()
 				want := "https://chatgpt.com/backend-api/codex/models?client_version=" + url.QueryEscape(tt.wire)
-				if got != want {
+				reportTestFailure(t, got != want, func() {
 					t.Errorf("URL = %q, want %q", got, want)
-				}
-				if !reflect.DeepEqual(*cfg, before) || cfg.CodexModelsURL() != got {
+				})
+				reportTestFailure(t, !reflect.DeepEqual(*cfg, before) || cfg.CodexModelsURL() != got, func() {
 					t.Fatal("CodexModelsURL must be deterministic and must not mutate configuration")
-				}
+				})
 			}
 		})
 	}
 	var zero Config
-	if got, want := zero.CodexModelsURL(), "https://chatgpt.com/backend-api/codex/models?client_version="+DefaultCodexClientVersion; got != want {
-		t.Errorf("zero-value URL = %q, want %q", got, want)
+	{
+		got, want := zero.CodexModelsURL(), "https://chatgpt.com/backend-api/codex/models?client_version="+DefaultCodexClientVersion
+		reportTestFailure(t, got != want, func() {
+			t.Errorf("zero-value URL = %q, want %q", got, want)
+		})
 	}
 	zero.normalize()
-	if zero.Models.CodexClientVersion != AutoCodexClientVersion {
+	reportTestFailure(t, zero.Models.CodexClientVersion != AutoCodexClientVersion, func() {
 		t.Fatalf("zero-value normalization did not select auto: %q", zero.Models.CodexClientVersion)
-	}
+	})
 }
 
 func TestCodexModelsURLWithResolvedConfigCopy(t *testing.T) {
@@ -99,8 +111,11 @@ func TestLoadCodexClientVersion(t *testing.T) {
 		name, _, _ := strings.Cut(pair, "=")
 		if strings.HasPrefix(name, "PI_GATEWAY_") {
 			t.Setenv(name, "")
-			if err := os.Unsetenv(name); err != nil {
-				t.Fatal(err)
+			{
+				err := os.Unsetenv(name)
+				reportTestFailure(t, err != nil, func() {
+					t.Fatal(err)
+				})
 			}
 		}
 	}
@@ -126,35 +141,41 @@ func TestLoadCodexClientVersion(t *testing.T) {
 				t.Setenv(key, value)
 			}
 			path := filepath.Join(t.TempDir(), "config.yaml")
-			if err := os.WriteFile(path, []byte(tt.yaml), 0600); err != nil {
-				t.Fatal(err)
+			{
+				err := os.WriteFile(path, []byte(tt.yaml), 0600)
+				reportTestFailure(t, err != nil, func() {
+					t.Fatal(err)
+				})
 			}
 			cfg, err := Load(path)
 			if tt.invalid {
-				if err == nil || !strings.Contains(err.Error(), "models.codex_client_version") || strings.Contains(err.Error(), "sensitive") {
+				reportTestFailure(t, err == nil || !strings.Contains(err.Error(), "models.codex_client_version") || strings.Contains(err.Error(), "sensitive"), func() {
 					t.Fatalf("want redacted version validation error, got %v", err)
-				}
+				})
 				return
 			}
-			if err != nil {
+			reportTestFailure(t, err != nil, func() {
 				t.Fatal(err)
-			}
-			if cfg.Models.CodexClientVersion != tt.version {
+			})
+			reportTestFailure(t, cfg.Models.CodexClientVersion != tt.version, func() {
 				t.Errorf("loaded client version = %q, want %q", cfg.Models.CodexClientVersion, tt.version)
-			}
+			})
 			base := DefaultCodexBaseURL
 			if configured, ok := tt.env["PI_GATEWAY_CODEX_BASE_URL"]; ok {
 				base = configured
 			}
-			if cfg.Models.CodexBaseURL != base {
+			reportTestFailure(t, cfg.Models.CodexBaseURL != base, func() {
 				t.Errorf("loaded base = %q, want %q", cfg.Models.CodexBaseURL, base)
+			})
+			{
+				got, want := cfg.CodexModelsURL(), base+"/codex/models?client_version="+url.QueryEscape(tt.wire)
+				reportTestFailure(t, got != want, func() {
+					t.Errorf("loaded URL = %q, want %q", got, want)
+				})
 			}
-			if got, want := cfg.CodexModelsURL(), base+"/codex/models?client_version="+url.QueryEscape(tt.wire); got != want {
-				t.Errorf("loaded URL = %q, want %q", got, want)
-			}
-			if cfg.UpstreamSSEURL() != "https://api.openai.com/v1/responses" {
+			reportTestFailure(t, cfg.UpstreamSSEURL() != "https://api.openai.com/v1/responses", func() {
 				t.Fatal("Codex environment must not change the main upstream")
-			}
+			})
 		})
 	}
 }

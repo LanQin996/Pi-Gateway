@@ -303,49 +303,16 @@ func ResponseBody(ctx context.Context, c *store.Capture, events *rules.Engine) (
 	if !ok || stream || c.ClientTransport == "ws" || strings.Contains(c.ClientTransport, "websocket") {
 		return nil, fmt.Errorf("response_body phase was not established (requires recorded stream:false HTTP request)")
 	}
-	delivered := false
-	for _, f := range c.ResponseFrames {
-		if f.Dir == capture.DirClientOut && f.Kind == store.KindHTTPResponse && f.Type == "response" {
-			if _, err := FrameJSON(f); err == nil {
-				delivered = true
-			}
-		}
-	}
-	if !delivered {
+	if !hasDeliveredAggregate(c) {
 		return nil, fmt.Errorf("record lacks evidence of a successful aggregate HTTP response")
 	}
 	source, err := NewEventSource(c)
 	if err != nil {
 		return nil, err
 	}
-	var terminal map[string]any
-	var chosen *Sample
-	for _, frame := range EventFrames(c) {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		sample, err := source.Event(frame)
-		if err != nil {
-			return nil, err
-		}
-		if sample.EventType == upstream.EventError || sample.EventType == upstream.EventResponseFailed {
-			return nil, fmt.Errorf("error events cannot reconstruct response_body input")
-		}
-		result, err := events.Apply(ctx, rules.PhaseResponseEvent, sample.Input)
-		if err != nil {
-			return nil, fmt.Errorf("response event reconstruction failed: %w", err)
-		}
-		if result.Dropped {
-			continue
-		}
-		body, ok := result.Body.(map[string]any)
-		if !ok {
-			return nil, fmt.Errorf("event rules did not produce an object")
-		}
-		if upstream.IsTerminal(sample.EventType) {
-			terminal = body
-			chosen = sample
-		}
+	terminal, chosen, err := reconstructTerminal(ctx, c, source, events)
+	if err != nil {
+		return nil, err
 	}
 	if terminal == nil {
 		return nil, fmt.Errorf("complete terminal response event is missing")
@@ -369,4 +336,53 @@ func PipelineSample(c *store.Capture, phase string) (*Sample, error) {
 		return nil, fmt.Errorf("no complete %s checkpoint available", phase)
 	}
 	return sample, nil
+}
+
+func hasDeliveredAggregate(c *store.Capture) bool {
+	for _, frame := range c.ResponseFrames {
+		if frame.Dir != capture.DirClientOut || frame.Kind != store.KindHTTPResponse || frame.Type != "response" {
+			continue
+		}
+		if _, err := FrameJSON(frame); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func reconstructTerminal(ctx context.Context, c *store.Capture, source *EventSource, events *rules.Engine) (map[string]any, *Sample, error) {
+	var terminal map[string]any
+	var chosen *Sample
+	for _, frame := range EventFrames(c) {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		sample, err := source.Event(frame)
+		if err != nil {
+			return nil, nil, err
+		}
+		if reconstructionErrorEvent(sample.EventType) {
+			return nil, nil, fmt.Errorf("error events cannot reconstruct response_body input")
+		}
+		result, err := events.Apply(ctx, rules.PhaseResponseEvent, sample.Input)
+		if err != nil {
+			return nil, nil, fmt.Errorf("response event reconstruction failed: %w", err)
+		}
+		if result.Dropped {
+			continue
+		}
+		body, ok := result.Body.(map[string]any)
+		if !ok {
+			return nil, nil, fmt.Errorf("event rules did not produce an object")
+		}
+		if upstream.IsTerminal(sample.EventType) {
+			terminal = body
+			chosen = sample
+		}
+	}
+	return terminal, chosen, nil
+}
+
+func reconstructionErrorEvent(eventType string) bool {
+	return eventType == upstream.EventError || eventType == upstream.EventResponseFailed
 }

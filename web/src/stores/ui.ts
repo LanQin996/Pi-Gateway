@@ -22,7 +22,8 @@ export const useUiStore = defineStore('ui', () => {
     }
     const storedTheme = read('pi-gateway-theme')
     const hasThemePreference = ref(storedTheme === 'light' || storedTheme === 'dark')
-    const theme = ref<'light' | 'dark'>(storedTheme === 'light' || storedTheme === 'dark' ? storedTheme : preferred.matches ? 'dark' : 'light')
+    const systemTheme = preferred.matches ? 'dark' : 'light'
+    const theme = ref<'light' | 'dark'>(storedTheme === 'light' || storedTheme === 'dark' ? storedTheme : systemTheme)
     const sidebarCollapsed = ref(read('pi-gateway-sidebar') === 'collapsed')
     const persist = (key: string, value: string) => {
         try {

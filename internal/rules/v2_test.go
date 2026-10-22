@@ -122,34 +122,34 @@ func TestV2ProfileMatchesRequestBuilder(t *testing.T) {
 }
 
 func TestV2ProtocolProfileUsesOnlyPrimitives(t *testing.T) {
-	var check func([]Action)
-	check = func(actions []Action) {
-		for _, action := range actions {
-			if isLegacyAction(action.Type) {
-				t.Fatalf("protocol profile uses specialized action %s", action.Type)
-			}
-			for _, key := range []string{"steps", "then", "else"} {
-				if value, exists := action.Params[key]; exists {
-					children, err := decodeActions(value, "/"+key)
-					if err != nil {
-						t.Fatal(err)
-					}
-					check(children)
-				}
-			}
-			if functions, ok := action.Params["functions"].(map[string]any); ok {
-				for name, value := range functions {
-					children, err := decodeActions(value, "/functions/"+name)
-					if err != nil {
-						t.Fatal(err)
-					}
-					check(children)
-				}
-			}
+	for _, definition := range DefaultProfile() {
+		assertPrimitiveActions(t, definition.Actions)
+	}
+}
+func assertPrimitiveActions(t *testing.T, actions []Action) {
+	t.Helper()
+	for _, action := range actions {
+		assertPrimitiveAction(t, action)
+	}
+}
+func assertPrimitiveAction(t *testing.T, action Action) {
+	t.Helper()
+	if isLegacyAction(action.Type) {
+		t.Fatalf("protocol profile uses specialized action %s", action.Type)
+	}
+	for _, key := range []string{"steps", "then", "else"} {
+		if value, exists := action.Params[key]; exists {
+			children, err := decodeActions(value, "/"+key)
+			requireNoError(t, err)
+			assertPrimitiveActions(t, children)
 		}
 	}
-	for _, definition := range DefaultProfile() {
-		check(definition.Actions)
+	if functions, ok := action.Params["functions"].(map[string]any); ok {
+		for name, value := range functions {
+			children, err := decodeActions(value, "/functions/"+name)
+			requireNoError(t, err)
+			assertPrimitiveActions(t, children)
+		}
 	}
 }
 

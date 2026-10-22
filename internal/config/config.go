@@ -177,13 +177,17 @@ type LoggingConfig struct {
 	File  string `yaml:"file"`
 }
 
+const loopbackHost = "127.0.0.1"
+
+const otherModelPrefix = "Other:"
+
 // Default returns the built-in configuration.
 func Default() *Config {
 	return &Config{
 		SchemaVersion: 1,
 		Timezone:      "Asia/Shanghai",
 		Server: ServerConfig{
-			Host: "127.0.0.1",
+			Host: loopbackHost,
 			Port: 8317,
 		},
 		Admin: AdminConfig{
@@ -238,7 +242,7 @@ func Default() *Config {
 			Persist:           true,
 		},
 		OAuth: OAuthConfig{
-			CallbackHost:   "127.0.0.1",
+			CallbackHost:   loopbackHost,
 			CallbackPort:   1455,
 			TimeoutSeconds: 300,
 		},
@@ -300,29 +304,7 @@ func (c *Config) applyEnv() error {
 	if v, ok := os.LookupEnv("PI_GATEWAY_DATABASE_DSN"); ok {
 		c.Data.DSN = v
 	}
-	if v := os.Getenv("PI_GATEWAY_UPSTREAM_BASE_URL"); v != "" {
-		c.Upstream.BaseURL = v
-	}
-	if v := os.Getenv("PI_GATEWAY_UPSTREAM_TRANSPORT"); v != "" {
-		c.Upstream.Transport = v
-	}
-	if v := os.Getenv("PI_GATEWAY_USER_AGENT"); v != "" {
-		c.Upstream.UserAgent = v
-	}
-	// The SDK always sends a platform fingerprint; these override the built-in
-	// defaults so a deployment can match the machine actually running Pi.
-	if v := os.Getenv("PI_GATEWAY_UPSTREAM_STAINLESS_OS"); v != "" {
-		c.Upstream.StainlessOS = v
-	}
-	if v := os.Getenv("PI_GATEWAY_UPSTREAM_STAINLESS_ARCH"); v != "" {
-		c.Upstream.StainlessArch = v
-	}
-	if v := os.Getenv("PI_GATEWAY_UPSTREAM_STAINLESS_RUNTIME"); v != "" {
-		c.Upstream.StainlessRuntime = v
-	}
-	if v := os.Getenv("PI_GATEWAY_UPSTREAM_STAINLESS_RUNTIME_VERSION"); v != "" {
-		c.Upstream.StainlessRuntimeVersion = v
-	}
+	c.applyUpstreamEnv()
 	if v := os.Getenv("PI_GATEWAY_ADMIN_PASSWORD"); v != "" {
 		c.Admin.Password = v
 	}
@@ -408,35 +390,7 @@ func (c *Config) normalize() {
 	if c.SchemaVersion == 0 {
 		c.SchemaVersion = 1
 	}
-	c.Upstream.BaseURL = normalizeUpstreamBaseURL(c.Upstream.BaseURL)
-	c.Upstream.Transport = strings.ToLower(strings.TrimSpace(c.Upstream.Transport))
-	if c.Upstream.Transport == "" {
-		// Match Default(): the ChatGPT route is SSE, and an unset value must not
-		// silently mirror the client's protocol.
-		c.Upstream.Transport = "sse"
-	}
-	if c.Upstream.Originator == "" {
-		c.Upstream.Originator = "pi"
-	}
-	if c.Upstream.StainlessOS == "" {
-		c.Upstream.StainlessOS = "Linux"
-	}
-	if c.Upstream.StainlessArch == "" {
-		c.Upstream.StainlessArch = "x64"
-	}
-	if c.Upstream.StainlessRuntime == "" {
-		c.Upstream.StainlessRuntime = "node"
-	}
-	if c.Upstream.StainlessRuntimeVersion == "" {
-		c.Upstream.StainlessRuntimeVersion = "v24.21.0"
-	}
-	// Operators may supply either the raw runtime values (process.platform /
-	// process.arch, or Go's GOOS/GOARCH) or the already-normalized names; apply
-	// the openai-node normalization so the wire values match the SDK.
-	c.Upstream.StainlessOS = normalizeStainlessOS(c.Upstream.StainlessOS)
-	c.Upstream.StainlessArch = normalizeStainlessArch(c.Upstream.StainlessArch)
-	c.Upstream.StainlessRuntime = strings.ToLower(strings.TrimSpace(c.Upstream.StainlessRuntime))
-	c.Upstream.StainlessRuntimeVersion = strings.TrimSpace(c.Upstream.StainlessRuntimeVersion)
+	c.normalizeUpstream()
 	c.Accounts.DefaultStrategy = strings.ToLower(strings.TrimSpace(c.Accounts.DefaultStrategy))
 	if c.Accounts.DefaultStrategy == "" {
 		c.Accounts.DefaultStrategy = "round_robin"
@@ -483,17 +437,8 @@ func (c *Config) Validate() error {
 	if _, err := c.codexModelsURL(); err != nil {
 		return err
 	}
-	switch strings.ToLower(strings.TrimSpace(c.Data.Driver)) {
-	case "", "sqlite":
-		if strings.TrimSpace(c.Data.Database) == "" && strings.TrimSpace(c.Data.DSN) == "" {
-			return errors.New("data.database or data.dsn is required for SQLite")
-		}
-	case "postgres", "postgresql", "pgx":
-		if strings.TrimSpace(c.Data.DSN) == "" {
-			return errors.New("data.dsn is required for PostgreSQL")
-		}
-	default:
-		return fmt.Errorf("data.driver %q is invalid (want sqlite or postgres)", c.Data.Driver)
+	if err := c.validateDatabase(); err != nil {
+		return err
 	}
 	if c.Server.Port <= 0 || c.Server.Port > 65535 {
 		return fmt.Errorf("server.port out of range: %d", c.Server.Port)
@@ -514,7 +459,7 @@ func (c *Config) Validate() error {
 		c.OAuth.CallbackPort = 1455
 	}
 	if c.OAuth.CallbackHost == "" {
-		c.OAuth.CallbackHost = "127.0.0.1"
+		c.OAuth.CallbackHost = loopbackHost
 	}
 	if c.OAuth.TimeoutSeconds <= 0 {
 		c.OAuth.TimeoutSeconds = 300
@@ -529,28 +474,8 @@ func (c *Config) validateStorageLimits() error {
 	if c.Data.MaxOpenConns < 0 || c.Data.MaxIdleConns < 0 || c.Data.ConnMaxLifetimeSeconds < 0 || int64(c.Data.ConnMaxLifetimeSeconds) > int64((1<<63-1)/time.Second) {
 		return errors.New("config: data connection pool limits are invalid (values redacted)")
 	}
-	if c.Redis.Enabled || c.Redis.URL != "" {
-		u, err := redis.ParseURL(c.Redis.URL)
-		if err != nil || u == nil || (!strings.HasPrefix(c.Redis.URL, "redis://") && !strings.HasPrefix(c.Redis.URL, "rediss://")) {
-			return errors.New("config: redis.url must be a valid redis:// or rediss:// URL (value redacted)")
-		}
-	}
-	if len(c.Redis.Prefix) > 256 || strings.ContainsAny(c.Redis.Prefix, "\r\n\x00") {
-		return errors.New("config: redis.prefix is invalid (value redacted)")
-	}
-	for name, value := range map[string]int{
-		"redis.session_ttl_seconds": c.Redis.SessionTTLSeconds,
-		"redis.catalog_ttl_seconds": c.Redis.CatalogTTLSeconds,
-	} {
-		if value <= 0 || int64(value) > int64((1<<63-1)/time.Second) {
-			return fmt.Errorf("config: %s must be a positive duration (value redacted)", name)
-		}
-	}
-	if c.Redis.CommitTimeoutMS <= 0 || int64(c.Redis.CommitTimeoutMS) > int64((1<<63-1)/time.Millisecond) {
-		return errors.New("config: redis.commit_timeout_ms must be a positive duration (value redacted)")
-	}
-	if c.Redis.MaxEntries <= 0 || c.Redis.MaxRecordBytes <= 0 || c.Redis.MaxRecordBytes > 64<<10 || c.Redis.MaxBytes < int64(c.Redis.MaxRecordBytes) {
-		return errors.New("config: redis capacity limits are invalid; max_record_bytes must be 1..65536 and max_bytes must cover one record (values redacted)")
+	if err := c.validateRedisLimits(); err != nil {
+		return err
 	}
 	if c.Upstream.WebsocketMaxBaselineBytes <= 0 || c.Upstream.WebsocketMaxTotalBaselineBytes < c.Upstream.WebsocketMaxBaselineBytes || c.Upstream.WebsocketMaxPoolConnections <= 0 {
 		return errors.New("config: upstream websocket capacity limits are invalid (values redacted)")
@@ -670,7 +595,7 @@ func normalizeStainlessOS(platform string) string {
 	case "MacOS", "Windows", "Linux", "iOS", "Android", "FreeBSD", "OpenBSD", "Unknown":
 		return trimmed
 	}
-	if len(trimmed) >= len("Other:") && strings.EqualFold(trimmed[:len("Other:")], "Other:") {
+	if len(trimmed) >= len(otherModelPrefix) && strings.EqualFold(trimmed[:len(otherModelPrefix)], otherModelPrefix) {
 		return trimmed
 	}
 	lowered := strings.ToLower(trimmed)
@@ -690,7 +615,7 @@ func normalizeStainlessOS(platform string) string {
 	case lowered == "linux":
 		return "Linux"
 	default:
-		return "Other:" + lowered
+		return otherModelPrefix + lowered
 	}
 }
 
@@ -721,4 +646,112 @@ func normalizeStainlessArch(arch string) string {
 	default:
 		return "other:" + trimmed
 	}
+}
+
+func (c *Config) applyUpstreamEnv() {
+	if v := os.Getenv("PI_GATEWAY_UPSTREAM_BASE_URL"); v != "" {
+		c.Upstream.BaseURL = v
+	}
+	if v := os.Getenv("PI_GATEWAY_UPSTREAM_TRANSPORT"); v != "" {
+		c.Upstream.Transport = v
+	}
+	if v := os.Getenv("PI_GATEWAY_USER_AGENT"); v != "" {
+		c.Upstream.UserAgent = v
+	}
+	// The SDK always sends a platform fingerprint; these override the built-in
+	// defaults so a deployment can match the machine actually running Pi.
+	if v := os.Getenv("PI_GATEWAY_UPSTREAM_STAINLESS_OS"); v != "" {
+		c.Upstream.StainlessOS = v
+	}
+	if v := os.Getenv("PI_GATEWAY_UPSTREAM_STAINLESS_ARCH"); v != "" {
+		c.Upstream.StainlessArch = v
+	}
+	if v := os.Getenv("PI_GATEWAY_UPSTREAM_STAINLESS_RUNTIME"); v != "" {
+		c.Upstream.StainlessRuntime = v
+	}
+	if v := os.Getenv("PI_GATEWAY_UPSTREAM_STAINLESS_RUNTIME_VERSION"); v != "" {
+		c.Upstream.StainlessRuntimeVersion = v
+	}
+}
+
+func (c *Config) normalizeUpstream() {
+	c.Upstream.BaseURL = normalizeUpstreamBaseURL(c.Upstream.BaseURL)
+	c.Upstream.Transport = strings.ToLower(strings.TrimSpace(c.Upstream.Transport))
+	if c.Upstream.Transport == "" {
+		// Match Default(): the ChatGPT route is SSE, and an unset value must not
+		// silently mirror the client's protocol.
+		c.Upstream.Transport = "sse"
+	}
+	if c.Upstream.Originator == "" {
+		c.Upstream.Originator = "pi"
+	}
+	if c.Upstream.StainlessOS == "" {
+		c.Upstream.StainlessOS = "Linux"
+	}
+	if c.Upstream.StainlessArch == "" {
+		c.Upstream.StainlessArch = "x64"
+	}
+	if c.Upstream.StainlessRuntime == "" {
+		c.Upstream.StainlessRuntime = "node"
+	}
+	if c.Upstream.StainlessRuntimeVersion == "" {
+		c.Upstream.StainlessRuntimeVersion = "v24.21.0"
+	}
+	// Operators may supply either the raw runtime values (process.platform /
+	// process.arch, or Go's GOOS/GOARCH) or the already-normalized names; apply
+	// the openai-node normalization so the wire values match the SDK.
+	c.Upstream.StainlessOS = normalizeStainlessOS(c.Upstream.StainlessOS)
+	c.Upstream.StainlessArch = normalizeStainlessArch(c.Upstream.StainlessArch)
+	c.Upstream.StainlessRuntime = strings.ToLower(strings.TrimSpace(c.Upstream.StainlessRuntime))
+	c.Upstream.StainlessRuntimeVersion = strings.TrimSpace(c.Upstream.StainlessRuntimeVersion)
+}
+
+func (c *Config) validateDatabase() error {
+	switch strings.ToLower(strings.TrimSpace(c.Data.Driver)) {
+	case "", "sqlite":
+		if strings.TrimSpace(c.Data.Database) == "" && strings.TrimSpace(c.Data.DSN) == "" {
+			return errors.New("data.database or data.dsn is required for SQLite")
+		}
+	case "postgres", "postgresql", "pgx":
+		if strings.TrimSpace(c.Data.DSN) == "" {
+			return errors.New("data.dsn is required for PostgreSQL")
+		}
+	default:
+		return fmt.Errorf("data.driver %q is invalid (want sqlite or postgres)", c.Data.Driver)
+	}
+	return nil
+}
+
+func (c *Config) validateRedisLimits() error {
+	if c.Redis.Enabled || c.Redis.URL != "" {
+		u, err := redis.ParseURL(c.Redis.URL)
+		if err != nil || u == nil || (!strings.HasPrefix(c.Redis.URL, "redis://") && !strings.HasPrefix(c.Redis.URL, "rediss://")) {
+			return errors.New("config: redis.url must be a valid redis:// or rediss:// URL (value redacted)")
+		}
+	}
+	if len(c.Redis.Prefix) > 256 || strings.ContainsAny(c.Redis.Prefix, "\r\n\x00") {
+		return errors.New("config: redis.prefix is invalid (value redacted)")
+	}
+	if err := c.validateRedisDurations(); err != nil {
+		return err
+	}
+	if c.Redis.CommitTimeoutMS <= 0 || int64(c.Redis.CommitTimeoutMS) > int64((1<<63-1)/time.Millisecond) {
+		return errors.New("config: redis.commit_timeout_ms must be a positive duration (value redacted)")
+	}
+	if c.Redis.MaxEntries <= 0 || c.Redis.MaxRecordBytes <= 0 || c.Redis.MaxRecordBytes > 64<<10 || c.Redis.MaxBytes < int64(c.Redis.MaxRecordBytes) {
+		return errors.New("config: redis capacity limits are invalid; max_record_bytes must be 1..65536 and max_bytes must cover one record (values redacted)")
+	}
+	return nil
+}
+
+func (c *Config) validateRedisDurations() error {
+	for name, value := range map[string]int{
+		"redis.session_ttl_seconds": c.Redis.SessionTTLSeconds,
+		"redis.catalog_ttl_seconds": c.Redis.CatalogTTLSeconds,
+	} {
+		if value <= 0 || int64(value) > int64((1<<63-1)/time.Second) {
+			return fmt.Errorf("config: %s must be a positive duration (value redacted)", name)
+		}
+	}
+	return nil
 }

@@ -206,7 +206,7 @@ func TestPolicyProxySnapshotCannotRestoreUnboundProxy(t *testing.T) {
 	if err := s.UpdateAccountCredentials(ctx, a.ID, "fake-new", "fake-rotated", 123, AccountStatusReady, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.UpdateAccountManagementFields(ctx, a.ID, "legacy rename", true, 1, 3, stale.ProxyURL, ""); err != nil {
+	if err := s.UpdateAccountManagementFields(ctx, a.ID, AccountManagementFields{Name: "legacy rename", Enabled: true, Weight: 1, Concurrency: 3, ProxyURL: stale.ProxyURL}); err != nil {
 		t.Fatal(err)
 	}
 	name := "typed rename"
@@ -231,7 +231,7 @@ func TestPolicyProxySnapshotCannotRestoreUnboundProxy(t *testing.T) {
 	if got.ProxyID == nil || *got.ProxyID != p.ID || got.ProxyURL != p.URL {
 		t.Fatal("explicit proxy update was not atomic")
 	}
-	if err := s.UpdateAccountManagementFields(ctx, a.ID, name, true, 1, 3, "", "", nil); err != nil {
+	if err := s.UpdateAccountManagementFields(ctx, a.ID, AccountManagementFields{Name: name, Enabled: true, Weight: 1, Concurrency: 3}, nil); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = s.GetAccount(ctx, a.ID)

@@ -154,6 +154,10 @@ func (s *Server) loadModelCatalogs(ctx context.Context, ids []int64) (map[int64]
 		return load(ctx)
 	}
 
+	return cache.fillCatalog(ctx, name, revision, load)
+}
+
+func (cache *modelCatalogCache) fillCatalog(ctx context.Context, name string, revision string, load func(context.Context) (map[int64][]store.CatalogModel, error)) (map[int64][]store.CatalogModel, error) {
 	leaseCtx, stop := context.WithTimeout(ctx, cache.timeout)
 	token, owned, leaseErr := cache.backend.AcquireFillLease(leaseCtx, name, catalogFillLease)
 	stop()
@@ -199,10 +203,14 @@ func (s *Server) loadModelCatalogs(ctx context.Context, ids []int64) (map[int64]
 		cache.fills.Add(1)
 	} else {
 		cache.failures.Add(1)
-		if cache.logger != nil {
-			cache.logger.Debug("model catalog cache fill unavailable", "status", session.StatusOf(err))
-		}
+		cache.logFillFailure(err)
 	}
 	// A cache write cannot revoke an authoritative successful database read.
 	return models, nil
+}
+
+func (cache *modelCatalogCache) logFillFailure(err error) {
+	if cache.logger != nil {
+		cache.logger.Debug("model catalog cache fill unavailable", "status", session.StatusOf(err))
+	}
 }

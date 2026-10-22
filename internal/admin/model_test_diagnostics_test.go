@@ -25,50 +25,7 @@ import (
 func TestAccountModelTestHTTPErrorDetails(t *testing.T) {
 	for _, protocol := range []string{"sse", "ws"} {
 		for _, encoding := range []string{"identity", "gzip", "deflate", "raw-deflate"} {
-			t.Run(protocol+"/"+encoding, func(t *testing.T) {
-				const body = `{"error":{"code":"model_not_supported","message":"chosen-model is unavailable for this account"},"request_id":"local-request"}`
-				target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if encoding != "identity" {
-						w.Header().Set("Content-Encoding", strings.TrimPrefix(encoding, "raw-"))
-					}
-					w.Header().Set("Content-Type", "application/json")
-					w.WriteHeader(http.StatusBadRequest)
-					var writer io.WriteCloser
-					switch encoding {
-					case "gzip":
-						writer = gzip.NewWriter(w)
-					case "deflate":
-						writer = zlib.NewWriter(w)
-					case "raw-deflate":
-						writer, _ = flate.NewWriter(w, flate.DefaultCompression)
-					default:
-						_, _ = io.WriteString(w, body)
-						return
-					}
-					_, _ = io.WriteString(writer, body)
-					_ = writer.Close()
-				}))
-				defer target.Close()
-				s, a := newModelAdmin(t, target.URL)
-				a.UpstreamProtocol = protocol
-				if err := s.store.UpdateAccount(context.Background(), a); err != nil {
-					t.Fatal(err)
-				}
-				w, result := modelAdminRequest(t, s.handleTestAccountModel, context.Background(), a.ID, "POST", `{"model":"chosen-model","message":"Hi"}`)
-				if w.Code != 502 || result.OK || result.UpstreamStatus != 400 || result.UpstreamBodyTruncated || result.UpstreamEvent != "" || result.Error != "chosen-model is unavailable for this account" || !strings.Contains(result.UpstreamBody, `"model_not_supported"`) || !strings.Contains(result.UpstreamBody, "local-request") {
-					t.Fatalf("missing real decoded failure details: %d %s", w.Code, w.Body.String())
-				}
-				if result.Model != "chosen-model" || result.Output != "" || result.FirstTokenMS != nil || s.accounts.Inflight(a.ID) != 0 {
-					t.Fatalf("lost existing result fields or slot: %+v", result)
-				}
-				var audit string
-				if err := s.store.DB().QueryRow("SELECT detail FROM audit_events WHERE action='account.model_test'").Scan(&audit); err != nil {
-					t.Fatal(err)
-				}
-				if strings.Contains(audit, "model_not_supported") || strings.Contains(audit, "local-request") || strings.Contains(audit, "unavailable for this account") || strings.Contains(audit, "upstream_body") {
-					t.Fatalf("persisted full diagnostic: %s", audit)
-				}
-			})
+			t.Run(protocol+"/"+encoding, func(t *testing.T) { runAccountModelTestHTTPErrorDetailsCase(t, &protocol, &encoding) })
 		}
 	}
 }
@@ -82,50 +39,7 @@ func TestAccountModelTestStreamErrorDetails(t *testing.T) {
 			{"untyped", `{"error":{"message":"raw untyped failure"}}`, "", "raw untyped failure"},
 			{"completed_error", `{"type":"response.completed","response":{"status":"completed","error":{"message":"hidden terminal failure"}}}`, "response.completed", "hidden terminal failure"},
 		} {
-			t.Run(protocol+"/"+tc.name, func(t *testing.T) {
-				target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					const delta = `{"type":"response.output_text.delta","delta":"partial output"}`
-					if protocol == "ws" {
-						ws, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
-						if err != nil {
-							t.Error(err)
-							return
-						}
-						defer ws.Close()
-						_, _, _ = ws.ReadMessage()
-						_ = ws.WriteMessage(websocket.TextMessage, []byte(delta))
-						_ = ws.WriteMessage(websocket.TextMessage, []byte(tc.body))
-						return
-					}
-					w.Header().Set("Content-Type", "text/event-stream")
-					_, _ = w.Write(upstream.FormatSSEFrame([]byte(delta)))
-					_, _ = w.Write(upstream.FormatSSEFrame([]byte(tc.body)))
-				}))
-				defer target.Close()
-				s, a := newModelAdmin(t, target.URL)
-				a.UpstreamProtocol = protocol
-				if err := s.store.UpdateAccount(context.Background(), a); err != nil {
-					t.Fatal(err)
-				}
-				w, result := modelAdminRequest(t, s.handleTestAccountModel, context.Background(), a.ID, "POST", `{"model":"chosen-model","message":"Hi"}`)
-				wantStatus := 200
-				if protocol == "ws" {
-					wantStatus = 101
-				}
-				if w.Code != 502 || result.UpstreamStatus != wantStatus || result.UpstreamEvent != tc.event || result.Error != tc.message || result.Output != "partial output" || result.FirstTokenMS == nil || result.Model != "chosen-model" || result.UpstreamBodyTruncated {
-					t.Fatalf("incorrect stream diagnostic: %d %s", w.Code, w.Body.String())
-				}
-				var before, after any
-				_ = json.Unmarshal([]byte(tc.body), &before)
-				if err := json.Unmarshal([]byte(result.UpstreamBody), &after); err != nil {
-					t.Fatal(err)
-				}
-				original, _ := json.Marshal(before)
-				received, _ := json.Marshal(after)
-				if string(original) != string(received) {
-					t.Fatalf("failure body was invented/normalized: got=%s want=%s", received, original)
-				}
-			})
+			t.Run(protocol+"/"+tc.name, func(t *testing.T) { runAccountModelTestStreamErrorDetailsCase(t, &protocol, &tc) })
 		}
 	}
 }
@@ -137,12 +51,12 @@ func TestAccountModelTestPlainHTMLAndAbsentBodies(t *testing.T) {
 			defer target.Close()
 			s, a := newModelAdmin(t, target.URL)
 			w, result := modelAdminRequest(t, s.handleTestAccountModel, context.Background(), a.ID, "POST", `{"model":"chosen-model","message":"Hi"}`)
-			if w.Code != 502 || result.UpstreamStatus != 503 || result.UpstreamBody != body || result.UpstreamBodyTruncated {
+			reportTestFailure(t, w.Code != 502 || result.UpstreamStatus != 503 || result.UpstreamBody != body || result.UpstreamBodyTruncated, func() {
 				t.Fatalf("altered/fictional error body: %s", w.Body.String())
-			}
-			if body == "" && strings.Contains(w.Body.String(), `"upstream_body"`) {
+			})
+			reportTestFailure(t, body == "" && strings.Contains(w.Body.String(), `"upstream_body"`), func() {
 				t.Fatal("empty error body should be omitted")
-			}
+			})
 		})
 	}
 	t.Run("connection_failure", func(t *testing.T) {
@@ -150,9 +64,9 @@ func TestAccountModelTestPlainHTMLAndAbsentBodies(t *testing.T) {
 		target.Close()
 		s, a := newModelAdmin(t, target.URL)
 		w, result := modelAdminRequest(t, s.handleTestAccountModel, context.Background(), a.ID, "POST", `{"model":"chosen-model","message":"Hi"}`)
-		if w.Code != 502 || result.UpstreamStatus != 0 || result.UpstreamBody != "" || strings.Contains(w.Body.String(), `"upstream_status"`) {
+		reportTestFailure(t, w.Code != 502 || result.UpstreamStatus != 0 || result.UpstreamBody != "" || strings.Contains(w.Body.String(), `"upstream_status"`), func() {
 			t.Fatalf("invented response before headers: %s", w.Body.String())
-		}
+		})
 	})
 }
 
@@ -164,24 +78,30 @@ func TestAccountModelTestDiagnosticCredentials(t *testing.T) {
 	var hits atomic.Int64
 	proxy := localForwardProxy(t, target.URL, &hits, false)
 	a.ProxyURL = strings.Replace(proxy.URL, "://", "://proxy-user:proxy-password@", 1)
-	if err := s.store.UpdateAccount(context.Background(), a); err != nil {
-		t.Fatal(err)
+	{
+		err := s.store.UpdateAccount(context.Background(), a)
+		reportTestFailure(t, err != nil, func() {
+			t.Fatal(err)
+		})
 	}
-	if _, err := s.store.DB().Exec("UPDATE accounts SET refresh_token=?, id_token=?, codex_id_token=? WHERE id=?", "main-refresh", "main-id", "codex-id", a.ID); err != nil {
-		t.Fatal(err)
+	{
+		_, err := s.store.DB().Exec("UPDATE accounts SET refresh_token=?, id_token=?, codex_id_token=? WHERE id=?", "main-refresh", "main-id", "codex-id", a.ID)
+		reportTestFailure(t, err != nil, func() {
+			t.Fatal(err)
+		})
 	}
 	w, result := modelAdminRequest(t, s.handleTestAccountModel, context.Background(), a.ID, "POST", `{"model":"chosen-model","message":"Hi"}`)
-	if w.Code != 502 || result.UpstreamStatus != 400 || !strings.Contains(result.Error, "diagnostic denied") || !strings.Contains(result.UpstreamBody, "nonsecret-response-field") || hits.Load() != 1 {
+	reportTestFailure(t, w.Code != 502 || result.UpstreamStatus != 400 || !strings.Contains(result.Error, "diagnostic denied") || !strings.Contains(result.UpstreamBody, "nonsecret-response-field") || hits.Load() != 1, func() {
 		t.Fatalf("diagnostics or proxy were lost: %s", w.Body.String())
-	}
+	})
 	for _, secret := range []string{"selected-primary", `selected\u002dprimary`, "main-refresh", "main-id", "secret-codex", "secret-codex-refresh", "codex-id", "proxy-password", "nested-unknown", "nested-bearer", "unknown-access", "unknown-refresh", "unknown-password", "unknown-basic", "unknown-key", "unknown-escaped", "loose-unknown"} {
-		if strings.Contains(result.UpstreamBody, secret) || strings.Contains(result.Error, secret) {
+		reportTestFailure(t, strings.Contains(result.UpstreamBody, secret) || strings.Contains(result.Error, secret), func() {
 			t.Fatalf("credential disclosed: %q in %s", secret, w.Body.String())
-		}
+		})
 	}
-	if strings.Contains(w.Body.String(), "model-test-pi") || strings.Contains(w.Body.String(), "admin-test-") {
+	reportTestFailure(t, strings.Contains(w.Body.String(), "model-test-pi") || strings.Contains(w.Body.String(), "admin-test-"), func() {
 		t.Fatal("raw request headers disclosed")
-	}
+	})
 }
 
 func TestAccountModelTestDiagnosticBodyLimit(t *testing.T) {
@@ -194,12 +114,12 @@ func TestAccountModelTestDiagnosticBodyLimit(t *testing.T) {
 		s, a := newModelAdmin(t, target.URL)
 		w, result := modelAdminRequest(t, s.handleTestAccountModel, context.Background(), a.ID, "POST", `{"model":"chosen-model","message":"Hi"}`)
 		target.Close()
-		if w.Code != 502 || !result.UpstreamBodyTruncated || len(result.UpstreamBody) > maxModelTestDiagnostic || len(result.Error) > maxModelTestDiagnostic || !utf8.ValidString(result.UpstreamBody) {
+		reportTestFailure(t, w.Code != 502 || !result.UpstreamBodyTruncated || len(result.UpstreamBody) > maxModelTestDiagnostic || len(result.Error) > maxModelTestDiagnostic || !utf8.ValidString(result.UpstreamBody), func() {
 			t.Fatalf("unsafe diagnostic bounds: status=%d bodylen=%d errorlen=%d truncated=%v", w.Code, len(result.UpstreamBody), len(result.Error), result.UpstreamBodyTruncated)
-		}
-		if strings.Contains(result.UpstreamBody, "select") || strings.Contains(result.UpstreamBody, "sensitive") || strings.Contains(result.Error, "select") || strings.Contains(result.Error, "sensitive") {
+		})
+		reportTestFailure(t, strings.Contains(result.UpstreamBody, "select") || strings.Contains(result.UpstreamBody, "sensitive") || strings.Contains(result.Error, "select") || strings.Contains(result.Error, "sensitive"), func() {
 			t.Fatal("truncation exposed a credential fragment")
-		}
+		})
 	}
 }
 
@@ -216,21 +136,24 @@ func TestAccountModelTestFreshCredentialRedaction(t *testing.T) {
 			return
 		}
 		calls.Add(1)
-		if r.Header.Get("Authorization") != "Bearer fresh-access" {
+		reportTestFailure(t, r.Header.Get("Authorization") != "Bearer fresh-access", func() {
 			t.Errorf("wrong fresh credential")
-		}
+		})
 		w.WriteHeader(400)
 		fmt.Fprint(w, `{"error":{"message":"fresh failure: fresh-access fresh-refresh selected-primary old-refresh"}}`)
 	}))
 	defer target.Close()
 	s, a := newModelAdmin(t, target.URL)
-	if _, err := s.store.DB().Exec("UPDATE accounts SET expires_at=1, refresh_token=?, oauth_client_id=? WHERE id=?", "old-refresh", "local-issued", a.ID); err != nil {
-		t.Fatal(err)
+	{
+		_, err := s.store.DB().Exec("UPDATE accounts SET expires_at=1, refresh_token=?, oauth_client_id=? WHERE id=?", "old-refresh", "local-issued", a.ID)
+		reportTestFailure(t, err != nil, func() {
+			t.Fatal(err)
+		})
 	}
 	client, err := s.factory.HTTPClient("")
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatal(err)
-	}
+	})
 	base := client.Transport
 	local, _ := url.Parse(target.URL)
 	client.Transport = modelTestRoundTripper(func(r *http.Request) (*http.Response, error) {
@@ -246,13 +169,13 @@ func TestAccountModelTestFreshCredentialRedaction(t *testing.T) {
 		return base.RoundTrip(clone)
 	})
 	w, result := modelAdminRequest(t, s.handleTestAccountModel, context.Background(), a.ID, "POST", `{"model":"chosen-model","message":"Hi"}`)
-	if w.Code != 502 || refreshes.Load() != 1 || calls.Load() != 1 || !strings.Contains(result.Error, "fresh failure") {
+	reportTestFailure(t, w.Code != 502 || refreshes.Load() != 1 || calls.Load() != 1 || !strings.Contains(result.Error, "fresh failure"), func() {
 		t.Fatalf("local refresh not exercised: %s refresh=%d calls=%d", w.Body.String(), refreshes.Load(), calls.Load())
-	}
+	})
 	for _, secret := range []string{"fresh-access", "fresh-refresh", "selected-primary", "old-refresh"} {
-		if strings.Contains(w.Body.String(), secret) {
+		reportTestFailure(t, strings.Contains(w.Body.String(), secret), func() {
 			t.Fatalf("old/fresh credential leaked: %q", secret)
-		}
+		})
 	}
 }
 
@@ -276,13 +199,13 @@ func TestModelTestRedactorEscapesAndBoundaries(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clean, clipped := redactor.bounded(tc.body, maxModelTestDiagnostic, tc.clipped)
-			if clipped != tc.clipped || !strings.Contains(clean, "REDACTED") {
+			reportTestFailure(t, clipped != tc.clipped || !strings.Contains(clean, "REDACTED"), func() {
 				t.Fatalf("missing redaction/truncation: %q %v", clean, clipped)
-			}
+			})
 			for _, secret := range tc.forbidden {
-				if strings.Contains(clean, secret) {
+				reportTestFailure(t, strings.Contains(clean, secret), func() {
 					t.Fatalf("escaped secret leaked: %q in %q", secret, clean)
-				}
+				})
 			}
 		})
 	}
@@ -290,39 +213,7 @@ func TestModelTestRedactorEscapesAndBoundaries(t *testing.T) {
 
 func TestAccountModelTestNamedSSEAndFallbackDiagnostic(t *testing.T) {
 	for _, named := range []bool{false, true} {
-		t.Run(fmt.Sprint(named), func(t *testing.T) {
-			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if websocket.IsWebSocketUpgrade(r) {
-					w.WriteHeader(503)
-					fmt.Fprint(w, "old handshake body must not replace the SSE failure")
-					return
-				}
-				w.Header().Set("Content-Type", "text/event-stream")
-				if named {
-					fmt.Fprint(w, "event: error\ndata: {\"message\":\"named error detail\"}\n\n")
-				} else {
-					fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n")
-				}
-			}))
-			defer target.Close()
-			s, a := newModelAdmin(t, target.URL)
-			runtime := s.settings.Get()
-			runtime.UpstreamTransport = "auto"
-			if err := s.settings.Set(context.Background(), runtime); err != nil {
-				t.Fatal(err)
-			}
-			w, result := modelAdminRequest(t, s.handleTestAccountModel, context.Background(), a.ID, "POST", `{"model":"chosen-model","message":"Hi"}`)
-			if w.Code != 502 || result.UpstreamStatus != 200 || result.Transport != "sse" || strings.Contains(result.UpstreamBody, "handshake") {
-				t.Fatalf("stale fallback diagnostic: %s", w.Body.String())
-			}
-			if named {
-				if result.UpstreamEvent != "error" || result.Error != "named error detail" || strings.Contains(result.UpstreamBody, `"type"`) {
-					t.Fatalf("named SSE error normalized: %s", w.Body.String())
-				}
-			} else if result.UpstreamBody != "" {
-				t.Fatalf("invented body on stream EOF: %s", w.Body.String())
-			}
-		})
+		t.Run(fmt.Sprint(named), func(t *testing.T) { runAccountModelTestNamedSSEAndFallbackDiagnosticCase(t, &named) })
 	}
 }
 
@@ -335,11 +226,169 @@ func TestAccountModelTestWSClippedHandshake(t *testing.T) {
 	defer target.Close()
 	s, a := newModelAdmin(t, target.URL)
 	a.UpstreamProtocol = "ws"
-	if err := s.store.UpdateAccount(context.Background(), a); err != nil {
-		t.Fatal(err)
+	{
+		err := s.store.UpdateAccount(context.Background(), a)
+		reportTestFailure(t, err != nil, func() {
+			t.Fatal(err)
+		})
 	}
 	w, result := modelAdminRequest(t, s.handleTestAccountModel, context.Background(), a.ID, "POST", `{"model":"chosen-model","message":"Hi"}`)
-	if w.Code != 502 || result.UpstreamStatus != 400 || !result.UpstreamBodyTruncated || strings.Contains(result.UpstreamBody, "select") || strings.Contains(result.Error, "select") {
+	reportTestFailure(t, w.Code != 502 || result.UpstreamStatus != 400 || !result.UpstreamBodyTruncated || strings.Contains(result.UpstreamBody, "select") || strings.Contains(result.Error, "select"), func() {
 		t.Fatalf("handshake prefix leaked or not marked: %s", w.Body.String())
+	})
+}
+
+// runAccountModelTestHTTPErrorDetailsCase exercises one isolated test phase with the original shared state.
+func runAccountModelTestHTTPErrorDetailsCase(t *testing.T, capturedProtocol *string, capturedEncoding *string) {
+	t.Helper()
+
+	const body = `{"error":{"code":"model_not_supported","message":"chosen-model is unavailable for this account"},"request_id":"local-request"}`
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if (*capturedEncoding) != "identity" {
+			w.Header().Set("Content-Encoding", strings.TrimPrefix((*capturedEncoding), "raw-"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		var writer io.WriteCloser
+		switch *capturedEncoding {
+		case "gzip":
+			writer = gzip.NewWriter(w)
+		case "deflate":
+			writer = zlib.NewWriter(w)
+		case "raw-deflate":
+			writer, _ = flate.NewWriter(w, flate.DefaultCompression)
+		default:
+			_, _ = io.WriteString(w, body)
+			return
+		}
+		_, _ = io.WriteString(writer, body)
+		_ = writer.Close()
+	}))
+	defer target.Close()
+	s, a := newModelAdmin(t, target.URL)
+	a.UpstreamProtocol = (*capturedProtocol)
+	{
+		err := s.store.UpdateAccount(context.Background(), a)
+		reportTestFailure(t, err != nil, func() {
+			t.Fatal(err)
+		})
+	}
+	w, result := modelAdminRequest(t, s.handleTestAccountModel, context.Background(), a.ID, "POST", `{"model":"chosen-model","message":"Hi"}`)
+	reportTestFailure(t, w.Code != 502 || result.OK || result.UpstreamStatus != 400 || result.UpstreamBodyTruncated || result.UpstreamEvent != "" || result.Error != "chosen-model is unavailable for this account" || !strings.Contains(result.UpstreamBody, `"model_not_supported"`) || !strings.Contains(result.UpstreamBody, "local-request"), func() {
+		t.Fatalf("missing real decoded failure details: %d %s", w.Code, w.Body.String())
+	})
+	reportTestFailure(t, result.Model != "chosen-model" || result.Output != "" || result.FirstTokenMS != nil || s.accounts.Inflight(a.ID) != 0, func() {
+		t.Fatalf("lost existing result fields or slot: %+v", result)
+	})
+	var audit string
+	{
+		err := s.store.DB().QueryRow("SELECT detail FROM audit_events WHERE action='account.model_test'").Scan(&audit)
+		reportTestFailure(t, err != nil, func() {
+			t.Fatal(err)
+		})
+	}
+	reportTestFailure(t, strings.Contains(audit, "model_not_supported") || strings.Contains(audit, "local-request") || strings.Contains(audit, "unavailable for this account") || strings.Contains(audit, "upstream_body"), func() {
+		t.Fatalf("persisted full diagnostic: %s", audit)
+	})
+}
+
+// runAccountModelTestStreamErrorDetailsCase exercises one isolated test phase with the original shared state.
+func runAccountModelTestStreamErrorDetailsCase(t *testing.T, capturedProtocol *string, capturedTc *struct {
+	name    string
+	body    string
+	event   string
+	message string
+}) {
+	t.Helper()
+
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		const delta = `{"type":"response.output_text.delta","delta":"partial output"}`
+		if (*capturedProtocol) == "ws" {
+			ws, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer ws.Close()
+			_, _, _ = ws.ReadMessage()
+			_ = ws.WriteMessage(websocket.TextMessage, []byte(delta))
+			_ = ws.WriteMessage(websocket.TextMessage, []byte((*capturedTc).body))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write(upstream.FormatSSEFrame([]byte(delta)))
+		_, _ = w.Write(upstream.FormatSSEFrame([]byte((*capturedTc).body)))
+	}))
+	defer target.Close()
+	s, a := newModelAdmin(t, target.URL)
+	a.UpstreamProtocol = (*capturedProtocol)
+	{
+		err := s.store.UpdateAccount(context.Background(), a)
+		reportTestFailure(t, err != nil, func() {
+			t.Fatal(err)
+		})
+	}
+	w, result := modelAdminRequest(t, s.handleTestAccountModel, context.Background(), a.ID, "POST", `{"model":"chosen-model","message":"Hi"}`)
+	wantStatus := 200
+	if (*capturedProtocol) == "ws" {
+		wantStatus = 101
+	}
+	reportTestFailure(t, w.Code != 502 || result.UpstreamStatus != wantStatus || result.UpstreamEvent != (*capturedTc).event || result.Error != (*capturedTc).message || result.Output != "partial output" || result.FirstTokenMS == nil || result.Model != "chosen-model" || result.UpstreamBodyTruncated, func() {
+		t.Fatalf("incorrect stream diagnostic: %d %s", w.Code, w.Body.String())
+	})
+	var before, after any
+	_ = json.Unmarshal([]byte((*capturedTc).body), &before)
+	{
+		err := json.Unmarshal([]byte(result.UpstreamBody), &after)
+		reportTestFailure(t, err != nil, func() {
+			t.Fatal(err)
+		})
+	}
+	original, _ := json.Marshal(before)
+	received, _ := json.Marshal(after)
+	reportTestFailure(t, string(original) != string(received), func() {
+		t.Fatalf("failure body was invented/normalized: got=%s want=%s", received, original)
+	})
+}
+
+// runAccountModelTestNamedSSEAndFallbackDiagnosticCase exercises one isolated test phase with the original shared state.
+func runAccountModelTestNamedSSEAndFallbackDiagnosticCase(t *testing.T, capturedNamed *bool) {
+	t.Helper()
+
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if websocket.IsWebSocketUpgrade(r) {
+			w.WriteHeader(503)
+			fmt.Fprint(w, "old handshake body must not replace the SSE failure")
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		if *capturedNamed {
+			fmt.Fprint(w, "event: error\ndata: {\"message\":\"named error detail\"}\n\n")
+		} else {
+			fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n")
+		}
+	}))
+	defer target.Close()
+	s, a := newModelAdmin(t, target.URL)
+	runtime := s.settings.Get()
+	runtime.UpstreamTransport = "auto"
+	{
+		err := s.settings.Set(context.Background(), runtime)
+		reportTestFailure(t, err != nil, func() {
+			t.Fatal(err)
+		})
+	}
+	w, result := modelAdminRequest(t, s.handleTestAccountModel, context.Background(), a.ID, "POST", `{"model":"chosen-model","message":"Hi"}`)
+	reportTestFailure(t, w.Code != 502 || result.UpstreamStatus != 200 || result.Transport != "sse" || strings.Contains(result.UpstreamBody, "handshake"), func() {
+		t.Fatalf("stale fallback diagnostic: %s", w.Body.String())
+	})
+	if *capturedNamed {
+		reportTestFailure(t, result.UpstreamEvent != "error" || result.Error != "named error detail" || strings.Contains(result.UpstreamBody, `"type"`), func() {
+			t.Fatalf("named SSE error normalized: %s", w.Body.String())
+		})
+	} else {
+		reportTestFailure(t, result.UpstreamBody != "", func() {
+			t.Fatalf("invented body on stream EOF: %s", w.Body.String())
+		})
 	}
 }

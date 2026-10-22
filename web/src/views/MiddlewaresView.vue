@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch, type Ref } from 'vue'
+import {useId, computed, onBeforeUnmount, onMounted, ref, shallowRef, watch, type Ref} from 'vue'
 import { onBeforeRouteLeave, useRoute } from 'vue-router'
 import { api, ApiError } from '../api/client'
 import type { Rule, RuleFieldError, RuleSchema } from '../api/rules'
@@ -9,7 +9,7 @@ import { newRule, ruleSchema } from '../utils/ruleSchema'
 import { editorId } from '../utils/editorId'
 import { ruleLabel, ruleDisplayName, localizedConditionSummary } from '../utils/ruleLabels'
 import { adaptSchema } from '../utils/ruleSchemaAdapter'
-import { clone, conditionSummary, createDraft, draftDirty, stringifyRule, type RuleDraft } from '../utils/ruleEditor'
+import { createDraft, draftDirty, stringifyRule, type RuleDraft } from '../utils/ruleEditor'
 import PageHeader from '../components/PageHeader.vue'
 import Badge from '../components/Badge.vue'
 import Toggle from '../components/Toggle.vue'
@@ -17,6 +17,7 @@ import RuleEditor from '../components/rules/RuleEditor.vue'
 import LegacyRepair from '../components/rules/LegacyRepair.vue'
 import { RefreshCw, Plus } from 'lucide-vue-next'
 const toast = useToastStore()
+const formId = useId()
 const { t, locale } = useI18n()
 const listOpen = ref(false)
 const route = useRoute()
@@ -43,25 +44,28 @@ const unsaved = computed(() => Object.entries(drafts.value).filter(([, draft]) =
 let loadSequence = 0
 let searchTimer: ReturnType<typeof setTimeout> | undefined
 function message(error: unknown) { return error instanceof Error ? error.message : String(error) }
+function reconcileDrafts() {
+    for (const row of rules.value) {
+      const draft = row.id ? drafts.value[row.id] : undefined
+      if (!draft) { continue }
+      if (!draftDirty(draft)) { drafts.value[row.id!] = createDraft(row) }
+      else if (row.revision !== draft.revision) { conflicts.value[row.id!] = row }
+    }
+}
 async function load() {
   const sequence = ++loadSequence
   loading.value = true
   try {
     const result = await api.listRules({search: filters.value.search, phase: filters.value.phase, enabled: filters.value.enabled === '' ? undefined : filters.value.enabled === 'true', limit: filters.value.limit, offset: filters.value.offset})
-    if (sequence !== loadSequence) return
+    if (sequence !== loadSequence) { return }
     loadError.value = ''
     rules.value = result.rules ?? []
     total.value = result.total ?? 0
     if (filters.value.offset > 0 && filters.value.offset >= total.value) { filters.value.offset = Math.max(0, Math.ceil(total.value / filters.value.limit) - 1) * filters.value.limit; void load(); return }
     version.value = result.version ?? 0
     selected.value = selected.value.filter(id => rules.value.some(r => r.id === id))
-    for (const row of rules.value) {
-      const draft = row.id ? drafts.value[row.id] : undefined
-      if (!draft) continue
-      if (!draftDirty(draft)) drafts.value[row.id!] = createDraft(row)
-      else if (row.revision !== draft.revision) conflicts.value[row.id!] = row
-    }
-  } catch (error) { if (sequence === loadSequence) { loadError.value = message(error); toast.error(message(error)) } } finally { if (sequence === loadSequence) loading.value = false }
+    reconcileDrafts()
+  } catch (error) { if (sequence === loadSequence) { loadError.value = message(error); toast.error(message(error)) } } finally { if (sequence === loadSequence) { loading.value = false } }
 }
 async function loadSchema() {
   try { const raw = await api.getRuleSchema(); try { schema.value = adaptSchema(raw); schemaWarning.value = ''; schemaUnsupported.value = false } catch (error) { schemaWarning.value = `${t('rules.schemaUnsupported')} ${message(error)}`; schemaUnsupported.value = true } }
@@ -73,19 +77,19 @@ watch(() => filters.value.search, () => { clearTimeout(searchTimer); searchTimer
 watch(() => [filters.value.phase, filters.value.enabled, filters.value.limit], () => { filters.value.offset = 0; void load() })
 onBeforeRouteLeave(() => !(unsaved.value.length || legacyDirty.value) || confirm(t('rules.leaveConfirm')))
 function leaveWindow(event: BeforeUnloadEvent) { if (unsaved.value.length || legacyDirty.value) { event.preventDefault(); event.returnValue = '' } }
-function edit(rule: Rule) { if (!rule.id) return; if (!drafts.value[rule.id]) drafts.value[rule.id] = createDraft(rule); active.value = rule.id }
+function edit(rule: Rule) { if (!rule.id) { return; } if (!drafts.value[rule.id]) { drafts.value[rule.id] = createDraft(rule); } active.value = rule.id }
 function add() { const key = `new:${editorId()}`; drafts.value[key] = createDraft(newRule(), true); active.value = key }
 function changePage(next: number) { filters.value.offset = Math.max(0, Math.min(pages.value - 1, next - 1)) * filters.value.limit; void load() }
 async function failure(error: unknown, id?: string) {
   toast.error(message(error))
-  if (id && error instanceof ApiError && error.status === 409) { const result = await api.getRule(id).catch(() => null); if (result) conflicts.value[id] = result.rule; return }
+  if (id && error instanceof ApiError && error.status === 409) { const result = await api.getRule(id).catch(() => null); if (result) { conflicts.value[id] = result.rule; } return }
   const payload = error instanceof ApiError && error.payload && typeof error.payload === 'object' ? error.payload as { errors?: RuleFieldError[] } : undefined
-  if (id && drafts.value[id]) drafts.value[id]!.errors = payload?.errors?.length ? payload.errors : [{path:'', message: message(error)}]
+  if (id && drafts.value[id]) { drafts.value[id]!.errors = payload?.errors?.length ? payload.errors : [{path:'', message: message(error)}] }
 }
 async function save(rule: Rule) {
   const key = active.value
   const draft = drafts.value[key]
-  if (!draft || busy.value) return
+  if (!draft || busy.value) { return }
   busy.value = true
   try {
     const valid = await api.validateRule(rule)
@@ -97,34 +101,34 @@ async function save(rule: Rule) {
   } catch (error) { await failure(error, key) } finally { busy.value = false }
 }
 async function toggle(rule: Rule, enabled: boolean) {
-  if (!rule.id || busy.value) return
+  if (!rule.id || busy.value) { return }
   busy.value = true
   try { await api.batchRules([{id:rule.id, expected_revision:rule.revision}], enabled, version.value); await load() } catch (error) { await failure(error, rule.id) } finally { busy.value = false }
 }
 async function batch(enabled: boolean) {
-  if (!selected.value.length || busy.value) return
+  if (!selected.value.length || busy.value) { return }
   busy.value = true
   try { await api.batchRules(rules.value.filter(r => r.id && selected.value.includes(r.id)).map(r => ({id:r.id!, expected_revision:r.revision})), enabled, version.value); selected.value = []; await load() } catch (error) { await failure(error) } finally { busy.value = false }
 }
 async function duplicate(rule: Rule) {
-  if (!rule.id || busy.value) return
+  if (!rule.id || busy.value) { return }
   busy.value = true
   try { const result = await api.duplicateRule(rule.id, rule.revision); await load(); edit(result.rule) } catch (error) { await failure(error, rule.id) } finally { busy.value = false }
 }
 async function remove(rule: Rule) {
-  if (!rule.id || busy.value || !confirm(t('rules.deleteConfirm'))) return
+  if (!rule.id || busy.value || !confirm(t('rules.deleteConfirm'))) { return }
   busy.value = true
-  try { await api.deleteRule(rule.id, rule.revision); delete drafts.value[rule.id]; delete conflicts.value[rule.id]; if (active.value === rule.id) active.value = ''; await load() } catch (error) { await failure(error, rule.id) } finally { busy.value = false }
+  try { await api.deleteRule(rule.id, rule.revision); delete drafts.value[rule.id]; delete conflicts.value[rule.id]; if (active.value === rule.id) { active.value = ''; } await load() } catch (error) { await failure(error, rule.id) } finally { busy.value = false }
 }
 async function priority(rule: Rule, event: Event) {
   const input = event.target as HTMLInputElement
   const value = Number(input.value)
-  if (!rule.id || !input.reportValidity() || !Number.isSafeInteger(value) || value === rule.priority || busy.value) return
+  if (!rule.id || !input.reportValidity() || !Number.isSafeInteger(value) || value === rule.priority || busy.value) { return }
   busy.value = true
   try { await api.updateRule(rule.id, {...rule, priority:value}, rule.revision); await load() } catch (error) { input.value = String(rule.priority); await failure(error, rule.id) } finally { busy.value = false }
 }
 async function move(rule: Rule, direction: -1 | 1) {
-  if (!rule.id || busy.value) return
+  if (!rule.id || busy.value) { return }
   busy.value = true
   try {
     // The server resolves the real same-phase neighbour, including across pages/filters.
@@ -132,18 +136,18 @@ async function move(rule: Rule, direction: -1 | 1) {
     await load()
   } catch (error) { await failure(error, rule.id) } finally { busy.value = false }
 }
-function reloadDraft() { const server = conflicts.value[active.value]; if (!server || !confirm(t('rules.exampleConfirm'))) return; drafts.value[active.value] = createDraft(server); delete conflicts.value[active.value] }
-function rebaseDraft() { const server = conflicts.value[active.value]; const draft = current.value; if (!server || !draft || !confirm(t('rules.rebaseConfirm'))) return; draft.revision = server.revision; draft.rule.revision = server.revision; if (draft.graph) { const root = draft.graph.nodes.find(node => node.kind === 'rule'); if (root) (root.data as Rule).revision = server.revision }; draft.base = stringifyRule(server); if (draft.mode === 'visual') draft.code = stringifyRule(draft.rule); delete conflicts.value[active.value] }
+function reloadDraft() { const server = conflicts.value[active.value]; if (!server || !confirm(t('rules.exampleConfirm'))) { return; } drafts.value[active.value] = createDraft(server); delete conflicts.value[active.value] }
+function rebaseDraft() { const server = conflicts.value[active.value]; const draft = current.value; if (!server || !draft || !confirm(t('rules.rebaseConfirm'))) { return; } draft.revision = server.revision; draft.rule.revision = server.revision; if (draft.graph) { const root = draft.graph.nodes.find(node => node.kind === 'rule'); if (root) { (root.data as Rule).revision = server.revision } }; draft.base = stringifyRule(server); if (draft.mode === 'visual') { draft.code = stringifyRule(draft.rule); } delete conflicts.value[active.value] }
 </script>
 <template>
   <div class="page-view">
     <PageHeader :title="t('rules.title')" :subtitle="t('rules.subtitle')"><button class="btn" :disabled="loading || busy" @click="loadSchema(); load()"><RefreshCw class="h-3.5 w-3.5" />{{ t('common.refresh') }}</button><button class="btn btn-primary" :disabled="schemaUnsupported" @click="add"><Plus class="h-3.5 w-3.5" />{{ t('rules.add') }}</button></PageHeader>
     <div class="page-content space-y-4">
-      <p v-if="route.query.capture && !current" class="notice" role="status">{{ t('rules.canvas.captureSelected') }}</p>
+      <output v-if="route.query.capture && !current" class="notice" >{{ t('rules.canvas.captureSelected') }}</output>
       <p v-if="schemaWarning" class="notice" role="alert">{{ schemaWarning }}</p>
       <div v-if="loadError" class="notice space-y-2" role="alert"><p>{{ loadError }}</p><button class="btn" @click="legacyOpen = true">{{ t('rules.legacyRepair') }}</button></div>
       <LegacyRepair v-if="legacyOpen" @dirty="legacyDirty = $event" @retry="load" />
-      <div class="flex flex-wrap gap-2"><input v-model="filters.search" class="input min-w-40 flex-1" :placeholder="t('rules.search')" :aria-label="t('rules.search')" /><select v-model="filters.phase" class="input !w-auto"><option value="">{{ t('rules.allPhases') }}</option><option v-for="phase in schema.phases" :key="phase" :value="phase">{{ ruleLabel('phase', phase, locale) }}</option></select><select v-model="filters.enabled" class="input !w-auto"><option value="">{{ t('rules.allStates') }}</option><option value="true">{{ t('rules.enabled') }}</option><option value="false">{{ t('rules.disabled') }}</option></select><select v-model.number="filters.limit" class="input !w-auto"><option :value="20">20</option><option :value="50">50</option><option :value="100">100</option></select></div>
+      <div class="flex flex-wrap gap-2"><input v-model="filters.search" class="input min-w-40 flex-1" :placeholder="t('rules.search')" :aria-label="t('rules.search')" /><label class="sr-only" :for="`${formId}-phase`">{{ t('rules.allPhases') }}</label><select :id="`${formId}-phase`" v-model="filters.phase" class="input !w-auto"><option value="">{{ t('rules.allPhases') }}</option><option v-for="phase in schema.phases" :key="phase" :value="phase">{{ ruleLabel('phase', phase, locale) }}</option></select><label class="sr-only" :for="`${formId}-enabled`">{{ t('rules.allStates') }}</label><select :id="`${formId}-enabled`" v-model="filters.enabled" class="input !w-auto"><option value="">{{ t('rules.allStates') }}</option><option value="true">{{ t('rules.enabled') }}</option><option value="false">{{ t('rules.disabled') }}</option></select><label class="sr-only" :for="`${formId}-limit`">{{ t('accounts.pageSize') }}</label><select :id="`${formId}-limit`" v-model.number="filters.limit" class="input !w-auto"><option :value="20">20</option><option :value="50">50</option><option :value="100">100</option></select></div>
       <div v-if="selected.length" class="flex gap-2"><button class="btn" :disabled="busy" @click="batch(true)">{{ t('rules.enableSelected') }}</button><button class="btn" :disabled="busy" @click="batch(false)">{{ t('rules.disableSelected') }}</button></div>
       <div v-if="unsaved.length" class="flex flex-wrap gap-2"><button v-for="[key, draft] in unsaved" :key="key" class="btn" @click="active = key">{{ ruleDisplayName(draft.rule,locale) || t('rules.add') }} · {{ t('rules.dirty') }}</button></div>
       <button v-if="current" class="btn" type="button" :aria-expanded="listOpen" @click="listOpen = !listOpen">{{ t('rules.canvas.list') }} ({{ total }})</button>

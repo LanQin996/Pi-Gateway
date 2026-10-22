@@ -36,9 +36,20 @@ const fields = computed(() => {
 })
 const collapsed = ref(false)
 const showAll = ref(false)
-const primaryNames = computed(() => props.kind === 'rule' ? ['name', 'enabled', 'phase', 'priority'] : props.kind === 'condition' ? ['path', 'source'] : props.kind === 'action' && (props.modelValue as RuleAction).type === 'text_replace' ? ['path', 'match', 'pattern', 'replacement'] : [])
+const primaryNames = computed(() => (() => {
+    if (props.kind === 'rule') {
+        return ['name', 'enabled', 'phase', 'priority']
+    }
+    if (props.kind === 'condition') {
+        return ['path', 'source']
+    }
+    if (props.kind === 'action' && (props.modelValue as RuleAction).type === 'text_replace') {
+        return ['path', 'match', 'pattern', 'replacement']
+    }
+    return []
+})())
 function isPrimary(field: RuleField) {
- if (field.required || primaryNames.value.includes(field.name) || (props.errors ?? []).some(error => error.path === fieldPath(field) || error.path.startsWith(`${fieldPath(field)}/`))) return true
+ if (field.required || primaryNames.value.includes(field.name) || (props.errors ?? []).some(error => error.path === fieldPath(field) || error.path.startsWith(`${fieldPath(field)}/`))) { return true }
  const actual = values.value[field.name]
  return actual !== undefined && JSON.stringify(actual) !== JSON.stringify(defaultForField(field))
 }
@@ -55,17 +66,17 @@ function fieldSample(field: RuleField) {
 function updateField(field: RuleField, value: unknown) {
   // modelValue is the full graphNodeValue, so predicate/group subtrees survive.
   const next = {...values.value}
-  if (value === undefined) delete next[field.name]
-  else next[field.name] = value
+  if (value === undefined) { delete next[field.name] }
+  else { next[field.name] = value }
   emit('update:modelValue', props.kind === 'action'
     ? {...props.modelValue as RuleAction, params: next}
     : next as unknown as RuleGraphNode['data'])
 }
 const nodeErrors = computed(() => (props.errors ?? []).filter(error => {
-  if (fields.value.some(field => error.path === fieldPath(field) || error.path.startsWith(`${fieldPath(field)}/`))) return false
-  if (error.path === props.path) return true
-  if (props.kind === 'rule') return error.path.startsWith(`${props.path}/`) && !error.path.slice(props.path.length + 1).includes('/') && !['/when', '/actions'].includes(error.path)
-  if (props.kind === 'condition') return error.path === `${props.path}/op` || error.path === `${props.path}/conditions`
+  if (fields.value.some(field => error.path === fieldPath(field) || error.path.startsWith(`${fieldPath(field)}/`))) { return false }
+  if (error.path === props.path) { return true }
+  if (props.kind === 'rule') { return error.path.startsWith(`${props.path}/`) && !error.path.slice(props.path.length + 1).includes('/') && !['/when', '/actions'].includes(error.path) }
+  if (props.kind === 'condition') { return error.path === `${props.path}/op` || error.path === `${props.path}/conditions` }
   return error.path.startsWith(`${props.path}/`) && !error.path.startsWith(`${props.path}/params/predicate/`)
 }))
 </script>

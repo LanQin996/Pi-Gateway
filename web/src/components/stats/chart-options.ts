@@ -14,6 +14,30 @@ export interface StatsSeries {
     bar?: boolean
 }
 
+    function displayValue(value: number | null | undefined, unit: StatsSeries['unit']) {
+        if (value == null || !Number.isFinite(value)) { return '—' }
+        if (unit === 'duration') { return `${metric(value, 2)} ms` }
+        if (unit === 'throughput') { return `${metric(value, 2)} tok/s` }
+        if (unit === 'money') { return money(value) }
+        if (unit === 'percent') { return percent(value) }
+        return metric(value)
+    }
+
+    function alpha(color: string, opacity: number) {
+        // Resolve the real semantic token through the browser, not a guessed HEX palette.
+        const canvas = document.createElement('canvas')
+        const context = canvas.getContext('2d')
+        if (!context) { return color }
+        context.fillStyle = color
+        context.fillRect(0, 0, 1, 1)
+        const data = context.getImageData(0, 0, 1, 1).data
+        return `rgba(${data[0]},${data[1]},${data[2]},${opacity})`
+    }
+
+    function escape(value: string) {
+        return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;')
+    }
+
 // Coordinates, typography and tooltip spacing follow usage/utils/chart.ts.
 // Every value remains an API sample: nulls are gaps, never invented zeroes.
 export function useStatsChart() {
@@ -32,10 +56,9 @@ export function useStatsChart() {
         })
     })
     onBeforeUnmount(() => themeObserver?.disconnect())
+    const themeSnapshot = computed(() => ({theme: ui.theme, revision: themeVersion.value, css: getComputedStyle(document.documentElement)}))
     const palette = computed(() => {
-        void ui.theme
-        void themeVersion.value
-        const css = getComputedStyle(document.documentElement)
+        const css = themeSnapshot.value.css
         const token = (name: string, reference: string, fallback = 'ink') => css.getPropertyValue(`--color-${name}`).trim() || css.getPropertyValue(`--cp-color-${reference}`).trim() || css.getPropertyValue(`--color-${fallback}`).trim()
         return {
             blue: token('chart-blue', 'blue-solid', 'primary-seed'),
@@ -58,40 +81,16 @@ export function useStatsChart() {
     }
 
     function axisValue(value: number, unit: StatsSeries['unit']) {
-        if (unit === 'duration') return value >= 1000 ? `${metric(value / 1000, 1)}s` : `${metric(value)}ms`
-        if (unit === 'money') return `$${metric(value, value < 1 ? 3 : 2)}`
-        if (unit === 'percent') return percent(value)
-        if (unit === 'throughput') return `${compact(value)}/s`
+        if (unit === 'duration') { return value >= 1000 ? `${metric(value / 1000, 1)}s` : `${metric(value)}ms` }
+        if (unit === 'money') { return `$${metric(value, value < 1 ? 3 : 2)}` }
+        if (unit === 'percent') { return percent(value) }
+        if (unit === 'throughput') { return `${compact(value)}/s` }
         return compact(value)
-    }
-
-    function displayValue(value: number | null | undefined, unit: StatsSeries['unit']) {
-        if (value == null || !Number.isFinite(value)) return '—'
-        if (unit === 'duration') return `${metric(value, 2)} ms`
-        if (unit === 'throughput') return `${metric(value, 2)} tok/s`
-        if (unit === 'money') return money(value)
-        if (unit === 'percent') return percent(value)
-        return metric(value)
-    }
-
-    function alpha(color: string, opacity: number) {
-        // Resolve the real semantic token through the browser, not a guessed HEX palette.
-        const canvas = document.createElement('canvas')
-        const context = canvas.getContext('2d')
-        if (!context) return color
-        context.fillStyle = color
-        context.fillRect(0, 0, 1, 1)
-        const data = context.getImageData(0, 0, 1, 1).data
-        return `rgba(${data[0]},${data[1]},${data[2]},${opacity})`
-    }
-
-    function escape(value: string) {
-        return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;')
     }
 
     function option(buckets: StatsBucket[], series: StatsSeries[]): EChartsCoreOption {
         const theme = palette.value
-        const longRange = buckets.length > 1 && buckets[buckets.length - 1]!.bucket_start - buckets[0]!.bucket_start > 172800000
+        const longRange = buckets.length > 1 && buckets.at(-1)!.bucket_start - buckets[0]!.bucket_start > 172800000
         const dateFormat = new Intl.DateTimeFormat(locale.value, longRange ? {
             month: '2-digit',
             day: '2-digit'
@@ -124,10 +123,10 @@ export function useStatsChart() {
                 axisPointer: {type: 'line', lineStyle: {color: theme.pointer, type: 'dashed', width: 1}},
                 formatter: (params: unknown) => {
                     const first: unknown = Array.isArray(params) ? params[0] : params
-                    if (typeof first !== 'object' || first === null || !('dataIndex' in first) || typeof first.dataIndex !== 'number') return ''
+                    if (typeof first !== 'object' || first === null || !('dataIndex' in first) || typeof first.dataIndex !== 'number') { return '' }
                     const index = first.dataIndex
                     const bucket = buckets[index]
-                    if (!bucket) return ''
+                    if (!bucket) { return '' }
                     const title = `<div style="margin:0 0 7px;padding:0 0 7px;border-bottom:1px solid ${escape(theme.line)};font-family:var(--font-mono);font-size:11px;font-weight:750;line-height:1.2">${escape(formatDateTime(bucket.bucket_start))}</div>`
                     const lines = series.map(item => `<span style="display:inline-block;width:7px;height:7px;margin-right:6px;border-radius:999px;background:${escape(item.color)}"></span>${escape(item.name)}: ${escape(displayValue(item.values[index], item.unit))}`)
                     return `${title}<div style="line-height:1.55">${lines.join('<br/>')}</div>`

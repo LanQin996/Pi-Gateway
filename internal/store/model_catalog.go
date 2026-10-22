@@ -245,14 +245,10 @@ func decodeModelCatalogState(raw, sourcesRaw string, fetched, attempted int64, l
 	if state.Sources == nil {
 		// Accept both the private envelope and a direct source-name map. The
 		// latter keeps hand-migrated/early incremental snapshots readable.
-		var direct map[string]ModelCatalogSource
-		if err := json.Unmarshal([]byte(sourcesRaw), &direct); err != nil {
-			return nil, fmt.Errorf("store: decode model catalog sources: %w", err)
-		}
-		if _, hasChatGPT := direct[ModelSourceChatGPT]; hasChatGPT {
-			state.Sources = direct
-		} else if _, hasCodex := direct[ModelSourceCodex]; hasCodex {
-			state.Sources = direct
+		var err error
+		state.Sources, err = directCatalogSources(sourcesRaw)
+		if err != nil {
+			return nil, err
 		}
 	}
 	if state.Sources == nil {
@@ -332,25 +328,7 @@ func catalogFromSources(sources map[string]ModelCatalogSource) *ModelCatalog {
 				byID[model.ID] = copyCatalogModel(model)
 				continue
 			}
-			// Never replace a present JSON key: false, null, zero, empty
-			// arrays and nested objects all remain the primary source's value.
-			_, hasName := primary.Metadata["name"]
-			_, hasDisplayName := primary.Metadata["display_name"]
-			if model.Name != "" && (primary.Name == "" || primary.Name == primary.ID) && !hasName && !hasDisplayName {
-				primary.Name = model.Name
-			}
-			if _, hasDescription := primary.Metadata["description"]; primary.Description == "" && !hasDescription {
-				primary.Description = model.Description
-			}
-			if primary.Metadata == nil && len(model.Metadata) > 0 {
-				primary.Metadata = make(map[string]json.RawMessage, len(model.Metadata))
-			}
-			for key, value := range model.Metadata {
-				if _, exists := primary.Metadata[key]; !exists {
-					primary.Metadata[key] = append(json.RawMessage(nil), value...)
-				}
-			}
-			primary.Origins = append(primary.Origins, source)
+			primary = mergeSourceCatalogModel(primary, model, source)
 			byID[model.ID] = primary
 		}
 	}
@@ -602,16 +580,8 @@ func (s *Store) SaveAccountModelCatalogRefresh(ctx context.Context, id int64, at
 // Codex state. Equal-time legacy writes follow transaction order, while active
 // and consumed tokenized refreshes continue to protect their source snapshots.
 func (s *Store) SaveAccountModelCatalog(ctx context.Context, id int64, catalog *ModelCatalog) error {
-	if catalog == nil || id <= 0 {
-		return errors.New("store: invalid account model catalog")
-	}
-	if catalog.Error == "" && catalog.FetchedAt <= 0 {
-		return errors.New("store: successful model catalog needs a fetched timestamp")
-	}
-	// Validate raw metadata before any stale-attempt or missing-account no-op.
-	// Invalid input must return an error, not success or a new cache revision.
-	if _, err := json.Marshal(catalog.Models); err != nil {
-		return fmt.Errorf("store: encode account model catalog: %w", err)
+	if err := validateLegacyCatalog(id, catalog); err != nil {
+		return err
 	}
 	attempted := catalog.AttemptedAt
 	if attempted <= 0 {
@@ -640,9 +610,7 @@ func (s *Store) SaveAccountModelCatalog(ctx context.Context, id int64, catalog *
 	// Tokenized refreshes fence all older work. Legacy attempts instead track
 	// the latest successful list and latest attempt independently: an older
 	// success may improve the list without clearing a newer failure.
-	if fence.Token != "" ||
-		(attempted < watermark && (attempted <= fence.AttemptedAt || catalog.Error != "" || catalog.FetchedAt <= previous.FetchedAt)) ||
-		(catalog.Error == "" && catalog.FetchedAt < previous.FetchedAt) {
+	if legacyCatalogSuperseded(catalog, previous, fence, attempted, watermark) {
 		return tx.Commit()
 	}
 	if attempted == watermark && attempted <= fence.AttemptedAt {
@@ -655,19 +623,7 @@ func (s *Store) SaveAccountModelCatalog(ctx context.Context, id int64, catalog *
 	}
 	// A merged read can contain Codex-only models. They must never become
 	// ChatGPT-owned through the compatibility entry point.
-	models := make([]CatalogModel, 0, len(catalog.Models))
-	for _, model := range catalog.Models {
-		if len(model.Origins) > 0 {
-			chatgpt := false
-			for _, origin := range model.Origins {
-				chatgpt = chatgpt || origin == ModelSourceChatGPT
-			}
-			if !chatgpt {
-				continue
-			}
-		}
-		models = append(models, model)
-	}
+	models := legacyChatGPTModels(catalog.Models)
 	incoming, err := applyModelCatalogSource(previous, ModelCatalogSource{
 		Models: models, FetchedAt: catalog.FetchedAt, Error: catalog.Error,
 	}, ModelSourceChatGPT, attempted)
@@ -706,4 +662,78 @@ func clearCodexModelCatalog(ctx context.Context, tx *storeTx, id int64, bindingC
 	delete(state.Sources, ModelSourceCodex)
 	delete(state.Pending, ModelSourceCodex)
 	return writeLockedModelCatalog(ctx, tx, id, state, before, bindingChanged)
+}
+
+func directCatalogSources(sourcesRaw string) (map[string]ModelCatalogSource, error) {
+	var direct map[string]ModelCatalogSource
+	if err := json.Unmarshal([]byte(sourcesRaw), &direct); err != nil {
+		return nil, fmt.Errorf("store: decode model catalog sources: %w", err)
+	}
+	if _, hasChatGPT := direct[ModelSourceChatGPT]; hasChatGPT {
+		return direct, nil
+	} else if _, hasCodex := direct[ModelSourceCodex]; hasCodex {
+		return direct, nil
+	}
+	return nil, nil
+}
+
+func mergeSourceCatalogModel(primary, model CatalogModel, source string) CatalogModel {
+	// Never replace a present JSON key: false, null, zero, empty
+	// arrays and nested objects all remain the primary source's value.
+	_, hasName := primary.Metadata["name"]
+	_, hasDisplayName := primary.Metadata["display_name"]
+	if model.Name != "" && (primary.Name == "" || primary.Name == primary.ID) && !hasName && !hasDisplayName {
+		primary.Name = model.Name
+	}
+	if _, hasDescription := primary.Metadata["description"]; primary.Description == "" && !hasDescription {
+		primary.Description = model.Description
+	}
+	if primary.Metadata == nil && len(model.Metadata) > 0 {
+		primary.Metadata = make(map[string]json.RawMessage, len(model.Metadata))
+	}
+	for key, value := range model.Metadata {
+		if _, exists := primary.Metadata[key]; !exists {
+			primary.Metadata[key] = append(json.RawMessage(nil), value...)
+		}
+	}
+	primary.Origins = append(primary.Origins, source)
+	return primary
+}
+
+func legacyChatGPTModels(incoming []CatalogModel) []CatalogModel {
+	models := make([]CatalogModel, 0, len(incoming))
+	for _, model := range incoming {
+		if len(model.Origins) > 0 {
+			chatgpt := false
+			for _, origin := range model.Origins {
+				chatgpt = chatgpt || origin == ModelSourceChatGPT
+			}
+			if !chatgpt {
+				continue
+			}
+		}
+		models = append(models, model)
+	}
+	return models
+}
+
+func legacyCatalogSuperseded(catalog *ModelCatalog, previous ModelCatalogSource, fence modelCatalogFence, attempted, watermark int64) bool {
+	return fence.Token != "" ||
+		(attempted < watermark && (attempted <= fence.AttemptedAt || catalog.Error != "" || catalog.FetchedAt <= previous.FetchedAt)) ||
+		(catalog.Error == "" && catalog.FetchedAt < previous.FetchedAt)
+}
+
+func validateLegacyCatalog(id int64, catalog *ModelCatalog) error {
+	if catalog == nil || id <= 0 {
+		return errors.New("store: invalid account model catalog")
+	}
+	if catalog.Error == "" && catalog.FetchedAt <= 0 {
+		return errors.New("store: successful model catalog needs a fetched timestamp")
+	}
+	// Validate raw metadata before any stale-attempt or missing-account no-op.
+	// Invalid input must return an error, not success or a new cache revision.
+	if _, err := json.Marshal(catalog.Models); err != nil {
+		return fmt.Errorf("store: encode account model catalog: %w", err)
+	}
+	return nil
 }

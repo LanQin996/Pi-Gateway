@@ -11,9 +11,9 @@ import (
 func mustJSON(t *testing.T, v any) []byte {
 	t.Helper()
 	raw, err := json.Marshal(v)
-	if err != nil {
+	reportTestFailure(t, err != nil, func() {
 		t.Fatalf("marshal: %v", err)
-	}
+	})
 	return raw
 }
 
@@ -32,9 +32,9 @@ func TestBuildDeltaBodySendsOnlyNewItems(t *testing.T) {
 	// The previous response produced one assistant message item.
 	assistantItem := map[string]any{"type": "message", "role": "assistant", "content": "hello"}
 	exceptInput, input, ok := bodyExceptInput(turn1)
-	if !ok {
+	reportTestFailure(t, !ok, func() {
 		t.Fatal("bodyExceptInput failed")
-	}
+	})
 	cont := &wsContinuation{
 		bodyExceptInput:   exceptInput,
 		lastInput:         input,
@@ -55,30 +55,39 @@ func TestBuildDeltaBodySendsOnlyNewItems(t *testing.T) {
 	})
 
 	delta, ok := buildDeltaBody(turn2, cont)
-	if !ok {
+	reportTestFailure(t, !ok, func() {
 		t.Fatal("buildDeltaBody did not recognise the continuation")
-	}
+	})
 	var decoded map[string]any
-	if err := json.Unmarshal(delta, &decoded); err != nil {
-		t.Fatalf("delta is not JSON: %v", err)
+	{
+		err := json.Unmarshal(delta, &decoded)
+		reportTestFailure(t, err != nil, func() {
+			t.Fatalf("delta is not JSON: %v", err)
+		})
 	}
-	if decoded["previous_response_id"] != "resp_1" {
+	reportTestFailure(t, decoded["previous_response_id"] != "resp_1", func() {
 		t.Errorf("previous_response_id = %v, want resp_1", decoded["previous_response_id"])
-	}
+	})
 	items, _ := decoded["input"].([]any)
-	if len(items) != 1 {
+	reportTestFailure(t, len(items) != 1, func() {
 		t.Fatalf("delta input has %d items, want 1", len(items))
-	}
+	})
 	item, _ := items[0].(map[string]any)
-	if item["content"] != "again" {
+	reportTestFailure(t, item["content"] != "again", func() {
 		t.Errorf("delta item = %v, want the new user message", item)
-	}
+	})
 	// previous_response_id must be present but not leak into the compared body.
-	if _, exists := mustDecode(t, exceptInput)["previous_response_id"]; exists {
-		t.Error("bodyExceptInput must drop previous_response_id")
+	{
+		_, exists := mustDecode(t, exceptInput)["previous_response_id"]
+		reportTestFailure(t, exists, func() {
+			t.Error("bodyExceptInput must drop previous_response_id")
+		})
 	}
-	if _, exists := mustDecode(t, exceptInput)["input"]; exists {
-		t.Error("bodyExceptInput must drop input")
+	{
+		_, exists := mustDecode(t, exceptInput)["input"]
+		reportTestFailure(t, exists, func() {
+			t.Error("bodyExceptInput must drop input")
+		})
 	}
 }
 
@@ -95,8 +104,11 @@ func TestBuildDeltaBodyRejectsDivergentBody(t *testing.T) {
 	}
 
 	divergent := mustJSON(t, map[string]any{"model": "b", "input": []any{map[string]any{"x": 1}}, "stream": true, "store": false})
-	if _, ok := buildDeltaBody(divergent, cont); ok {
-		t.Error("a changed model must disable the continuation")
+	{
+		_, ok := buildDeltaBody(divergent, cont)
+		reportTestFailure(t, ok, func() {
+			t.Error("a changed model must disable the continuation")
+		})
 	}
 }
 
@@ -118,19 +130,28 @@ func TestBuildDeltaBodyRequiresPrefixMatch(t *testing.T) {
 		"stream": true,
 		"store":  false,
 	})
-	if _, ok := buildDeltaBody(rewritten, cont); ok {
-		t.Error("a rewritten prefix must disable the continuation")
+	{
+		_, ok := buildDeltaBody(rewritten, cont)
+		reportTestFailure(t, ok, func() {
+			t.Error("a rewritten prefix must disable the continuation")
+		})
 	}
 }
 
 // TestBuildDeltaBodyWithoutCachedState verifies there is nothing to continue from.
 func TestBuildDeltaBodyWithoutCachedState(t *testing.T) {
 	body := mustJSON(t, map[string]any{"model": "m", "input": []any{}, "stream": true, "store": false})
-	if _, ok := buildDeltaBody(body, nil); ok {
-		t.Error("nil continuation must not produce a delta")
+	{
+		_, ok := buildDeltaBody(body, nil)
+		reportTestFailure(t, ok, func() {
+			t.Error("nil continuation must not produce a delta")
+		})
 	}
-	if _, ok := buildDeltaBody(body, &wsContinuation{}); ok {
-		t.Error("a continuation without a response id must not produce a delta")
+	{
+		_, ok := buildDeltaBody(body, &wsContinuation{})
+		reportTestFailure(t, ok, func() {
+			t.Error("a continuation without a response id must not produce a delta")
+		})
 	}
 }
 
@@ -148,14 +169,14 @@ func TestResponseItemsFromTerminal(t *testing.T) {
 		},
 	}
 	items := responseItemsFromTerminal(event)
-	if len(items) != 2 {
+	reportTestFailure(t, len(items) != 2, func() {
 		t.Fatalf("items = %d, want 2", len(items))
-	}
+	})
 	for _, raw := range items {
 		item, _ := raw.(map[string]any)
-		if item["type"] == "function_call_output" || item["type"] == "custom_tool_call_output" {
+		reportTestFailure(t, item["type"] == "function_call_output" || item["type"] == "custom_tool_call_output", func() {
 			t.Errorf("tool output item was not excluded: %v", item)
-		}
+		})
 	}
 }
 
@@ -165,61 +186,7 @@ func TestBuildDeltaBodyCodexBridgeProjection(t *testing.T) {
 		for _, replayDotted := range []bool{false, true} {
 			for _, marker := range []string{"absent", "null", "empty"} {
 				t.Run(fmt.Sprintf("raw_dotted=%v/replay_dotted=%v/marker=%s", rawDotted, replayDotted, marker), func(t *testing.T) {
-					first := mustJSON(t, map[string]any{"model": "m", "input": []any{"first"}})
-					exceptInput, input, _ := bodyExceptInput(first)
-					raw := map[string]any{"type": "function_call", "id": "fc1", "call_id": "c1", "namespace": codexbridge.Alias, "name": "send_message", "arguments": `{"id":"child","message":"完整任务"}`}
-					if rawDotted {
-						delete(raw, "namespace")
-						raw["name"] = codexbridge.Alias + ".send_message"
-					}
-					if marker == "null" {
-						raw["encrypted_function_args"] = nil
-					}
-					if marker == "empty" {
-						raw["encrypted_function_args"] = []any{}
-					}
-					// Replay exactly the native identity/marker delivered to a Codex client.
-					replay := mustDecode(t, mustJSON(t, raw))
-					replay["name"], replay["namespace"] = "send_message", "collaboration"
-					if replayDotted {
-						delete(replay, "namespace")
-						replay["name"] = "collaboration.send_message"
-					}
-					replay["encrypted_function_args"] = []any{}
-					cont := &wsContinuation{bodyExceptInput: exceptInput, lastInput: input, lastResponseItems: []any{raw}, lastResponseID: "r1", codexBridge: profile}
-					before := string(mustJSON(t, raw))
-					body := mustJSON(t, map[string]any{"model": "m", "input": []any{"first", replay, "new"}})
-					delta, ok := buildDeltaBody(body, cont, profile)
-					if !ok {
-						t.Fatal("client replay did not match raw upstream baseline")
-					}
-					if got := mustDecode(t, delta); got["previous_response_id"] != "r1" || !jsonEqual(got["input"], []any{"new"}) {
-						t.Fatalf("bad delta: %s", delta)
-					}
-					if string(mustJSON(t, raw)) != before {
-						t.Fatal("comparison mutated raw decoded baseline")
-					}
-					// Retained serialized baselines must use the identical projection.
-					cont.size()
-					if _, ok := buildDeltaBody(body, cont, profile); !ok {
-						t.Fatal("serialized baseline did not match")
-					}
-					if _, ok := buildDeltaBody(body, cont); ok {
-						t.Fatal("profile omission accepted a bridged baseline")
-					}
-					for _, field := range []string{"call_id", "arguments", "encrypted_function_args"} {
-						changed := mustDecode(t, mustJSON(t, replay))
-						changed[field] = "different"
-						bad := mustJSON(t, map[string]any{"model": "m", "input": []any{"first", changed, "new"}})
-						if _, ok := buildDeltaBody(bad, cont, profile); ok {
-							t.Fatalf("changed %s matched", field)
-						}
-					}
-					plain := *cont
-					plain.codexBridge = codexbridge.Profile{}
-					if _, ok := buildDeltaBody(body, &plain); ok {
-						t.Fatal("ordinary request used bridge equivalence")
-					}
+					runBuildDeltaBodyCodexBridgeProjectionCase(t, &profile, &rawDotted, &replayDotted, &marker)
 				})
 			}
 		}
@@ -232,8 +199,11 @@ func TestBuildDeltaBodyRejectsCodexBridgeProfileChanges(t *testing.T) {
 	exceptInput, _, _ := bodyExceptInput(body)
 	cont := &wsContinuation{bodyExceptInput: exceptInput, lastInput: []any{"first"}, lastResponseID: "r1", codexBridge: profile}
 	for _, changed := range []codexbridge.Profile{{}, {Version: 1, Tools: codexbridge.ToolSpawnAgent}, {Version: 99}, {Tools: 1}} {
-		if _, ok := buildDeltaBody(body, cont, changed); ok {
-			t.Fatalf("accepted changed profile %#v", changed)
+		{
+			_, ok := buildDeltaBody(body, cont, changed)
+			reportTestFailure(t, ok, func() {
+				t.Fatalf("accepted changed profile %#v", changed)
+			})
 		}
 	}
 }
@@ -241,8 +211,87 @@ func TestBuildDeltaBodyRejectsCodexBridgeProfileChanges(t *testing.T) {
 func mustDecode(t *testing.T, raw []byte) map[string]any {
 	t.Helper()
 	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
-		t.Fatalf("decode: %v", err)
+	{
+		err := json.Unmarshal(raw, &m)
+		reportTestFailure(t, err != nil, func() {
+			t.Fatalf("decode: %v", err)
+		})
 	}
 	return m
+}
+
+// runBuildDeltaBodyCodexBridgeProjectionCase exercises one isolated test phase with the original shared state.
+func runBuildDeltaBodyCodexBridgeProjectionCase(t *testing.T, capturedProfile *codexbridge.Profile, capturedRawDotted *bool, capturedReplayDotted *bool, capturedMarker *string) {
+	t.Helper()
+
+	first := mustJSON(t, map[string]any{"model": "m", "input": []any{"first"}})
+	exceptInput, input, _ := bodyExceptInput(first)
+	raw := map[string]any{"type": "function_call", "id": "fc1", "call_id": "c1", "namespace": codexbridge.Alias, "name": "send_message", "arguments": `{"id":"child","message":"完整任务"}`}
+	if *capturedRawDotted {
+		delete(raw, "namespace")
+		raw["name"] = codexbridge.Alias + ".send_message"
+	}
+	if (*capturedMarker) == "null" {
+		raw["encrypted_function_args"] = nil
+	}
+	if (*capturedMarker) == "empty" {
+		raw["encrypted_function_args"] = []any{}
+	}
+	// Replay exactly the native identity/marker delivered to a Codex client.
+	replay := mustDecode(t, mustJSON(t, raw))
+	replay["name"], replay["namespace"] = "send_message", "collaboration"
+	if *capturedReplayDotted {
+		delete(replay, "namespace")
+		replay["name"] = "collaboration.send_message"
+	}
+	replay["encrypted_function_args"] = []any{}
+	cont := &wsContinuation{bodyExceptInput: exceptInput, lastInput: input, lastResponseItems: []any{raw}, lastResponseID: "r1", codexBridge: (*capturedProfile)}
+	before := string(mustJSON(t, raw))
+	body := mustJSON(t, map[string]any{"model": "m", "input": []any{"first", replay, "new"}})
+	delta, ok := buildDeltaBody(body, cont, (*capturedProfile))
+	reportTestFailure(t, !ok, func() {
+		t.Fatal("client replay did not match raw upstream baseline")
+	})
+	{
+		got := mustDecode(t, delta)
+		reportTestFailure(t, got["previous_response_id"] != "r1" || !jsonEqual(got["input"], []any{"new"}), func() {
+			t.Fatalf("bad delta: %s", delta)
+		})
+	}
+	reportTestFailure(t, string(mustJSON(t, raw)) != before, func() {
+		t.Fatal("comparison mutated raw decoded baseline")
+	})
+	// Retained serialized baselines must use the identical projection.
+	cont.size()
+	{
+		_, ok := buildDeltaBody(body, cont, (*capturedProfile))
+		reportTestFailure(t, !ok, func() {
+			t.Fatal("serialized baseline did not match")
+		})
+	}
+	{
+		_, ok := buildDeltaBody(body, cont)
+		reportTestFailure(t, ok, func() {
+			t.Fatal("profile omission accepted a bridged baseline")
+		})
+	}
+	for _, field := range []string{"call_id", "arguments", "encrypted_function_args"} {
+		changed := mustDecode(t, mustJSON(t, replay))
+		changed[field] = "different"
+		bad := mustJSON(t, map[string]any{"model": "m", "input": []any{"first", changed, "new"}})
+		{
+			_, ok := buildDeltaBody(bad, cont, (*capturedProfile))
+			reportTestFailure(t, ok, func() {
+				t.Fatalf("changed %s matched", field)
+			})
+		}
+	}
+	plain := *cont
+	plain.codexBridge = codexbridge.Profile{}
+	{
+		_, ok := buildDeltaBody(body, &plain)
+		reportTestFailure(t, ok, func() {
+			t.Fatal("ordinary request used bridge equivalence")
+		})
+	}
 }

@@ -13,7 +13,7 @@ const credits = computed(() => props.account.quota?.report?.credits)
 const creditBalance = computed(() => {
 	const balance = credits.value?.balance?.trim()
 	// Avoid Number conversion: credit balances can contain high-precision decimals.
-	if (!balance || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(balance)) return ''
+	if (!balance || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(balance)) { return '' }
 	return /[1-9]/.test(balance.split(/[eE]/)[0] ?? '') ? balance : ''
 })
 const showCredits = computed(() => Boolean(credits.value?.unlimited || creditBalance.value))
@@ -21,8 +21,24 @@ const resetCount = computed(() => props.account.quota?.reset_credits?.available_
 function costFor(window: QuotaWindow) {
 	return props.account.quota?.window_costs?.find(cost => cost.limit_id === window.limit_id && cost.role === window.role)
 }
-function tone(window: QuotaWindow) { return window.limit_reached || window.used_percent >= 100 ? 'danger' : window.used_percent >= 80 ? 'warn' : 'success' }
-function label(window: QuotaWindow) { return window.kind === '5h' ? '5h' : window.kind === '7d' ? '7d' : window.kind }
+function tone(window: QuotaWindow) { return (() => {
+    if (window.limit_reached || window.used_percent >= 100) {
+        return 'danger'
+    }
+    if (window.used_percent >= 80) {
+        return 'warn'
+    }
+    return 'success'
+})() }
+function label(window: QuotaWindow) { return (() => {
+    if (window.kind === '5h') {
+        return '5h'
+    }
+    if (window.kind === '7d') {
+        return '7d'
+    }
+    return window.kind
+})() }
 </script>
 
 <template>
@@ -74,11 +90,11 @@ function label(window: QuotaWindow) { return window.kind === '5h' ? '5h' : windo
 .quota-line { display: flex; justify-content: space-between; gap: 8px; color: var(--color-ink-faint); font-size: 10px; line-height: 1; }
 .quota-line strong { font-family: var(--font-mono); font-size: 11px; font-weight: 700; }
 .quota-track { display: block; height: 4px; margin-top: 5px; overflow: hidden; border-radius: 999px; background: var(--color-surface-3); }
-.quota-track i { display: block; height: 100%; border-radius: inherit; }
+.quota-track i { display: block; height: 100%; border-radius: inherit; background: currentColor; }
 .quota-reset, .quota-muted { color: var(--color-ink-faint); font-size: 10px; }
 .quota-link { min-height: 24px; padding: 3px 4px; font-size: 11px; justify-self: start; }
 .quota-success { color: var(--color-success); }
 .quota-warn { color: var(--color-warn); }
 .quota-danger { color: var(--color-danger); }
-.quota-track i { background: currentColor; }
+
 </style>

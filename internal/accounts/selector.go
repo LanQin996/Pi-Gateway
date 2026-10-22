@@ -86,15 +86,8 @@ func selectAt(candidates []Candidate, strategy Strategy, w SmartWeights, exclude
 	if cursor != nil {
 		position = *cursor
 	}
-	for start := 0; start < len(out); {
-		end := start + 1
-		for end < len(out) && out[end].Account.Weight == out[start].Account.Weight {
-			end++
-		}
-		orderTier(out[start:end], strategy, w, position, now, defaultLimit)
-		start = end
-	}
-	if cursor != nil && (strategy == StrategySmart || strategy == StrategyRoundRobin || !knownStrategy(strategy)) {
+	orderWeightTiers(out, strategy, w, position, now, defaultLimit)
+	if cursor != nil && (advancesCursor(strategy)) {
 		*cursor++
 	}
 	if strategy == StrategySingle {
@@ -118,23 +111,7 @@ func orderTier(out []Candidate, strategy Strategy, w SmartWeights, cursor uint64
 	case StrategyLeastInflight:
 		sort.SliceStable(out, func(i, j int) bool { return out[i].InFlight < out[j].InFlight })
 	case StrategyQuotaResetPriority:
-		sort.SliceStable(out, func(i, j int) bool {
-			a, b := out[i], out[j]
-			if (a.QuotaResetAt <= 0) != (b.QuotaResetAt <= 0) {
-				return a.QuotaResetAt > 0
-			}
-			if a.QuotaResetAt != b.QuotaResetAt {
-				return a.QuotaResetAt < b.QuotaResetAt
-			}
-			au, bu := utilization(a, defaultLimit), utilization(b, defaultLimit)
-			if au != bu {
-				return au < bu
-			}
-			if a.LastStartedAt != b.LastStartedAt {
-				return a.LastStartedAt < b.LastStartedAt
-			}
-			return a.Account.ID < b.Account.ID
-		})
+		orderQuotaResetTier(out, defaultLimit)
 	case StrategySmart:
 		scores := make(map[int64]float64, len(out))
 		for _, c := range out {
@@ -190,4 +167,39 @@ func smartScore(c Candidate, w SmartWeights, now time.Time, defaultLimit int) fl
 		reset = 3600 / (3600 + float64(c.QuotaResetAt-now.UnixMilli())/1000)
 	}
 	return (float64(w.Load)*(1-utilization(c, defaultLimit)) + float64(w.Quota)*clamp(c.QuotaRemainingRank) + float64(w.Health)*(1-clamp(c.FailureRate)) + float64(w.Latency)*latency + float64(w.Reset)*reset + float64(w.Queue)) / 10
+}
+
+func orderQuotaResetTier(out []Candidate, defaultLimit int) {
+	sort.SliceStable(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if (a.QuotaResetAt <= 0) != (b.QuotaResetAt <= 0) {
+			return a.QuotaResetAt > 0
+		}
+		if a.QuotaResetAt != b.QuotaResetAt {
+			return a.QuotaResetAt < b.QuotaResetAt
+		}
+		au, bu := utilization(a, defaultLimit), utilization(b, defaultLimit)
+		if au != bu {
+			return au < bu
+		}
+		if a.LastStartedAt != b.LastStartedAt {
+			return a.LastStartedAt < b.LastStartedAt
+		}
+		return a.Account.ID < b.Account.ID
+	})
+}
+
+func orderWeightTiers(out []Candidate, strategy Strategy, w SmartWeights, cursor uint64, now time.Time, defaultLimit int) {
+	for start := 0; start < len(out); {
+		end := start + 1
+		for end < len(out) && out[end].Account.Weight == out[start].Account.Weight {
+			end++
+		}
+		orderTier(out[start:end], strategy, w, cursor, now, defaultLimit)
+		start = end
+	}
+}
+
+func advancesCursor(strategy Strategy) bool {
+	return strategy == StrategySmart || strategy == StrategyRoundRobin || !knownStrategy(strategy)
 }

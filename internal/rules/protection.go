@@ -97,32 +97,36 @@ func containsProtectedLiteral(v any, phase string) bool {
 }
 func protectedProjection(v any, phase string) map[string]any {
 	out := map[string]any{}
-	var walk func(any, string)
-	walk = func(node any, path string) {
-		if m, ok := object(node); ok {
-			for k, x := range m {
-				p := joinPointer(path, k)
-				if protectedKey(k, phase) || protectedPath(p, phase) {
-					out[p] = x
-					continue
-				}
-				if (phase == PhaseResponseEvent || phase == PhaseResponseBody) && k == "name" {
-					typ, _ := m["type"].(string)
-					if strings.Contains(typ, "call") || strings.Contains(typ, "tool") {
-						out[p] = x
-						continue
-					}
-				}
-				walk(x, p)
-			}
-		} else if arr, ok := node.([]any); ok {
-			for i, x := range arr {
-				walk(x, fmt.Sprintf("%s/%d", path, i))
-			}
+	collectProtectedProjection(v, "", phase, out)
+	return out
+}
+func collectProtectedProjection(node any, path, phase string, out map[string]any) {
+	if m, ok := object(node); ok {
+		collectProtectedObject(m, path, phase, out)
+		return
+	}
+	if arr, ok := node.([]any); ok {
+		for i, x := range arr {
+			collectProtectedProjection(x, fmt.Sprintf("%s/%d", path, i), phase, out)
 		}
 	}
-	walk(v, "")
-	return out
+}
+func collectProtectedObject(m map[string]any, path, phase string, out map[string]any) {
+	for k, x := range m {
+		p := joinPointer(path, k)
+		if protectedKey(k, phase) || protectedPath(p, phase) || protectedToolName(m, k, phase) {
+			out[p] = x
+			continue
+		}
+		collectProtectedProjection(x, p, phase, out)
+	}
+}
+func protectedToolName(m map[string]any, key, phase string) bool {
+	if (phase != PhaseResponseEvent && phase != PhaseResponseBody) || key != "name" {
+		return false
+	}
+	typ, _ := m["type"].(string)
+	return strings.Contains(typ, "call") || strings.Contains(typ, "tool")
 }
 func checkProtected(before, after any, phase string) error {
 	a := protectedProjection(before, phase)

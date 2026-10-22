@@ -27,7 +27,7 @@ const labels = computed(() => locale.value === 'zh-CN'
 					<td class="td numeric"><span class="cost-number">{{ money(row.cost_usd) }}</span></td>
 					<td v-if="showShare && !compact" class="td numeric">{{ percent(row.share) }}</td>
 				</tr>
-				<tr v-if="!rows.length"><td :colspan="compact ? 5 : showShare ? 7 : 6" class="stats-empty" role="status">{{ loading ? t('stats.loading') : t('stats.empty') }}</td></tr>
+				<tr v-if="!rows.length"><td :colspan="(() => { if (compact) { return 5; } if (showShare) { return 7; } return 6; })()" class="stats-empty"><output>{{ loading ? t('stats.loading') : t('stats.empty') }}</output></td></tr>
 			</tbody>
 		</table>
 	</div>

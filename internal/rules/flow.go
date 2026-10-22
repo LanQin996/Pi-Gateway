@@ -1,6 +1,7 @@
 package rules
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -60,86 +61,111 @@ func decodeActions(v any, path string) ([]Action, error) {
 	return out, nil
 }
 
+type flowCompiler struct {
+	action *compiledAction
+	phase  string
+	nodes  *int
+	item   bool
+	depth  int
+}
+
 func compileFlow(a *compiledAction, phase string, nodes *int, item bool, depth int) error {
-	p := a.raw.Params
-	if a.raw.Type == "for_each" && !variableName.MatchString(stringParam(p, "bind")) {
+	if a.raw.Type == "for_each" && !variableName.MatchString(stringParam(a.raw.Params, "bind")) {
 		return invalid(a.path+"/params/bind", "invalid binding name")
 	}
-	compileList := func(v any, path string) ([]compiledAction, error) {
-		raw, err := decodeActions(v, path)
+	compiler := flowCompiler{a, phase, nodes, item, depth}
+	for _, compile := range []func() error{compiler.children, compiler.predicate, compiler.functions, compiler.keep} {
+		if err := compile(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+func (c flowCompiler) list(v any, path string) ([]compiledAction, error) {
+	raw, err := decodeActions(v, path)
+	if err != nil {
+		return nil, err
+	}
+	out := []compiledAction{}
+	for i, action := range raw {
+		*c.nodes++
+		if *c.nodes > MaxConditionNodes {
+			return nil, invalid(path, "maximum flow nodes exceeded")
+		}
+		compiled, err := compileScopedAction(action, fmt.Sprintf("%s/%d", path, i), c.phase, c.nodes, c.item || c.action.raw.Type == "for_each" || c.action.raw.Type == "walk", c.depth+1)
 		if err != nil {
 			return nil, err
 		}
-		out := []compiledAction{}
-		for i, action := range raw {
-			*nodes++
-			if *nodes > MaxConditionNodes {
-				return nil, invalid(path, "maximum flow nodes exceeded")
-			}
-			c, err := compileScopedAction(action, fmt.Sprintf("%s/%d", path, i), phase, nodes, item || a.raw.Type == "for_each" || a.raw.Type == "walk", depth+1)
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, c)
-		}
-		return out, nil
+		out = append(out, compiled)
 	}
+	return out, nil
+}
+func (c flowCompiler) children() error {
+	a := c.action
 	var err error
-	if v, ok := p["steps"]; ok {
-		a.children, err = compileList(v, a.path+"/params/steps")
+	if v, ok := a.raw.Params["steps"]; ok {
+		a.children, err = c.list(v, a.path+"/params/steps")
 		if err != nil {
 			return err
 		}
 	}
-	if a.raw.Type == "if" {
-		a.children, err = compileList(p["then"], a.path+"/params/then")
-		if err != nil {
-			return err
-		}
-		a.otherwise, err = compileList(p["else"], a.path+"/params/else")
-		if err != nil {
-			return err
-		}
+	if a.raw.Type != "if" {
+		return nil
 	}
-	if v, ok := p["predicate"]; ok {
-		c, err := asCondition(v, a.path+"/params/predicate")
-		if err != nil {
-			return err
-		}
-		a.predicate, err = compileCondition(c, a.path+"/params/predicate", phase, item || a.raw.Type == "walk", depth, nodes)
-		if err != nil {
-			return err
-		}
+	a.children, err = c.list(a.raw.Params["then"], a.path+"/params/then")
+	if err != nil {
+		return err
 	}
-	if a.raw.Type == "scope" {
-		m, ok := p["functions"].(map[string]any)
-		if !ok {
-			return invalid(a.path+"/params/functions", "must be an object of step arrays")
-		}
-		a.functions = map[string][]compiledAction{}
-		for name, v := range m {
-			if !variableName.MatchString(name) {
-				return invalid(a.path+"/params/functions", "invalid fragment name")
-			}
-			c, err := compileList(v, joinPointer(a.path+"/params/functions", name))
-			if err != nil {
-				return err
-			}
-			a.functions[name] = c
-		}
+	a.otherwise, err = c.list(a.raw.Params["else"], a.path+"/params/else")
+	return err
+}
+func (c flowCompiler) predicate() error {
+	a := c.action
+	v, ok := a.raw.Params["predicate"]
+	if !ok {
+		return nil
 	}
-	if v, ok := p["keep"]; ok {
-		c, err := asCondition(v, a.path+"/params/keep")
+	raw, err := asCondition(v, a.path+"/params/predicate")
+	if err != nil {
+		return err
+	}
+	a.predicate, err = compileCondition(raw, a.path+"/params/predicate", c.phase, c.item || a.raw.Type == "walk", c.depth, c.nodes)
+	return err
+}
+func (c flowCompiler) functions() error {
+	a := c.action
+	if a.raw.Type != "scope" {
+		return nil
+	}
+	m, ok := a.raw.Params["functions"].(map[string]any)
+	if !ok {
+		return invalid(a.path+functionsParameterPointer, "must be an object of step arrays")
+	}
+	a.functions = map[string][]compiledAction{}
+	for name, v := range m {
+		if !variableName.MatchString(name) {
+			return invalid(a.path+functionsParameterPointer, "invalid fragment name")
+		}
+		body, err := c.list(v, joinPointer(a.path+functionsParameterPointer, name))
 		if err != nil {
 			return err
 		}
-		keep, err := compileCondition(c, a.path+"/params/keep", phase, true, depth, nodes)
-		if err != nil {
-			return err
-		}
-		a.keep = keep
+		a.functions[name] = body
 	}
 	return nil
+}
+func (c flowCompiler) keep() error {
+	a := c.action
+	v, ok := a.raw.Params["keep"]
+	if !ok {
+		return nil
+	}
+	raw, err := asCondition(v, a.path+"/params/keep")
+	if err != nil {
+		return err
+	}
+	a.keep, err = compileCondition(raw, a.path+"/params/keep", c.phase, true, c.depth, c.nodes)
+	return err
 }
 
 func validateCalls(actions []compiledAction, scopes []map[string][]compiledAction, active map[string]bool, depth int) error {
@@ -147,58 +173,61 @@ func validateCalls(actions []compiledAction, scopes []map[string][]compiledActio
 		return invalid("/actions", "maximum fragment depth exceeded")
 	}
 	for _, a := range actions {
-		if a.raw.Type == "scope" {
-			next := append(append([]map[string][]compiledAction{}, scopes...), a.functions)
-			for name, body := range a.functions {
-				key := fmt.Sprintf("%d:%s", len(next)-1, name)
-				active[key] = true
-				err := validateCalls(body, next, active, depth+1)
-				delete(active, key)
-				if err != nil {
-					return err
-				}
-			}
-			if err := validateCalls(a.children, next, active, depth+1); err != nil {
-				return err
-			}
-			continue
-		}
-		if a.raw.Type == "call" {
-			name := stringParam(a.raw.Params, "name")
-			found := false
-			for i := len(scopes) - 1; i >= 0; i-- {
-				if body, ok := scopes[i][name]; ok {
-					found = true
-					key := fmt.Sprintf("%d:%s", i, name)
-					if active[key] {
-						return invalid(a.path, "recursive fragment call")
-					}
-					active[key] = true
-					err := validateCalls(body, scopes[:i+1], active, depth+1)
-					delete(active, key)
-					if err != nil {
-						return err
-					}
-					break
-				}
-			}
-			if !found {
-				return invalid(a.path+"/params/name", "unknown fragment %q", name)
-			}
-		}
-		if err := validateCalls(a.children, scopes, active, depth+1); err != nil {
-			return err
-		}
-		if err := validateCalls(a.otherwise, scopes, active, depth+1); err != nil {
+		if err := validateActionCalls(a, scopes, active, depth); err != nil {
 			return err
 		}
 	}
 	return nil
 }
+func validateActionCalls(a compiledAction, scopes []map[string][]compiledAction, active map[string]bool, depth int) error {
+	if a.raw.Type == "scope" {
+		return validateScopeCalls(a, scopes, active, depth)
+	}
+	if a.raw.Type == "call" {
+		if err := validateFragmentCall(a, scopes, active, depth); err != nil {
+			return err
+		}
+	}
+	if err := validateCalls(a.children, scopes, active, depth+1); err != nil {
+		return err
+	}
+	return validateCalls(a.otherwise, scopes, active, depth+1)
+}
+func validateScopeCalls(a compiledAction, scopes []map[string][]compiledAction, active map[string]bool, depth int) error {
+	next := append(append([]map[string][]compiledAction{}, scopes...), a.functions)
+	for name, body := range a.functions {
+		key := fmt.Sprintf("%d:%s", len(next)-1, name)
+		active[key] = true
+		err := validateCalls(body, next, active, depth+1)
+		delete(active, key)
+		if err != nil {
+			return err
+		}
+	}
+	return validateCalls(a.children, next, active, depth+1)
+}
+func validateFragmentCall(a compiledAction, scopes []map[string][]compiledAction, active map[string]bool, depth int) error {
+	name := stringParam(a.raw.Params, "name")
+	for i := len(scopes) - 1; i >= 0; i-- {
+		body, ok := scopes[i][name]
+		if !ok {
+			continue
+		}
+		key := fmt.Sprintf("%d:%s", i, name)
+		if active[key] {
+			return invalid(a.path, "recursive fragment call")
+		}
+		active[key] = true
+		err := validateCalls(body, scopes[:i+1], active, depth+1)
+		delete(active, key)
+		return err
+	}
+	return invalid(a.path+"/params/name", "unknown fragment %q", name)
+}
 
-func (s *evaluation) runSteps(actions []compiledAction) (terminal, error) {
+func (s *evaluation) runSteps(ctx context.Context, actions []compiledAction) (terminal, error) {
 	for i, a := range actions {
-		if err := s.tick(); err != nil {
+		if err := s.tick(ctx); err != nil {
 			return terminal{}, err
 		}
 		start := time.Now()
@@ -206,32 +235,11 @@ func (s *evaluation) runSteps(actions []compiledAction) (terminal, error) {
 		if s.nestedTraces != nil && s.nestedTraces.canCollect() {
 			before, _ = cloneJSON(s.body)
 		}
-		out, err := a.execute(s)
+		out, err := a.execute(ctx, s)
 		if err == nil {
 			err = ensurePayload(s.body)
 		}
-		if s.nestedTraces != nil && s.traceRule != nil {
-			t := baseTrace(*s.traceRule, s)
-			t.ActionID = a.raw.ID
-			t.ActionType = a.raw.Type
-			t.ActionIndex = i
-			t.ActionPath = a.path
-			t.ItemPath = s.itemPath
-			t.Matched = true
-			t.Status = "no_change"
-			t.DurationNS = time.Since(start).Nanoseconds()
-			if s.nestedTraces.canCollect() {
-				t.Changes, t.OmittedChanges = structuralDiff(before, s.body)
-				if len(t.Changes) > 0 || t.OmittedChanges > 0 {
-					t.Status = "changed"
-				}
-			}
-			if err != nil {
-				t.Status = "error"
-				t.Error = err.Error()
-			}
-			s.nestedTraces.add(t)
-		}
+		s.recordStepTrace(a, i, start, before, err)
 		if err != nil {
 			return terminal{}, prefixError(a.path, err)
 		}
@@ -247,80 +255,101 @@ type runtimeFragment struct {
 	functions map[string]*runtimeFragment
 }
 
-func (a compiledAction) executeFlow(s *evaluation) (terminal, error) {
-	p := a.raw.Params
+func (a compiledAction) executeFlow(ctx context.Context, s *evaluation) (terminal, error) {
 	switch a.raw.Type {
 	case "let":
-		v, err := s.requiredExpression(p["value"])
-		if err == nil {
-			s.vars[stringParam(p, "name")] = v
-		}
-		return terminal{}, err
+		return a.executeFlowLet(ctx, s)
 	case "sequence":
-		return s.runSteps(a.children)
+		return s.runSteps(ctx, a.children)
 	case "if":
-		match, err := a.predicate.matches(s)
-		if err != nil {
-			return terminal{}, err
-		}
-		if match {
-			return s.runSteps(a.children)
-		}
-		return s.runSteps(a.otherwise)
+		return a.executeFlowBranch(ctx, s)
 	case "scope":
-		old := s.functions
-		next := map[string]*runtimeFragment{}
-		for k, v := range old {
-			next[k] = v
-		}
-		for k, v := range a.functions {
-			next[k] = &runtimeFragment{steps: v, functions: next}
-		}
-		oldVars := s.vars
-		s.vars = map[string]any{}
-		for k, v := range oldVars {
-			s.vars[k] = v
-		}
-		defer func() { s.vars = oldVars }()
-		s.functions = next
-		defer func() { s.functions = old }()
-		return s.runSteps(a.children)
+		return a.executeFlowScope(ctx, s)
 	case "call":
-		fragment := s.functions[stringParam(p, "name")]
-		if fragment == nil {
-			return terminal{}, fmt.Errorf("unknown fragment")
-		}
-		old := s.functions
-		s.functions = fragment.functions
-		defer func() { s.functions = old }()
-		return s.runSteps(fragment.steps)
+		return a.executeFlowCall(ctx, s)
 	case "for_each", "walk":
-		path := stringParam(p, "path")
-		v, exists, err := s.selectValue("current", path, "")
-		if err != nil {
-			return terminal{}, err
-		}
-		if !exists {
-			return terminal{}, onMissing(p)
-		}
-		var out terminal
-		if a.raw.Type == "walk" {
-			var keep bool
-			v, keep, out, err = a.walk(s, v, path, 0)
-			if err == nil && !keep {
-				err = fmt.Errorf("cannot delete traversal root")
-			}
-		} else {
-			v, out, err = a.each(s, v, path)
-		}
-		if err == nil {
-			s.body, err = pointerSet(s.body, path, v, false, false)
-		}
-		return out, err
+		return a.executeFlowTraversal(ctx, s)
 	}
 	return terminal{}, fmt.Errorf("unknown flow")
 }
 
+func (a compiledAction) executeFlowLet(ctx context.Context, s *evaluation) (terminal, error) {
+	p := a.raw.Params
+	v, err := s.requiredExpression(ctx, p["value"])
+	if err == nil {
+		s.vars[stringParam(p, "name")] = v
+	}
+	return terminal{}, err
+}
+
+func (a compiledAction) executeFlowBranch(ctx context.Context, s *evaluation) (terminal, error) {
+	match, err := a.predicate.matches(ctx, s)
+	if err != nil {
+		return terminal{}, err
+	}
+	if match {
+		return s.runSteps(ctx, a.children)
+	}
+	return s.runSteps(ctx, a.otherwise)
+}
+
+func (a compiledAction) executeFlowScope(ctx context.Context, s *evaluation) (terminal, error) {
+	old := s.functions
+	next := map[string]*runtimeFragment{}
+	for k, v := range old {
+		next[k] = v
+	}
+	for k, v := range a.functions {
+		next[k] = &runtimeFragment{steps: v, functions: next}
+	}
+	oldVars := s.vars
+	s.vars = map[string]any{}
+	for k, v := range oldVars {
+		s.vars[k] = v
+	}
+	defer func() { s.vars = oldVars }()
+	s.functions = next
+	defer func() { s.functions = old }()
+	return s.runSteps(ctx, a.children)
+}
+
+func (a compiledAction) executeFlowCall(ctx context.Context, s *evaluation) (terminal, error) {
+	p := a.raw.Params
+	fragment := s.functions[stringParam(p, "name")]
+	if fragment == nil {
+		return terminal{}, fmt.Errorf("unknown fragment")
+	}
+	old := s.functions
+	s.functions = fragment.functions
+	defer func() { s.functions = old }()
+	return s.runSteps(ctx, fragment.steps)
+}
+
+func (a compiledAction) executeFlowTraversal(ctx context.Context, s *evaluation) (terminal, error) {
+	p := a.raw.Params
+	path := stringParam(p, "path")
+	v, exists, err := s.selectValue("current", path, "")
+	if err != nil {
+		return terminal{}, err
+	}
+	if !exists {
+		return terminal{}, onMissing(p)
+	}
+	var out terminal
+	if a.raw.Type == "walk" {
+		var keep bool
+		v, keep, out, err = a.walk(ctx, s, v, path, 0)
+		if err == nil && !keep {
+			err = fmt.Errorf("cannot delete traversal root")
+		}
+	} else {
+		v, out, err = a.each(ctx, s, v, path)
+	}
+	if err == nil {
+		s.body, err = pointerSet(s.body, path, v, false, false)
+	}
+	return out, err
+}
 func scoped(s *evaluation, v any, path string, index int, key, bind string) evaluation {
 	n := *s
 	n.body = v
@@ -338,111 +367,160 @@ func scoped(s *evaluation, v any, path string, index int, key, bind string) eval
 	}
 	return n
 }
-func (a compiledAction) each(s *evaluation, v any, path string) (any, terminal, error) {
+func (a compiledAction) each(ctx context.Context, s *evaluation, v any, path string) (any, terminal, error) {
 	if arr, ok := v.([]any); ok {
-		out := []any{}
-		for i, item := range arr {
-			if err := s.tick(); err != nil {
-				return nil, terminal{}, err
-			}
-			n := scoped(s, item, fmt.Sprintf("%s/%d", path, i), i, "", stringParam(a.raw.Params, "bind"))
-			t, err := n.runSteps(a.children)
-			if err != nil {
-				return nil, t, err
-			}
-			keep, err := a.keep.matches(&n)
-			if err != nil {
-				return nil, t, err
-			}
-			if keep {
-				out = append(out, n.body)
-			}
-			if t.blocked || t.dropped {
-				return nil, t, fmt.Errorf("terminal result is not allowed inside traversal")
-			}
-		}
-		return out, terminal{}, nil
+		return a.eachArray(ctx, s, arr, path)
 	}
 	if _, ok := object(v); ok {
-		out := map[string]any{}
-		for i, k := range keys(v) {
-			if err := s.tick(); err != nil {
-				return nil, terminal{}, err
-			}
-			item, _ := objGet(v, k)
-			n := scoped(s, item, joinPointer(path, k), i, k, stringParam(a.raw.Params, "bind"))
-			t, err := n.runSteps(a.children)
-			if err != nil {
-				return nil, t, err
-			}
-			keep, err := a.keep.matches(&n)
-			if err != nil {
-				return nil, t, err
-			}
-			if keep {
-				out[k] = n.body
-			}
-			if t.blocked || t.dropped {
-				return nil, t, fmt.Errorf("terminal result is not allowed inside traversal")
-			}
-		}
-		return out, terminal{}, nil
+		return a.eachObject(ctx, s, v, path)
 	}
 	return nil, terminal{}, fmt.Errorf("for_each target must be array or object")
 }
-func (a compiledAction) walk(s *evaluation, v any, path string, depth int) (any, bool, terminal, error) {
+func (a compiledAction) eachArray(ctx context.Context, s *evaluation, arr []any, path string) (any, terminal, error) {
+	out := []any{}
+	for i, item := range arr {
+		if err := s.tick(ctx); err != nil {
+			return nil, terminal{}, err
+		}
+		n := scoped(s, item, fmt.Sprintf("%s/%d", path, i), i, "", stringParam(a.raw.Params, "bind"))
+		keep, t, err := a.runEachItem(ctx, &n)
+		if err != nil {
+			return nil, t, err
+		}
+		if keep {
+			out = append(out, n.body)
+		}
+	}
+	return out, terminal{}, nil
+}
+func (a compiledAction) eachObject(ctx context.Context, s *evaluation, v any, path string) (any, terminal, error) {
+	out := map[string]any{}
+	for i, k := range keys(v) {
+		if err := s.tick(ctx); err != nil {
+			return nil, terminal{}, err
+		}
+		item, _ := objGet(v, k)
+		n := scoped(s, item, joinPointer(path, k), i, k, stringParam(a.raw.Params, "bind"))
+		keep, t, err := a.runEachItem(ctx, &n)
+		if err != nil {
+			return nil, t, err
+		}
+		if keep {
+			out[k] = n.body
+		}
+	}
+	return out, terminal{}, nil
+}
+func (a compiledAction) runEachItem(ctx context.Context, n *evaluation) (bool, terminal, error) {
+	t, err := n.runSteps(ctx, a.children)
+	if err != nil {
+		return false, t, err
+	}
+	keep, err := a.keep.matches(ctx, n)
+	if err != nil {
+		return false, t, err
+	}
+	if t.blocked || t.dropped {
+		return false, t, fmt.Errorf("terminal result is not allowed inside traversal")
+	}
+	return keep, t, nil
+}
+func (a compiledAction) walk(ctx context.Context, s *evaluation, v any, path string, depth int) (any, bool, terminal, error) {
 	if depth > MaxDepth {
 		return nil, false, terminal{}, fmt.Errorf("maximum traversal depth exceeded")
 	}
-	if err := s.tick(); err != nil {
+	if err := s.tick(ctx); err != nil {
 		return nil, false, terminal{}, err
 	}
 	original, err := cloneJSON(v)
 	if err != nil {
 		return nil, false, terminal{}, err
 	}
-	if arr, ok := v.([]any); ok {
-		out := []any{}
-		for i, item := range arr {
-			next, keep, t, err := a.walk(s, item, fmt.Sprintf("%s/%d", path, i), depth+1)
-			if err != nil {
-				return nil, false, t, err
-			}
-			if keep {
-				out = append(out, next)
-			}
-		}
-		v = out
-	} else if _, ok := object(v); ok {
-		for _, k := range keys(v) {
-			item, _ := objGet(v, k)
-			next, keep, t, err := a.walk(s, item, joinPointer(path, k), depth+1)
-			if err != nil {
-				return nil, false, t, err
-			}
-			if keep {
-				objSet(v, k, next)
-			} else {
-				objDelete(v, k)
-			}
-		}
+	v, _, nestedTerminal, err := a.walkChildren(ctx, s, v, path, depth)
+	if err != nil {
+		return nil, false, nestedTerminal, err
 	}
 	n := scoped(s, v, path, 0, "", "")
 	n.original, n.item = original, original
-	match, err := a.predicate.matches(&n)
+	match, err := a.predicate.matches(ctx, &n)
 	if err != nil {
 		return nil, false, terminal{}, err
 	}
 	if !match {
 		return v, true, terminal{}, nil
 	}
-	t, err := n.runSteps(a.children)
+	t, err := n.runSteps(ctx, a.children)
 	if err != nil {
 		return nil, false, t, err
 	}
 	if t.blocked || t.dropped {
 		return nil, false, t, fmt.Errorf("terminal result is not allowed inside traversal")
 	}
-	keep, err := a.keep.matches(&n)
+	keep, err := a.keep.matches(ctx, &n)
 	return n.body, keep, t, err
+}
+
+func (a compiledAction) walkChildren(ctx context.Context, s *evaluation, v any, path string, depth int) (any, bool, terminal, error) {
+	if arr, ok := v.([]any); ok {
+		return a.walkArray(ctx, s, arr, path, depth)
+	}
+	if _, ok := object(v); ok {
+		return a.walkObject(ctx, s, v, path, depth)
+	}
+	return v, true, terminal{}, nil
+}
+func (a compiledAction) walkArray(ctx context.Context, s *evaluation, arr []any, path string, depth int) (any, bool, terminal, error) {
+	out := []any{}
+	for i, item := range arr {
+		next, keep, t, err := a.walk(ctx, s, item, fmt.Sprintf("%s/%d", path, i), depth+1)
+		if err != nil {
+			return nil, false, t, err
+		}
+		if keep {
+			out = append(out, next)
+		}
+	}
+	return out, true, terminal{}, nil
+
+}
+func (a compiledAction) walkObject(ctx context.Context, s *evaluation, v any, path string, depth int) (any, bool, terminal, error) {
+	for _, k := range keys(v) {
+		item, _ := objGet(v, k)
+		next, keep, t, err := a.walk(ctx, s, item, joinPointer(path, k), depth+1)
+		if err != nil {
+			return nil, false, t, err
+		}
+		if keep {
+			objSet(v, k, next)
+		} else {
+			objDelete(v, k)
+		}
+	}
+	return v, true, terminal{}, nil
+}
+
+func (s *evaluation) recordStepTrace(a compiledAction, i int, start time.Time, before any, err error) {
+	if s.nestedTraces == nil || s.traceRule == nil {
+		return
+	}
+	t := baseTrace(*s.traceRule, s)
+	t.ActionID = a.raw.ID
+	t.ActionType = a.raw.Type
+	t.ActionIndex = i
+	t.ActionPath = a.path
+	t.ItemPath = s.itemPath
+	t.Matched = true
+	t.Status = "no_change"
+	t.DurationNS = time.Since(start).Nanoseconds()
+	if s.nestedTraces.canCollect() {
+		t.Changes, t.OmittedChanges = structuralDiff(before, s.body)
+		if len(t.Changes) > 0 || t.OmittedChanges > 0 {
+			t.Status = "changed"
+		}
+	}
+	if err != nil {
+		t.Status = "error"
+		t.Error = err.Error()
+	}
+	s.nestedTraces.add(t)
 }

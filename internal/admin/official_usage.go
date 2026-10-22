@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"net/http"
 	"sort"
 	"strconv"
@@ -53,31 +54,10 @@ func (s *Server) handleOfficialUsage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	items := []store.OfficialUsageDay{}
-	states := []store.OfficialUsageSync{}
-	seen := map[string]bool{}
-	for _, a := range accounts {
-		key := store.OfficialUsageKey(a)
-		if !a.CodexLinked() || a.CodexAccountID == "" || (id != 0 && a.ID != id) || seen[key] {
-			continue
-		}
-		seen[key] = true
-		rows, err := s.store.ListOfficialUsage(r.Context(), key, start, end)
-		if err != nil {
-			writeErr(w, 500, err.Error())
-			return
-		}
-		for i := range rows {
-			rows[i].AccountID = a.ID
-			rows[i].WorkspaceID = a.CodexAccountID
-		}
-		state, err := s.store.OfficialUsageSyncFor(r.Context(), key)
-		if err != nil {
-			writeErr(w, 500, err.Error())
-			return
-		}
-		items = append(items, rows...)
-		states = append(states, state)
+	items, states, err := s.loadOfficialUsage(r.Context(), accounts, id, start, end)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
 	}
 	sort.Slice(items, func(i, j int) bool {
 		if items[i].Day == items[j].Day {
@@ -139,4 +119,33 @@ func (s *Server) handleRefreshOfficialUsage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	writeJSON(w, 200, map[string]any{"sync": state, "error": errorString(err)})
+}
+
+func (s *Server) loadOfficialUsage(ctx context.Context, accounts []*store.Account, id int64, start, end string) ([]store.OfficialUsageDay, []store.OfficialUsageSync, error) {
+	items := []store.OfficialUsageDay{}
+	states := []store.OfficialUsageSync{}
+	seen := map[string]bool{}
+	for _, a := range accounts {
+		key := store.OfficialUsageKey(a)
+		if !a.CodexLinked() || a.CodexAccountID == "" || (id != 0 && a.ID != id) || seen[key] {
+			continue
+		}
+		seen[key] = true
+		rows, err := s.store.ListOfficialUsage(ctx, key, start, end)
+		if err != nil {
+			return nil, nil, err
+		}
+		for i := range rows {
+			rows[i].AccountID = a.ID
+			rows[i].WorkspaceID = a.CodexAccountID
+		}
+		state, err := s.store.OfficialUsageSyncFor(ctx, key)
+		if err != nil {
+			return nil, nil, err
+		}
+		items = append(items, rows...)
+		states = append(states, state)
+	}
+
+	return items, states, nil
 }

@@ -145,60 +145,17 @@ func (c *Client) streamSummaryCompact(ctx context.Context, req *Request, onEvent
 	summaryReq.Compact, summaryReq.CompactDirect = false, false
 	summaryReq.Body = body
 	summaryReq.PreviousResponseID, summaryReq.Continuation = "", nil
-	if req.Sink != nil {
-		eventType := "compaction_model_summary"
-		if req.CompactionMode != "on" {
-			eventType = "compaction_summary_fallback"
-		}
-		meta := map[string]any{"mode": "model_summary", "model": model}
-		raw, _ := json.Marshal(meta)
-		req.Sink.OnFrame("out", "transport", eventType, raw, meta)
-	}
-	var terminal map[string]any
-	streamedText := make(map[int]string)
-	streamedBytes := 0
-	result, err := c.streamSSE(ctx, &summaryReq, func(event *Event) error {
-		if event.Type == "response.output_item.done" {
-			item, _ := event.Data["item"].(map[string]any)
-			index := intValue(event.Data["output_index"])
-			text := summaryMessageText(item)
-			streamedBytes += len(text) - len(streamedText[index])
-			if streamedBytes > 1<<20 {
-				return fmt.Errorf("upstream: summary compaction exceeds byte limit")
-			}
-			streamedText[index] = text
-		}
-		if IsTerminal(event.Type) {
-			terminal, _ = event.Data["response"].(map[string]any)
-		}
-		return nil // Model summary tokens must never become the client's task answer.
-	})
+	observeSummaryRequest(req, model)
+	collector := &summaryCollector{streamedText: make(map[int]string)}
+	result, err := c.streamSSE(ctx, &summaryReq, collector.onEvent)
+	terminal, streamedText := collector.terminal, collector.streamedText
 	if err != nil {
 		return result, err
 	}
 	if terminal == nil || terminal["status"] != "completed" {
 		return result, fmt.Errorf("upstream: summary compaction did not complete")
 	}
-	var summary strings.Builder
-	output, _ := terminal["output"].([]any)
-	for _, raw := range output {
-		item, _ := raw.(map[string]any)
-		summary.WriteString(summaryMessageText(item))
-	}
-	value := strings.TrimSpace(summary.String())
-	if value == "" {
-		// Some upstreams omit output from the completed response even though
-		// completed message items were delivered earlier in the SSE stream.
-		indices := make([]int, 0, len(streamedText))
-		for index := range streamedText {
-			indices = append(indices, index)
-		}
-		sort.Ints(indices)
-		for _, index := range indices {
-			summary.WriteString(streamedText[index])
-		}
-		value = strings.TrimSpace(summary.String())
-	}
+	value := completedSummaryText(terminal, streamedText)
 	if value == "" {
 		return result, fmt.Errorf("upstream: summary compaction returned no text")
 	}
@@ -231,4 +188,63 @@ func summaryMessageText(item map[string]any) string {
 		}
 	}
 	return text.String()
+}
+
+type summaryCollector struct {
+	terminal      map[string]any
+	streamedText  map[int]string
+	streamedBytes int
+}
+
+func (collector *summaryCollector) onEvent(event *Event) error {
+	if event.Type == "response.output_item.done" {
+		item, _ := event.Data["item"].(map[string]any)
+		index := intValue(event.Data["output_index"])
+		text := summaryMessageText(item)
+		collector.streamedBytes += len(text) - len(collector.streamedText[index])
+		if collector.streamedBytes > 1<<20 {
+			return fmt.Errorf("upstream: summary compaction exceeds byte limit")
+		}
+		collector.streamedText[index] = text
+	}
+	if IsTerminal(event.Type) {
+		collector.terminal, _ = event.Data["response"].(map[string]any)
+	}
+	return nil // Model summary tokens must never become the client's task answer.
+}
+
+func completedSummaryText(terminal map[string]any, streamedText map[int]string) string {
+	var summary strings.Builder
+	output, _ := terminal["output"].([]any)
+	for _, raw := range output {
+		item, _ := raw.(map[string]any)
+		summary.WriteString(summaryMessageText(item))
+	}
+	value := strings.TrimSpace(summary.String())
+	if value == "" {
+		// Some upstreams omit output from the completed response even though
+		// completed message items were delivered earlier in the SSE stream.
+		indices := make([]int, 0, len(streamedText))
+		for index := range streamedText {
+			indices = append(indices, index)
+		}
+		sort.Ints(indices)
+		for _, index := range indices {
+			summary.WriteString(streamedText[index])
+		}
+		value = strings.TrimSpace(summary.String())
+	}
+	return value
+}
+
+func observeSummaryRequest(req *Request, model string) {
+	if req.Sink != nil {
+		eventType := "compaction_model_summary"
+		if req.CompactionMode != "on" {
+			eventType = "compaction_summary_fallback"
+		}
+		meta := map[string]any{"mode": "model_summary", "model": model}
+		raw, _ := json.Marshal(meta)
+		req.Sink.OnFrame("out", "transport", eventType, raw, meta)
+	}
 }

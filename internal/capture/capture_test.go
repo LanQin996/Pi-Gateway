@@ -239,19 +239,22 @@ func TestRecorderParsedFrameChecksRawSizeBeforeMarshal(t *testing.T) {
 			parsed := map[string]any{"payload": marshalProbe{calls: &marshalCalls}}
 			rec.OnFrame("in", "ws_frame", tc.eventType, tc.raw, parsed)
 			got := rec.Finalize(store.OutcomeOK, "")
-			if calls := atomic.LoadInt32(&marshalCalls); calls != tc.wantCalls {
-				t.Fatalf("parsed payload marshal calls = %d, want %d", calls, tc.wantCalls)
+			{
+				calls := atomic.LoadInt32(&marshalCalls)
+				reportTestFailure(t, calls != tc.wantCalls, func() {
+					t.Fatalf("parsed payload marshal calls = %d, want %d", calls, tc.wantCalls)
+				})
 			}
-			if got.Truncated != tc.truncated {
+			reportTestFailure(t, got.Truncated != tc.truncated, func() {
 				t.Fatalf("truncated = %v, want %v", got.Truncated, tc.truncated)
-			}
+			})
 			frame := got.ResponseFrames[0]
-			if tc.wantCalls == 0 && (frame.Data != nil || frame.Text != tc.wantText) {
+			reportTestFailure(t, tc.wantCalls == 0 && (frame.Data != nil || frame.Text != tc.wantText), func() {
 				t.Fatalf("raw fallback = %#v, want text %q without parsed data", frame, tc.wantText)
-			}
-			if tc.wantCalls == 1 && frameDataString(frame) != `{"payload":"encoded"}` {
+			})
+			reportTestFailure(t, tc.wantCalls == 1 && frameDataString(frame) != `{"payload":"encoded"}`, func() {
 				t.Fatalf("fitting parsed payload = %q", frameDataString(frame))
-			}
+			})
 		})
 	}
 }
@@ -372,5 +375,28 @@ func TestRecorderBudgetExhaustedLargeFrames(t *testing.T) {
 		if frame.Data != nil || frame.Text != "" {
 			t.Fatalf("large frame %d stored payload after exhaustion: %#v", i+1, frame)
 		}
+	}
+}
+
+func TestSSEFramePrefixMatchesAllBoundaries(t *testing.T) {
+	for _, raw := range []string{"", "hello", "a\nb", "a\r\nb\r", "\n\r\n", "你好\nworld"} {
+		full := formatSSEFrame([]byte(raw))
+		for limit := 0; limit <= len(full)+2; limit++ {
+			got := formatSSEFramePrefix([]byte(raw), limit)
+			want := full[:min(len(full), limit)]
+			reportTestFailure(t, string(got) != string(want), func() {
+				t.Fatalf("prefix raw=%q limit=%d got=%q want=%q", raw, limit, got, want)
+			})
+		}
+	}
+}
+
+func TestSSELineEndRespectsScanBudget(t *testing.T) {
+	raw := []byte(strings.Repeat("x", 1<<20) + "\n")
+	if got := sseLineEnd(raw, 3, 5); got != 8 {
+		t.Fatalf("scan ended at %d, want budget boundary 8", got)
+	}
+	if got := formatSSEFramePrefix(raw, 9); string(got) != "data: xxx" {
+		t.Fatalf("bounded long-line prefix = %q", got)
 	}
 }

@@ -27,7 +27,7 @@ const disabledModels = computed(() => new Set([...(props.account.disabled_models
 const models = computed(() => {
 	const values = catalogModels.value.map(item => ({ ...item, missing: false }))
 	const ids = new Set(values.map(item => item.id))
-	for (const id of disabledModels.value) if (!ids.has(id)) values.push({ id, name: id, missing: true, sources: [] })
+	for (const id of disabledModels.value) if (!ids.has(id)) { values.push({ id, name: id, missing: true, sources: [] }) }
 	return values
 })
 const selectedModel = computed(() => catalogModels.value.find(item => item.id === model.value))
@@ -41,12 +41,17 @@ const formattedUpstreamBody = computed(() => {
 })
 const upstreamBody = computed(() => formattedUpstreamBody.value.slice(0, 20000))
 const errorBodyTruncated = computed(() => Boolean(result.value?.upstream_body_truncated || formattedUpstreamBody.value.length > 20000))
-const protocol = computed(() => props.account.upstream_protocol ? transportLabel(props.account.upstream_protocol) : c('protocolDefault', { value: props.settings?.upstream_transport ? transportLabel(props.settings.upstream_transport) : c('settingsFailed') }))
+const protocol = computed(() => (() => {
+    if (props.account.upstream_protocol) {
+        return transportLabel(props.account.upstream_protocol)
+    }
+    return c('protocolDefault', { value: props.settings?.upstream_transport ? transportLabel(props.settings.upstream_transport) : c('settingsFailed') })
+})())
 function reason(id: string) {
 	const reasons: string[] = []
-	if (props.account.disabled_models?.includes(id)) reasons.push(c('blockedLocal'))
+	if (props.account.disabled_models?.includes(id)) { reasons.push(c('blockedLocal')) }
 	const groups = inheritedByModel.value.get(id)
-	if (groups?.length) reasons.push(c('blockedGroups', { groups: groups.join('、') }))
+	if (groups?.length) { reasons.push(c('blockedGroups', { groups: groups.join('、') })) }
 	return reasons.join('；')
 }
 function modelLabel(id: string) {
@@ -55,17 +60,17 @@ function modelLabel(id: string) {
 }
 function duration(value: number | null | undefined) { return value === null || value === undefined ? c('unknown') : `${value} ms` }
 function isTestResult(value: unknown): value is AccountModelTestResult {
-	if (!value || typeof value !== 'object') return false
+	if (!value || typeof value !== 'object') { return false }
 	const candidate = value as Partial<AccountModelTestResult>
 	return typeof candidate.ok === 'boolean' && typeof candidate.model === 'string' && typeof candidate.transport === 'string'
 		&& typeof candidate.output === 'string' && typeof candidate.latency_ms === 'number'
 		&& (candidate.first_token_ms === null || typeof candidate.first_token_ms === 'number')
 }
 watch(catalogModels, values => {
-	if (!values.some(item => item.id === model.value)) model.value = ''
+	if (!values.some(item => item.id === model.value)) { model.value = '' }
 })
 async function send() {
-	if (!canSend.value) return
+	if (!canSend.value) { return }
 	const accountId = props.account.id
 	const controller = new AbortController()
 	testController = controller
@@ -75,12 +80,12 @@ async function send() {
 	cancelled.value = false
 	try {
 		const next = await api.testAccountModel(accountId, { model: model.value, message: message.value }, controller.signal)
-		if (controller.signal.aborted || testController !== controller) return
+		if (controller.signal.aborted || testController !== controller) { return }
 		result.value = next
-		if (!next.ok) error.value = next.error || c('testFailed')
+		if (!next.ok) { error.value = next.error || c('testFailed') }
 	} catch (err) {
 		if (!controller.signal.aborted && testController === controller) {
-			if (err instanceof ApiError && isTestResult(err.payload)) result.value = { ...err.payload, ok: false }
+			if (err instanceof ApiError && isTestResult(err.payload)) { result.value = { ...err.payload, ok: false } }
 			error.value = err instanceof Error ? err.message : c('requestFailed')
 		}
 	} finally {
@@ -110,14 +115,14 @@ onBeforeUnmount(abort)
 					<span class="label">{{ c('model') }}</span>
 					<select id="account-test-model" v-model="model" class="input" :disabled="sending || reading || refreshing || !models.length">
 						<option value="" disabled>{{ c('chooseModel') }}</option>
-						<option v-for="item in models" :key="item.id" :value="item.id" :disabled="item.missing || disabledModels.has(item.id)">{{ item.name }}{{ item.name !== item.id ? ` · ${item.id}` : '' }}{{ !item.missing ? ` · ${item.source === 'manual' ? c('manualModel') : modelOriginNames(item) || c('upstreamModel')}` : '' }}{{ reason(item.id) ? ` · ${reason(item.id)}` : '' }}</option>
+						<option v-for="item in models" :key="item.id" :value="item.id" :disabled="item.missing || disabledModels.has(item.id)">{{ item.name }}{{ item.name !== item.id ? ` · ${item.id}` : '' }}{{ (() => { if (!item.missing) { return ` · ${item.source === 'manual' ? c('manualModel') : modelOriginNames(item) || c('upstreamModel')}`; } return ''; })() }}{{ reason(item.id) ? ` · ${reason(item.id)}` : '' }}</option>
 					</select>
 					<small v-if="selectedModel?.description">{{ selectedModel.description }}</small>
 					<small v-if="selectedModel">{{ selectedModel.source === 'manual' ? c('manualModel') : modelOriginNames(selectedModel) || c('upstreamModel') }}</small>
 				</label>
 				<button type="button" class="btn" :disabled="sending || reading || refreshing" @click="refresh"><RefreshCw :size="14" :class="{ 'animate-spin': refreshing }" />{{ refreshing ? c('fetchingModels') : c('fetchModels') }}</button>
 			</div>
-			<p v-if="reading" class="control-hint" role="status">{{ c('loadingModels') }}</p>
+			<output v-if="reading" class="control-hint" >{{ c('loadingModels') }}</output>
 			<p v-else-if="!catalogModels.length" class="control-hint">{{ c('emptyCatalog') }}</p>
 			<p v-if="selectedCatalog" class="control-hint">{{ selectedCatalog.fetched_at ? c('cacheAt', { time: formatTime(selectedCatalog.fetched_at) }) : c('neverFetched') }}</p>
 			<ModelCatalogSourceStatus :account="account" :catalog="selectedCatalog" />
@@ -131,11 +136,11 @@ onBeforeUnmount(abort)
 			<p v-if="!message.trim()" class="control-hint">{{ c('requiredMessage') }}</p>
 			<p class="quota-warning">{{ c('quotaWarning') }}</p>
 			<p v-if="error" class="notice notice-error" role="alert">{{ error }}</p>
-			<p v-if="cancelled" class="notice notice-warning" role="status">{{ c('testCancelled') }}</p>
+			<output v-if="cancelled" class="notice notice-warning" >{{ c('testCancelled') }}</output>
 			<section v-if="result" class="result-card" :class="result.ok ? 'result-ok' : 'result-failed'" aria-live="polite">
 				<strong>{{ result.ok ? c('testSucceeded') : c('testFailed') }}</strong>
 				<div class="result-facts"><span>{{ c('actualModel') }}: {{ modelLabel(result.model) }}</span><span>{{ c('actualProtocol') }}: {{ result.transport ? transportLabel(result.transport) : c('unknown') }}</span><span>{{ c('duration') }}: {{ duration(result.latency_ms) }}</span><span>{{ c('firstToken') }}: {{ duration(result.first_token_ms) }}</span></div>
-				<label class="control-hint">{{ c('output') }}</label><pre v-if="output" class="result-output">{{ output }}</pre><p v-else class="control-hint">{{ c('noOutput') }}</p><small v-if="result.output?.length > 20000" class="control-hint">{{ c('outputTruncated') }}</small>
+				<span class="control-hint">{{ c('output') }}</span><pre v-if="output" class="result-output">{{ output }}</pre><p v-else class="control-hint">{{ c('noOutput') }}</p><small v-if="result.output?.length > 20000" class="control-hint">{{ c('outputTruncated') }}</small>
 				<section v-if="!result.ok" class="upstream-error-details" :aria-label="c('errorDetails')">
 					<strong>{{ c('errorDetails') }}</strong>
 					<div class="result-facts"><span v-if="result.upstream_status">{{ c('upstreamStatus') }}: {{ result.upstream_status }}</span><span v-if="result.upstream_event">{{ c('upstreamEvent') }}: {{ result.upstream_event }}</span></div>
