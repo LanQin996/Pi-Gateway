@@ -142,6 +142,7 @@ func TestCodexBridgeRejectsOldCipherBeforeUpstream(t *testing.T) {
 	for _, downstream := range []string{"http", "ws"} {
 		t.Run(downstream, func(t *testing.T) {
 			h, _, calls := unifiedHarness(t, "sse", bridgeTestEvents(t))
+			h.baseConfig.Upstream.CodexHistoryRecovery = false
 			request := bridgeTestRequest()
 			message := request["input"].([]any)[1].(map[string]any)
 			message["content"] = []any{map[string]any{"type": "encrypted_content", "encrypted_content": "private-cipher-content"}}

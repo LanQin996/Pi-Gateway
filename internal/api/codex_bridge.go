@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	"pi-gateway/internal/codexbridge"
 	"pi-gateway/internal/piwire"
@@ -53,11 +54,31 @@ func (s *Server) prepareCodexBridge(p *prepared) *apiError {
 	if !p.CodexBridge.Enabled() {
 		return nil
 	}
-	body, changed, err := codexbridge.Forward(bridgeObject(p.Built.Body), p.CodexBridge)
+	body := bridgeObject(p.Built.Body)
+	recovered := false
+	if s.cfg.Upstream.CodexHistoryRecovery {
+		p.CodexRecovery = s.codexRecovery
+		p.CodexRecoveryScope = codexRecoveryScope(p)
+		var stats codexbridge.RecoveryStats
+		var err error
+		body, stats, err = p.CodexRecovery.Recover(body, p.CodexBridge, p.CodexRecoveryScope)
+		if err != nil {
+			return codexBridgeAPIError(err, http.StatusBadRequest)
+		}
+		recovered = stats.Recovered+stats.Unavailable > 0
+		if recovered {
+			p.recordCodexRecovery(stats)
+		}
+	}
+	history := body
+	body, changed, err := codexbridge.Forward(body, p.CodexBridge)
 	if err != nil {
 		return codexBridgeAPIError(err, http.StatusBadRequest)
 	}
-	if !changed {
+	// Recovery is copy-on-write too; Forward may be unchanged for an alias-only
+	// replay even though its encrypted input was repaired above.
+	if !changed && !recovered {
+		p.CodexRecovery.Remember(history, p.CodexBridge, p.CodexRecoveryScope)
 		return nil
 	}
 	ordered, err := ruleOrderedBody(body, p.Built.Body)
@@ -69,8 +90,46 @@ func (s *Server) prepareCodexBridge(p *prepared) *apiError {
 		return ruleAPIError("could not serialize Codex compatibility request")
 	}
 	p.Built.Body, p.Built.JSON = ordered, raw
+	p.CodexRecovery.Remember(history, p.CodexBridge, p.CodexRecoveryScope)
 	p.recordCodexBridge("request", "", rules.PhaseRequest)
 	return nil
+}
+
+// Use the full explicit hint, not a truncated wire key or a shared default.
+// No hint means no cross-request plaintext caching.
+func codexRecoveryScope(p *prepared) string {
+	if p.Key == nil {
+		return ""
+	}
+	hint, _ := p.ClientBody["prompt_cache_key"].(string)
+	if strings.TrimSpace(hint) == "" {
+		for _, name := range []string{"session-id", "session_id", "x-session-id"} {
+			if value := p.ClientHeaders.Get(name); strings.TrimSpace(value) != "" {
+				hint = value
+				break
+			}
+		}
+	}
+	if strings.TrimSpace(hint) == "" {
+		return ""
+	}
+	// Policy publication invalidates older plaintext, so recovery cannot undo a
+	// newly introduced request/response redaction rule.
+	raw, _ := json.Marshal([]any{p.Key.ID, hint, p.RuleVersion})
+	return string(raw)
+}
+
+func (p *prepared) recordCodexRecovery(stats codexbridge.RecoveryStats) {
+	if p.Recorder == nil {
+		return
+	}
+	p.Recorder.OnRuleTrace(p.RuleVersion, map[string]any{
+		"source_kind": "gateway", "rule_id": "gateway:codex_history_recovery",
+		"rule_name": "Codex encrypted history recovery", "phase": rules.PhaseRequest,
+		"status": "changed", "matched": true, "action_type": "protocol_recovery",
+		"action_id": "codex_history_recovery", "action_index": 0,
+		"recovered_items": stats.Recovered, "unavailable_items": stats.Unavailable,
+	})
 }
 
 func codexBridgeAPIError(err error, status int) *apiError {

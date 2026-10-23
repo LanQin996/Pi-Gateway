@@ -81,10 +81,17 @@ func (s *Server) streamWith429RetryWindow(ctx context.Context, p *prepared, req 
 			defer cancelWait()
 		}
 		recordErr := s.recordRetryAttempt(ctx, p, err, status, message, now)
+		// Stream returns nil only after the terminal event callback succeeds.
+		// A client may close immediately after that event is flushed, including
+		// while we persist the account result. Do not turn completed delivery
+		// into a cancellation or append an error after the terminal event.
+		if err == nil {
+			return result, delivery.finish(nil)
+		}
 		if ctx.Err() != nil {
 			return result, ctx.Err()
 		}
-		if err == nil || status != 429 || !mayRetry || delivery.delivered || (recordErr != nil && !maySwitch) {
+		if status != 429 || !mayRetry || delivery.delivered || (recordErr != nil && !maySwitch) {
 			return result, delivery.finish(err)
 		}
 		next, release, acquireErr := s.acquireRetryAccount(ctx, waitCtx, p, maySwitch, excluded)

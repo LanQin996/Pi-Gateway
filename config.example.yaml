@@ -92,6 +92,14 @@ upstream:
   # native wire semantics. Env: PI_GATEWAY_UPSTREAM_CODEX_MULTI_AGENT_COMPAT.
   codex_multi_agent_compat: true
 
+  # Repair encrypted collaboration history: reuse same-key/session plaintext
+  # from a bounded process-local cache (4h, 2048 entries, 16MiB, 64KiB/item).
+  # Uncached completed calls keep their results and get an explicit unavailable
+  # message; unresolved encrypted calls and newly generated ciphertext fail closed.
+  # No reasoning/compaction ciphertext is modified. Set false for strict rejection.
+  # Env: PI_GATEWAY_UPSTREAM_CODEX_HISTORY_RECOVERY. Requires compat above.
+  codex_history_recovery: true
+
   # Compress SSE request bodies with zstd and send content-encoding: zstd. Off by
   # default: the ChatGPT route does not compress its request body.
   sse_zstd: false

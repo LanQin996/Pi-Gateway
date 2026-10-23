@@ -96,6 +96,8 @@ type UpstreamConfig struct {
 
 	// CodexMultiAgentCompat adapts recognized Codex collaboration messages and tools.
 	CodexMultiAgentCompat bool `yaml:"codex_multi_agent_compat"`
+	// CodexHistoryRecovery repairs replayed encrypted collaboration history only.
+	CodexHistoryRecovery bool `yaml:"codex_history_recovery"`
 
 	// SSEZstd compresses SSE request bodies with zstd and sets content-encoding: zstd.
 	// It is off by default: the ChatGPT route does not compress its request body.
@@ -215,6 +217,7 @@ func Default() *Config {
 			BaseURL:                        DefaultUpstreamBaseURL,
 			Transport:                      "sse",
 			CodexMultiAgentCompat:          true,
+			CodexHistoryRecovery:           true,
 			SSEZstd:                        false,
 			WebsocketPool:                  true,
 			WebsocketMaxBaselineBytes:      2 << 20,
@@ -337,6 +340,7 @@ func (c *Config) applyLimitEnv() error {
 		"PI_GATEWAY_REDIS_ENABLED":                     &c.Redis.Enabled,
 		"PI_GATEWAY_REDIS_TLS":                         &c.Redis.TLS,
 		"PI_GATEWAY_UPSTREAM_CODEX_MULTI_AGENT_COMPAT": &c.Upstream.CodexMultiAgentCompat,
+		"PI_GATEWAY_UPSTREAM_CODEX_HISTORY_RECOVERY":   &c.Upstream.CodexHistoryRecovery,
 	} {
 		if v, ok := os.LookupEnv(name); ok {
 			n, err := strconv.ParseBool(v)

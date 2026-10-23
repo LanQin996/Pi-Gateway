@@ -148,7 +148,13 @@ func (p *prepared) transformResponseEvent(ctx context.Context, event *upstream.E
 	if err != nil {
 		return nil, err
 	}
-	return p.restoreCodexEvent(transformed)
+	final, err := p.restoreCodexEvent(transformed)
+	// Aggregated responses still pass through response-body policy. Do not
+	// retain event arguments that a later body rule may redact or drop.
+	if err == nil && final != nil && p.WantsStream {
+		p.CodexRecovery.Remember(final.Data, p.CodexBridge, p.CodexRecoveryScope)
+	}
+	return final, err
 }
 
 func (p *prepared) applyResponseEventRules(ctx context.Context, event *upstream.Event) (*upstream.Event, error) {
@@ -195,7 +201,11 @@ func (p *prepared) transformResponseBody(ctx context.Context, body map[string]an
 	if err != nil {
 		return nil, err
 	}
-	return p.restoreCodexBody(transformed)
+	final, err := p.restoreCodexBody(transformed)
+	if err == nil {
+		p.CodexRecovery.Remember(final, p.CodexBridge, p.CodexRecoveryScope)
+	}
+	return final, err
 }
 
 func (p *prepared) applyResponseBodyRules(ctx context.Context, body map[string]any) (map[string]any, error) {

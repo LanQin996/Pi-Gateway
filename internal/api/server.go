@@ -37,18 +37,19 @@ const MaxClientBody = 64 << 20
 
 // Server serves the data plane.
 type Server struct {
-	cfg          *config.Config
-	store        *store.Store
-	accounts     *accounts.Manager
-	upstream     *upstream.Client
-	settings     *settings.Holder
-	limiter      *keylimit.Limiter
-	registry     map[string]middleware.Middleware
-	ruleService  *rulesruntime.Service
-	logger       *slog.Logger
-	wsMaxAge     time.Duration
-	lifecycle    wsLifecycle
-	catalogCache *modelCatalogCache
+	cfg           *config.Config
+	store         *store.Store
+	accounts      *accounts.Manager
+	upstream      *upstream.Client
+	settings      *settings.Holder
+	limiter       *keylimit.Limiter
+	registry      map[string]middleware.Middleware
+	ruleService   *rulesruntime.Service
+	logger        *slog.Logger
+	wsMaxAge      time.Duration
+	lifecycle     wsLifecycle
+	catalogCache  *modelCatalogCache
+	codexRecovery *codexbridge.Recovery
 }
 
 // Options configures the data-plane server.
@@ -77,17 +78,18 @@ func New(opts Options) *Server {
 		opts.WSConnectionMaxAge = time.Hour
 	}
 	return &Server{
-		cfg:          opts.Config,
-		store:        opts.Store,
-		accounts:     opts.Accounts,
-		upstream:     opts.Upstream,
-		settings:     opts.Settings,
-		limiter:      keylimit.NewLimiter(opts.Store),
-		registry:     middleware.Registry(),
-		ruleService:  rulesruntime.New(opts.Store),
-		logger:       logger,
-		wsMaxAge:     opts.WSConnectionMaxAge,
-		catalogCache: newModelCatalogCache(opts.CatalogCache, opts.CatalogTTL, opts.CatalogTimeout, logger),
+		cfg:           opts.Config,
+		store:         opts.Store,
+		accounts:      opts.Accounts,
+		upstream:      opts.Upstream,
+		settings:      opts.Settings,
+		limiter:       keylimit.NewLimiter(opts.Store),
+		registry:      middleware.Registry(),
+		ruleService:   rulesruntime.New(opts.Store),
+		logger:        logger,
+		wsMaxAge:      opts.WSConnectionMaxAge,
+		catalogCache:  newModelCatalogCache(opts.CatalogCache, opts.CatalogTTL, opts.CatalogTimeout, logger),
+		codexRecovery: codexbridge.NewRecovery(),
 	}
 }
 
@@ -133,7 +135,9 @@ type prepared struct {
 	PreviousResponseID string
 	Continuation       *session.Record
 	CodexBridge        codexbridge.Profile // Bounded protocol metadata; never task content.
-	ResponseHeaders    http.Header         // Safe upstream retry metadata, independent of capture.
+	CodexRecovery      *codexbridge.Recovery
+	CodexRecoveryScope string
+	ResponseHeaders    http.Header // Safe upstream retry metadata, independent of capture.
 	Transport          string
 	Recorder           *capture.Recorder
 	// Usage is the billing/statistics ledger entry; it is recorded even when

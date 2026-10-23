@@ -264,6 +264,15 @@ curl -N http://127.0.0.1:8317/v1/responses \
 网关还提供 `/backend-api/codex/responses`、`/codex/responses` 的 HTTP / WebSocket 兼容别名，以及 HTTP `POST /responses`
 。根据客户端实际追加的路径选择 Base URL，避免重复拼接 `/v1` 或 `/responses`。这些别名**不会改变上游凭据类型或生成端点**。
 
+Codex 多代理兼容默认开启。`upstream.codex_history_recovery` 默认启用旧加密历史自动恢复：
+优先使用同一 API Key、显式会话标识、工具调用 ID 和接收方对应的短期明文缓存；
+缓存仅驻留当前进程，最多 2048 条 / 16 MiB，单条最多 64 KiB，4 小时有效，重启即清空。
+没有显式会话标识时不跨请求缓存。无缓存的已配对历史调用保留原有结果，仅将密文消息标记为
+“历史内容不可用”；加密代理消息保留可见文本并增加相同提示，不会伪装成已解密。
+未完成且无法恢复的加密调用、格式错误以及新生成的加密调用仍拒绝；不会重放历史操作，
+也不会修改 reasoning / compaction 密文。恢复次数写入捕获记录的协议追踪，不新增正文日志。
+可设置 `PI_GATEWAY_UPSTREAM_CODEX_HISTORY_RECOVERY=false` 回退到原来的严格拒绝行为。
+
 仅支持 Chat Completions 的客户端也可使用相同 Base URL 和网关 Key：
 
 ```bash
